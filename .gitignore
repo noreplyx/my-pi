@@ -1,0 +1,27 @@
+# Secrets — NEVER commit API keys / credentials
+auth.json
+
+# Installed binaries & releases (~148MB, reproducible via installer)
+install/
+bin/
+
+# Session transcripts (conversation history, may contain sensitive data)
+sessions/
+
+# Local caches (machine-specific, auto-regenerated)
+models-store.json
+
+# OS noise
+.DS_Store
+Thumbs.db
+*~
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs & temp files
+*.log
+*.tmp
