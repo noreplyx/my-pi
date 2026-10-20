@@ -39,7 +39,7 @@ async function audit(action: string, toolName: string, target: string, extra = "
 	}
 }
 
-function preview(s: string, max = 300): string {
+function preview(s: string, max = 120): string {
 	const oneLine = s.replace(/\s+/g, " ").trim() || "(no args)";
 	return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
@@ -180,7 +180,10 @@ export default function (pi: ExtensionAPI) {
 		// on user decisions, so "what did the dialog show?" is answerable
 		// from the log alone.
 		const summary = describeCall(event.toolName, input, ctx.cwd);
-		const dialogTitle = `Allow ${summary}?`;
+		// describeCall already caps bash at ~120 chars; this is a second
+		// guard so future tool summaries can never blow up the dialog title.
+		const shortSummary = summary.length > 140 ? `${summary.slice(0, 139)}…` : summary;
+		const dialogTitle = `Allow ${shortSummary}?`;
 		let choice: string | undefined;
 		try {
 			choice = await ctx.ui.select(dialogTitle, [...SESSION_CHOICES], {

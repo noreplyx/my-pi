@@ -35,11 +35,12 @@ Enforces granular `allow | ask | deny` on every tool call via `tool_call`.
   **Allow for this session** (remembers until the session ends), **Deny**
   (blocks this call; dismissing the dialog also denies). Every dialog title
   shows a one-line summary — `<action> <path>` with cwd-relative paths
-  (`Allow write src/foo.txt?`), the full command for `bash`,
+  (`Allow write src/foo.txt?`), short `bash` commands in full
+  (long multi-step lines collapse to `first-step … (+N more)`),
   `grep <path> "<pattern>"` for searches, `subagent <agent>
   "<task…>"` (or `chain (n steps)` / `parallel (n tasks)`) for
-  subagents, and `key=value` pairs for anything else. Home directories
-  shorten to `~` (display only). Full targets stay in the audit log and
+  subagents, and `key=value` pairs for anything else. Titles are capped
+  (~140 chars). Home directories shorten to `~` (display only). Full targets stay in the audit log and
   `/permissions-check`, and the shown title is audit-logged on every
   user decision. For file tools
   (`read`/`write`/`edit`/`ls`/`find`/`grep`) one session approval covers

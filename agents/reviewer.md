@@ -10,7 +10,7 @@ permissions:
       match: "re:[;&|$`<>\\n]"
       action: deny
     - tool: bash
-      match: "re:^\\s*git\\s+(status|diff|log|branch)\\b[^;&|$`<>\\n]*$"
+      match: "re:^\\s*git\\s+(status|diff|log|branch|remote|show|rev-parse)\\b[^;&|$`<>\\n]*$"
       action: allow
     - tool: ls
       action: allow

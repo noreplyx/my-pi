@@ -298,6 +298,25 @@ export function shortPath(raw: string, cwd: string): string {
 }
 
 /**
+ * Human-friendly one-line summary for a bash command.
+ * Short commands pass through untouched (readable as-is). Long or
+ * multi-step commands collapse to `first-step … (+N steps)` so the
+ * permission dialog title stays scannable instead of dumping a 300-char
+ * shell line. Pure — safe to unit-test without `pi`.
+ */
+function summarizeBash(cmd: string): string {
+	const MAX_SINGLE = 100;
+	if (cmd.length <= MAX_SINGLE) return cmd;
+	const parts = cmd
+		.split(/\s*(?:;|&&|\|\||\||\n)\s*/)
+		.map((p) => p.trim())
+		.filter(Boolean);
+	if (parts.length <= 1) return truncate(cmd, MAX_SINGLE);
+	const first = truncate(parts[0], 60);
+	return `${first}… (+${parts.length - 1} more)`;
+}
+
+/**
  * One-line human summary for the permission prompt, in the form
  * `<action> <file path (never absolute when inside cwd)>`:
  * `write src/foo.txt`, `grep src "TODO"`, `bash npm test`,
@@ -324,7 +343,10 @@ export function describeCall(toolName: string, input: Record<string, unknown>, c
 	}
 	if (lower === "bash" || lower === "powershell") {
 		const cmd = oneLine(asString(input.command) ?? "");
-		return cmd ? `${toolName} ${shortenHomeInText(cmd)}` : `${toolName} (no command)`;
+		if (!cmd) return `${toolName} (no command)`;
+		// Human-readable: collapse long multi-step lines, shorten ~,
+		// cap the whole summary so dialog titles stay one scannable line.
+		return truncate(`${toolName} ${summarizeBash(shortenHomeInText(cmd))}`, 120);
 	}
 	if (lower === "subagent") {
 		return `${toolName} ${describeSubagent(input)}`;

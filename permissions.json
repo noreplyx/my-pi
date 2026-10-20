@@ -9,8 +9,13 @@
     // Anchored + metachar-excluding so `git status; evil` / `echo hi && evil`
     // fall through to ask instead of matching. Destructive floor below stays
     // as backstop for anything that slips through.
-    { "tool": "bash", "match": "re:^\\s*git\\s+(status|diff|log|branch)\\b[^;&|$`<>\\n]*$", "action": "allow" },
-    { "tool": "bash", "match": "re:^\\s*(ls|pwd|echo|true|which|whoami)\\b[^;&|$`<>\\n]*$", "action": "allow" },
+    { "tool": "bash", "match": "re:^\\s*git\\s+(status|diff|log|branch|remote|show|rev-parse)\\b[^;&|$`<>\\n]*$", "action": "allow" },
+    { "tool": "bash", "match": "re:^\\s*(ls|pwd|echo|true|which|whoami|cat|head|tail|wc|sort|uniq|basename|dirname|realpath|test)\\b[^;&|$`<>\\n]*$", "action": "allow" },
+    // Safe pipe: read-only producer piped into a pager/filter (ls | head,
+    // git log | grep, cat | wc). Still blocks ; & $ ` < > and newlines,
+    // so `ls | evil` or `ls | head; evil` falls through to ask.
+
+    { "tool": "bash", "match": "re:^\\s*(ls|cat|head|tail|git\\s+(status|diff|log|branch|remote|show))\\b[^;&$`<>\\n]*\\|\\s*(head|tail|wc|grep|sort|uniq)[^;&$`<>\\n]*$", "action": "allow" },
 
     // --- destructive bash: deny outright ---
     // rm: lookahead form covers split flags (rm -R -f, rm -fr) + long flags below.
@@ -27,7 +32,11 @@
     { "tool": "read", "match": ["**/.env*", "**/auth.json", "**/credentials*.json", "**/*token*.json"], "action": "deny" },
     { "tool": "read", "match": ["**/secrets/**", "**/.ssh/*", "**/*.pem", "**/*.key"], "action": "deny" },
 
-    // --- writes/edits: ask (kept as ask, not deny, so secret rotation still works with approval) ---
+    // --- safe read-only tools: allow without prompting (secret denies above still win) ---
+    { "tool": "read", "match": "**", "action": "allow" },
+    { "tool": "ls", "action": "allow" },
+    { "tool": "grep", "action": "allow" },
+    { "tool": "find", "action": "allow" },
 
     // --- writes/edits default to ask (no match = all calls) ---
     { "tool": "write", "action": "ask" },
