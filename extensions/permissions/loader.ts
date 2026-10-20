@@ -12,6 +12,7 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { matchTargets, matchToolName, hasInvalidRegex } from "./matcher.ts";
@@ -277,6 +278,159 @@ export function buildTargets(toolName: string, input: Record<string, unknown>, c
 	} catch {
 		return [String(input)];
 	}
+}
+
+/**
+ * Short display path for prompts: cwd-relative when the target lives inside
+ * cwd, otherwise the full absolute path (never hide where it points).
+ */
+export function shortPath(raw: string, cwd: string): string {
+	if (!raw) return "";
+	try {
+		const abs = path.resolve(cwd, raw);
+		const rel = path.relative(cwd, abs);
+		if (!rel) return "."; // the cwd itself
+		if (rel !== ".." && !rel.startsWith(`..${path.sep}`)) return rel;
+		return abs;
+	} catch {
+		return raw;
+	}
+}
+
+/**
+ * One-line human summary for the permission prompt, in the form
+ * `<action> <file path (never absolute when inside cwd)>`:
+ * `write src/foo.txt`, `grep src "TODO"`, `bash npm test`,
+ * `subagent general "List files in ~/.pi/agent…"`.
+ * File tools show the (possibly relative) path; find/grep append the
+ * pattern when present; bash shows the full command; subagent shows the
+ * agent plus a task snippet (or chain/parallel shape); anything else shows
+ * compact `key=value` pairs. Home directories shorten to `~` (display
+ * only — matching and audit keep absolute paths). Pure — safe to
+ * unit-test without `pi`.
+ */
+export function describeCall(toolName: string, input: Record<string, unknown>, cwd: string): string {
+	const lower = toolName.toLowerCase();
+	if (["read", "write", "edit", "ls"].includes(lower)) {
+		const raw = pickPath(input) ?? (lower === "ls" ? "." : "");
+		const short = shortPath(raw, cwd);
+		return short ? `${toolName} ${shortenHome(short)}` : `${toolName} (no path)`;
+	}
+	if (lower === "find" || lower === "grep") {
+		const p = pickPath(input) ?? ".";
+		const pattern = oneLine(asString(input.pattern) ?? "");
+		const base = `${toolName} ${shortenHome(shortPath(p, cwd))}`;
+		return pattern ? `${base} "${truncate(pattern, 60)}"` : base;
+	}
+	if (lower === "bash" || lower === "powershell") {
+		const cmd = oneLine(asString(input.command) ?? "");
+		return cmd ? `${toolName} ${shortenHomeInText(cmd)}` : `${toolName} (no command)`;
+	}
+	if (lower === "subagent") {
+		return `${toolName} ${describeSubagent(input)}`;
+	}
+	return `${toolName} ${compactArgs(input)}`;
+}
+
+/** Collapse whitespace/newlines to single spaces for one-line display. */
+function oneLine(s: string): string {
+	return s.replace(/\s+/g, " ").trim();
+}
+
+/** Truncate to max chars with an ellipsis. */
+function truncate(s: string, max: number): string {
+	return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/** Shorten a leading home directory to `~` (display only, like pi core). */
+export function shortenHome(p: string): string {
+	const home = os.homedir();
+	if (!home || home === path.sep) return p;
+	if (p === home) return "~";
+	if (p.startsWith(home + path.sep)) return `~${p.slice(home.length)}`;
+	return p;
+}
+
+/** Replace every home-dir occurrence with `~` (display only). */
+function shortenHomeInText(s: string): string {
+	const home = os.homedir();
+	if (!home || home === path.sep) return s;
+	return s.split(home).join("~");
+}
+
+/** `agent "task snippet"` for one subagent item (single task or chain/parallel step). */
+function describeSubagentItem(item: unknown): string {
+	if (typeof item !== "object" || item === null) return "";
+	const o = item as Record<string, unknown>;
+	const agent = asString(o.agent) ?? "";
+	const task = oneLine(asString(o.task) ?? "");
+	if (agent && task) return `${agent} "${truncate(shortenHomeInText(task), 60)}"`;
+	if (agent) return agent;
+	if (task) return `"${truncate(shortenHomeInText(task), 60)}"`;
+	return "";
+}
+
+/** Human shape for subagent calls: single, chain, or parallel. */
+function describeSubagent(input: Record<string, unknown>): string {
+	const chain = input.chain;
+	const tasks = input.tasks;
+	if (Array.isArray(chain) && chain.length > 0) {
+		return `chain (${chain.length} step${chain.length === 1 ? "" : "s"}): ${describeSubagentItem(chain[0])}`;
+	}
+	if (Array.isArray(tasks) && tasks.length > 0) {
+		return `parallel (${tasks.length} task${tasks.length === 1 ? "" : "s"}): ${describeSubagentItem(tasks[0])}`;
+	}
+	return describeSubagentItem(input) || "(no details)";
+}
+
+/** Compact `key=value` pairs (transcript-row convention), one line, capped. */
+function compactArgs(input: Record<string, unknown>): string {
+	const pairs = Object.entries(input).map(([k, v]) => {
+		const rendered = typeof v === "string" ? JSON.stringify(oneLine(v)) : (JSON.stringify(v) ?? String(v));
+		return `${k}=${rendered}`;
+	});
+	return truncate(pairs.join(" ") || "(no args)", 100);
+}
+
+/** Absolute, trailing-separator-free path form (filesystem root stays "/"). */
+export function normalizeDir(p: string): string {
+	const norm = path.normalize(p);
+	if (norm.length > 1 && norm.endsWith(path.sep)) return norm.slice(0, -path.sep.length);
+	return norm;
+}
+
+/**
+ * Absolute file path for a tool call, for directory-grant matching.
+ * File tools only; null for bash/non-path tools or when no path is present.
+ * Uses the path part of the input (not the `path:pattern` display target).
+ */
+export function resolveGrantPath(toolName: string, input: Record<string, unknown>, cwd: string): string | null {
+	if (!isPathTool(toolName)) return null;
+	const raw = pickPath(input);
+	if (!raw) return null;
+	try {
+		return normalizeDir(path.resolve(cwd, raw));
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Absolute directory a session grant should cover for this tool call.
+ * File tools only; null for bash/non-path tools or when no path is present.
+ * An existing directory target grants itself (e.g. `ls` of that dir);
+ * anything else (existing file, not-yet-created path) grants its parent.
+ * Never throws — falls back to the parent directory when stat fails.
+ */
+export function resolveGrantDir(toolName: string, input: Record<string, unknown>, cwd: string): string | null {
+	const p = resolveGrantPath(toolName, input, cwd);
+	if (!p) return null;
+	try {
+		if (fs.statSync(p).isDirectory()) return normalizeDir(p);
+	} catch {
+		// Nonexistent path (e.g. file to be created) — treat as a file.
+	}
+	return path.dirname(p);
 }
 
 // ---------------------------------------------------------------------------

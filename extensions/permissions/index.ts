@@ -17,8 +17,9 @@
 
 import * as path from "node:path";
 import { getAgentDir, withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { buildTargets, describeStatus, evaluate, getGlobalPermissionsPath, loadAllAgentFiles, loadGlobal, reloadAll } from "./loader.ts";
+import { buildTargets, describeCall, describeStatus, evaluate, getGlobalPermissionsPath, loadAllAgentFiles, loadGlobal, reloadAll, resolveGrantDir, resolveGrantPath } from "./loader.ts";
 import { matchToolName } from "./matcher.ts";
+import { createSessionGrants, SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICES } from "./session-grants.ts";
 import { collectDiagnostics, formatStartupReport, type Diagnostic, type FileReport } from "./validate.ts";
 
 function auditPath(): string {
@@ -86,6 +87,14 @@ export default function (pi: ExtensionAPI) {
 	// as its pattern matches an actually-invoked tool. Bounded: tool names are few
 	// (plus a hard cap for pathological cases).
 	const seenTools = new Set<string>();
+
+	// Session-scoped "Allow for this session" grants. File tools grant the
+	// whole directory (recursive down, never up); other tools grant the exact
+	// tool + target pair. In-memory only — never persisted to
+	// permissions.json, cleared on session shutdown (idempotent) so a new
+	// session starts clean. A new extension runtime (reload/replacement)
+	// also starts with an empty store by construction.
+	const sessionGrants = createSessionGrants();
 	function withoutRetracted(diags: Diagnostic[]): Diagnostic[] {
 		if (seenTools.size === 0) return diags;
 		return diags.filter((d) => {
@@ -119,6 +128,12 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// Session grants die with the session. Idempotent — shutdown can fire via
+	// cancellation, reload, replacement, and process exit converging.
+	pi.on("session_shutdown", async () => {
+		sessionGrants.clear();
+	});
+
 	pi.on("tool_call", async (event, ctx) => {
 		if (seenTools.size < 1000) seenTools.add(event.toolName);
 		const input = (event.input ?? {}) as Record<string, unknown>;
@@ -140,17 +155,65 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// action === "ask"
+		// 1. Session grant hit — exact tool + target, or (file tools) a
+		//    directory grant covering this call's directory (recursive down,
+		//    never up: a child grant does not cover the parent).
+		if (sessionGrants.has(event.toolName, result.target)) {
+			void audit("allow", event.toolName, result.target, `via=${where} session-grant`);
+			return undefined;
+		}
+		const grantPath = resolveGrantPath(event.toolName, input, ctx.cwd);
+		if (grantPath && sessionGrants.hasDirectory(event.toolName, grantPath)) {
+			void audit("allow", event.toolName, result.target, `via=${where} session-grant-dir`);
+			return undefined;
+		}
 		if (!ctx.hasUI) {
 			void audit("deny", event.toolName, result.target, `via=${where} ask-without-ui`);
 			return { block: true, reason: `Blocked by permissions (${where}, no UI to confirm): ${label}` };
 		}
-		const ok = await ctx.ui.confirm(
-			"Allow tool call?",
-			`${label}\n\nMatched ${where}${result.rule ? ` — tool="${result.rule.tool}" match=${JSON.stringify(result.rule.match ?? "(any)")}` : ""}\nConfig: ${getGlobalPermissionsPath()}`,
-		);
-		void audit(ok ? "allow" : "deny", event.toolName, result.target, `via=${where} user-confirm`);
-		if (!ok) return { block: true, reason: `Denied by user (${where}): ${label}` };
-		return undefined;
+		const message =
+			`${label}\n\nMatched ${where}${result.rule ? ` — tool="${result.rule.tool}" match=${JSON.stringify(result.rule.match ?? "(any)")}` : ""}\nConfig: ${getGlobalPermissionsPath()}`;
+		// select() has no body slot — the summary (`write src/foo.txt`)
+		// goes into the dialog title so every choice carries context.
+		// The same title is used for the confirm fallback, so no dialog
+		// path ever shows a generic title. The title is also audit-logged
+		// on user decisions, so "what did the dialog show?" is answerable
+		// from the log alone.
+		const summary = describeCall(event.toolName, input, ctx.cwd);
+		const dialogTitle = `Allow ${summary}?`;
+		let choice: string | undefined;
+		try {
+			choice = await ctx.ui.select(dialogTitle, [...SESSION_CHOICES], {
+				...(ctx.signal ? { signal: ctx.signal } : {}),
+			});
+		} catch {
+			// select() unavailable on this client (e.g. older RPC) — fall back
+			// to the legacy binary confirm rather than failing open.
+			const ok = await ctx.ui.confirm(dialogTitle, message);
+			void audit(ok ? "allow" : "deny", event.toolName, result.target, `via=${where} user-confirm title=${JSON.stringify(dialogTitle)}`);
+			if (!ok) return { block: true, reason: `Denied by user (${where}): ${label}` };
+			return undefined;
+		}
+		if (choice === SESSION_CHOICE_SESSION) {
+			// File tools: one approval covers the whole directory for the
+			// session (recursive down). Anything else: exact target only.
+			const dir = resolveGrantDir(event.toolName, input, ctx.cwd);
+			if (dir) {
+				sessionGrants.addDirectory(event.toolName, dir, where);
+				void audit("allow", event.toolName, result.target, `via=${where} user-allow-session dir=${dir} title=${JSON.stringify(dialogTitle)}`);
+			} else {
+				sessionGrants.add(event.toolName, result.target, where);
+				void audit("allow", event.toolName, result.target, `via=${where} user-allow-session title=${JSON.stringify(dialogTitle)}`);
+			}
+			return undefined;
+		}
+		if (choice === SESSION_CHOICE_ONCE) {
+			void audit("allow", event.toolName, result.target, `via=${where} user-allow-once title=${JSON.stringify(dialogTitle)}`);
+			return undefined;
+		}
+		// SESSION_CHOICE_DENY or undefined (dismissed/escape) — fail closed.
+		void audit("deny", event.toolName, result.target, `via=${where} user-deny title=${JSON.stringify(dialogTitle)}`);
+		return { block: true, reason: `Denied by user (${where}): ${label}` };
 	});
 
 	pi.registerCommand("permissions-status", {
@@ -170,6 +233,16 @@ export default function (pi: ExtensionAPI) {
 				for (const d of diags.slice(0, 20)) lines.push(`${d.severity}  ${d.location}: ${d.message}`);
 				if (diags.length > 20) lines.push(`…and ${diags.length - 20} more`);
 			}
+			const grants = sessionGrants.list();
+			lines.push(`--- session grants (${grants.length}) ---`);
+			for (const g of grants.slice(0, 20)) {
+				lines.push(
+					g.scope === "directory"
+						? `allow  ${g.tool} ${preview(g.target, 120)}/ (recursive, ${g.where})`
+						: `allow  ${g.tool} ${preview(g.target, 120)} (${g.where})`,
+				);
+			}
+			if (grants.length > 20) lines.push(`…and ${grants.length - 20} more (use /permissions-clear-session to revoke)`);
 			ctx.ui.notify(lines.join("\n"), diags.some((d) => d.severity === "error") ? "error" : "info");
 		},
 	});
@@ -211,6 +284,14 @@ export default function (pi: ExtensionAPI) {
 				].join("\n"),
 				"info",
 			);
+		},
+	});
+
+	pi.registerCommand("permissions-clear-session", {
+		description: "Revoke all 'Allow for this session' grants (prompts will ask again)",
+		handler: async (_args, ctx) => {
+			const n = sessionGrants.clear();
+			ctx.ui.notify(n === 0 ? "No session grants to clear." : `Cleared ${n} session grant${n === 1 ? "" : "s"}. Future calls will prompt again.`, "info");
 		},
 	});
 

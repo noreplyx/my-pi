@@ -30,7 +30,24 @@ Enforces granular `allow | ask | deny` on every tool call via `tool_call`.
     flags and no regex syntax is treated as a path, not a regex
     (`/foo/bar/` stays a path).
   - plain text → substring (`npm publish`)
-- `action`: `allow` (silent), `ask` (confirm; denied when no UI), `deny` (block).
+- `action`: `allow` (silent), `ask` (prompt; denied when no UI), `deny` (block).
+- `ask` prompts with three choices: **Allow once** (single call),
+  **Allow for this session** (remembers until the session ends), **Deny**
+  (blocks this call; dismissing the dialog also denies). Every dialog title
+  shows a one-line summary — `<action> <path>` with cwd-relative paths
+  (`Allow write src/foo.txt?`), the full command for `bash`,
+  `grep <path> "<pattern>"` for searches, `subagent <agent>
+  "<task…>"` (or `chain (n steps)` / `parallel (n tasks)`) for
+  subagents, and `key=value` pairs for anything else. Home directories
+  shorten to `~` (display only). Full targets stay in the audit log and
+  `/permissions-check`, and the shown title is audit-logged on every
+  user decision. For file tools
+  (`read`/`write`/`edit`/`ls`/`find`/`grep`) one session approval covers
+  the whole directory — sibling files and subdirectories (recursive down,
+  never up: a grant on a child never covers its parent). `bash` and other
+  tools remember the exact call only. Session grants are in-memory only —
+  never written to `permissions.json` — and are cleared on session
+  shutdown/reload.
 
 Targets: `bash`/`powershell` → `command`; `read`/`write`/`edit`/`ls` → path
 (abs + cwd-relative both tried); `find`/`grep` → `path:pattern` + each part;
@@ -72,9 +89,14 @@ Agent identity reaches child `pi` processes via `PI_AGENT_NAME`/`PI_AGENT_FILE`
 
 ## Commands
 
-- `/permissions-status` — layers, rule counts, validation diagnostics, config errors
+- `/permissions-status` — layers, rule counts, validation diagnostics, config errors, active session grants
 - `/permissions-check <tool> [json-args|key=value]` — dry-run one call
+- `/permissions-clear-session` — revoke all "Allow for this session" grants (prompts will ask again)
 - `/permissions-reload` — re-read configs (also auto-reloads on mtime change)
+
+> Tip: run one command per `bash` tool call so safe-allows (`git status`, `ls`, …)
+> match silently. Chained commands (`;`, `&&`, `||`, pipes) intentionally fall
+> through to `ask` — that is the chaining guard working, not a bug.
 
 ## Startup validation
 
