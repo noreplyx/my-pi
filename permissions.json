@@ -3,40 +3,22 @@
   // but global `deny` rules form a safety floor nothing can override (see extensions/permissions/README.md).
   // Rule: { "tool": "<name|glob>", "match": "<glob|re:regex|/regex/flags|substring>", "action": "allow|ask|deny" }
   // Omit "match" to match all calls of that tool.
-  "defaultAction": "ask",
+  "defaultAction": "allow",
   "rules": [
-    // --- safe read-only bash: allow without prompting ---
-    // Anchored + metachar-excluding so `git status; evil` / `echo hi && evil`
-    // fall through to ask instead of matching. Destructive floor below stays
-    // as backstop for anything that slips through.
-    { "tool": "bash", "match": "re:^\\s*git\\s+(status|diff|log|branch|remote|show|rev-parse)\\b[^;&|$`<>\\n]*$", "action": "allow" },
-    { "tool": "bash", "match": "re:^\\s*(ls|pwd|echo|true|which|whoami|cat|head|tail|wc|sort|uniq|basename|dirname|realpath|test)\\b[^;&|$`<>\\n]*$", "action": "allow" },
-    // Safe pipe: read-only producer piped into a pager/filter (ls | head,
-    // git log | grep, cat | wc). Still blocks ; & $ ` < > and newlines,
-    // so `ls | evil` or `ls | head; evil` falls through to ask.
-
-    { "tool": "bash", "match": "re:^\\s*(ls|cat|head|tail|git\\s+(status|diff|log|branch|remote|show))\\b[^;&$`<>\\n]*\\|\\s*(head|tail|wc|grep|sort|uniq)[^;&$`<>\\n]*$", "action": "allow" },
-
     // --- destructive bash: deny outright ---
     // rm: lookahead form covers split flags (rm -R -f, rm -fr) + long flags below.
-    // Plain `rm file` still falls through to ask — only recursive+force is floored.
+    // Plain `rm file` now falls through to default allow — only recursive+force is floored.
     { "tool": "bash", "match": ["re:\\brm\\s+(?=.*-[a-zA-Z]*[rR])(?=.*-[a-zA-Z]*[fF])", "re:\\brm\\s+.*--(recursive|force)"], "action": "deny" },
     { "tool": "bash", "match": "re:\\bsudo\\b", "action": "deny" },
     { "tool": "bash", "match": "*chmod*777*", "action": "deny" },
     { "tool": "bash", "match": "*npm publish*", "action": "deny" },
     { "tool": "bash", "match": "re:git\\s+push.*(--force|\\s-[a-z]*f)", "action": "deny" },
     // NOTE: dd/mkfs/chown/curl|sh not in the deny floor by design —
-    // defaultAction ask covers them. Only promote to deny on evidence from audit.log.
+    // defaultAction allow now covers them. Only promote to deny on evidence from audit.log.
 
-    // --- file reads: deny secrets (other reads fall through to default ask) ---
+    // --- file reads: deny secrets (other reads fall through to default allow) ---
     { "tool": "read", "match": ["**/.env*", "**/auth.json", "**/credentials*.json", "**/*token*.json"], "action": "deny" },
     { "tool": "read", "match": ["**/secrets/**", "**/.ssh/*", "**/*.pem", "**/*.key"], "action": "deny" },
-
-    // --- safe read-only tools: allow without prompting (secret denies above still win) ---
-    { "tool": "read", "match": "**", "action": "allow" },
-    { "tool": "ls", "action": "allow" },
-    { "tool": "grep", "action": "allow" },
-    { "tool": "find", "action": "allow" },
 
     // --- writes/edits default to ask (no match = all calls) ---
     { "tool": "write", "action": "ask" },
