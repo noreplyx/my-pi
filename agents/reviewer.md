@@ -19,7 +19,7 @@ permissions:
     - tool: find
       action: allow
     - tool: read
-      match: "**/.env*"
+      match: ["**/.env*", "**/auth.json", "**/credentials*.json", "**/*token*.json", "**/secrets/**", "**/.ssh/*", "**/*.pem", "**/*.key"]
       action: deny
     - tool: read
       match: "**"

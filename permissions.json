@@ -13,16 +13,21 @@
     { "tool": "bash", "match": "re:^\\s*(ls|pwd|echo|true|which|whoami)\\b[^;&|$`<>\\n]*$", "action": "allow" },
 
     // --- destructive bash: deny outright ---
-    { "tool": "bash", "match": "*rm -rf*", "action": "deny" },
+    // rm: lookahead form covers split flags (rm -R -f, rm -fr) + long flags below.
+    // Plain `rm file` still falls through to ask — only recursive+force is floored.
+    { "tool": "bash", "match": ["re:\\brm\\s+(?=.*-[a-zA-Z]*[rR])(?=.*-[a-zA-Z]*[fF])", "re:\\brm\\s+.*--(recursive|force)"], "action": "deny" },
     { "tool": "bash", "match": "re:\\bsudo\\b", "action": "deny" },
     { "tool": "bash", "match": "*chmod*777*", "action": "deny" },
     { "tool": "bash", "match": "*npm publish*", "action": "deny" },
-    { "tool": "bash", "match": "re:git\\s+push.*--force", "action": "deny" },
+    { "tool": "bash", "match": "re:git\\s+push.*(--force|\\s-[a-z]*f)", "action": "deny" },
+    // NOTE: dd/mkfs/chown/curl|sh not in the deny floor by design —
+    // defaultAction ask covers them. Only promote to deny on evidence from audit.log.
 
     // --- file reads: deny secrets (other reads fall through to default ask) ---
-    { "tool": "read", "match": "**/.env*", "action": "deny" },
-    { "tool": "read", "match": "**/secrets/**", "action": "deny" },
-    { "tool": "read", "match": "**/.ssh/*", "action": "deny" },
+    { "tool": "read", "match": ["**/.env*", "**/auth.json", "**/credentials*.json", "**/*token*.json"], "action": "deny" },
+    { "tool": "read", "match": ["**/secrets/**", "**/.ssh/*", "**/*.pem", "**/*.key"], "action": "deny" },
+
+    // --- writes/edits: ask (kept as ask, not deny, so secret rotation still works with approval) ---
 
     // --- writes/edits default to ask (no match = all calls) ---
     { "tool": "write", "action": "ask" },
