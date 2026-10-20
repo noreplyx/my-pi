@@ -5,20 +5,56 @@
   // Omit "match" to match all calls of that tool.
   "defaultAction": "allow",
   "rules": [
-    // --- destructive bash: deny outright ---
-    // rm: lookahead form covers split flags (rm -R -f, rm -fr) + long flags below.
-    // Plain `rm file` now falls through to default allow — only recursive+force is floored.
-    { "tool": "bash", "match": ["re:\\brm\\s+(?=.*-[a-zA-Z]*[rR])(?=.*-[a-zA-Z]*[fF])", "re:\\brm\\s+.*--(recursive|force)"], "action": "deny" },
-    { "tool": "bash", "match": "re:\\bsudo\\b", "action": "deny" },
-    { "tool": "bash", "match": "*chmod*777*", "action": "deny" },
-    { "tool": "bash", "match": "*npm publish*", "action": "deny" },
-    { "tool": "bash", "match": "re:git\\s+push.*(--force|\\s-[a-z]*f)", "action": "deny" },
-    // NOTE: dd/mkfs/chown/curl|sh not in the deny floor by design —
-    // defaultAction allow now covers them. Only promote to deny on evidence from audit.log.
+    // --- destructive FS: deny outright (bash + powershell twins) ---
+    // rm: any recursive (-r/-R/--recursive) is floored; plain `rm file` still allows.
+    { "tool": "bash", "match": ["re:\\brm\\s+(?=.*-[a-zA-Z]*[rR]|.*--recursive)", "re:\\brm\\s+.*--(recursive|force)"], "action": "deny" },
+    { "tool": "powershell", "match": ["re:\\brm\\s+(?=.*-[a-zA-Z]*[rR]|.*--recursive)", "re:\\brm\\s+.*--(recursive|force)"], "action": "deny" },
+    { "tool": "bash", "match": "re:\\b(rmdir|unlink|shred|truncate)\\b", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\b(rmdir|unlink|shred|truncate)\\b", "action": "deny" },
+    { "tool": "bash", "match": "re:\\bfind\\b.*-delete\\b", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\bfind\\b.*-delete\\b", "action": "deny" },
+    { "tool": "bash", "match": "re:\\b(tee|dd|mkfs(\\.\\w+)?|fdisk|parted)\\b", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\b(tee|dd|mkfs(\\.\\w+)?|fdisk|parted)\\b", "action": "deny" },
+    { "tool": "bash", "match": "re:\\bgit\\s+(clean|reset\\s+--hard|checkout\\s+--|stash\\s+(clear|drop)|branch\\s+-[dD]\\b)", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\bgit\\s+(clean|reset\\s+--hard|checkout\\s+--|stash\\s+(clear|drop)|branch\\s+-[dD]\\b)", "action": "deny" },
+    // git push: --force* / -f / +refspec force-push
+    { "tool": "bash", "match": "re:\\bgit\\s+push.*(--force|\\s-[a-z]*f|\\+[A-Za-z0-9_.\\-]+:)", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\bgit\\s+push.*(--force|\\s-[a-z]*f|\\+[A-Za-z0-9_.\\-]+:)", "action": "deny" },
+    // interpreter wipe / recursive delete via code
+    { "tool": "bash", "match": "re:\\b(python3?|node|bun|deno|perl|ruby|php)\\b\\s+-[ce]", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\b(python3?|node|bun|deno|perl|ruby|php)\\b\\s+-[ce]", "action": "deny" },
+    { "tool": "bash", "match": "re:\\b(shutil\\.rmtree|fs\\.rmSync|os\\.remove|unlinkSync)\\b", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\b(shutil\\.rmtree|fs\\.rmSync|os\\.remove|unlinkSync)\\b", "action": "deny" },
+
+    // --- privilege / ownership: deny ---
+    { "tool": "bash", "match": "re:\\b(sudo|su|doas|runuser|pkexec|runas)\\b", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\b(sudo|su|doas|runuser|pkexec|runas)\\b", "action": "deny" },
+    { "tool": "bash", "match": "re:\\bchmod\\b.*(777|[uchoa]*\\+s|u=rwx.*g=rwx.*o=rwx)", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\bchmod\\b.*(777|[uchoa]*\\+s|u=rwx.*g=rwx.*o=rwx)", "action": "deny" },
+    { "tool": "bash", "match": "re:\\b(chown|chgrp|setfacl|icacls)\\b", "action": "deny" },
+    { "tool": "powershell", "match": "re:\\b(chown|chgrp|setfacl|icacls)\\b", "action": "deny" },
+
+    // --- secrets via shell: deny (read-tool deny alone is bypassed by `cat .env`) ---
+    { "tool": "bash", "match": "/\\b(cat|less|more|head|tail|grep|rg|awk|sed)\\b[^;&|]*(\\.env\\b|auth\\.json|credentials|token|\\.pem\\b|\\.key\\b|\\.ssh/|\\.aws/|\\.git-credentials|\\.npmrc|kube\\/config)/i", "action": "deny" },
+    { "tool": "powershell", "match": "/\\b(cat|less|more|head|tail|grep|rg|awk|sed|Get-Content|Select-String)\\b[^;&|]*(\\.env\\b|auth\\.json|credentials|token|\\.pem\\b|\\.key\\b|\\.ssh/|\\.aws/|\\.git-credentials|\\.npmrc|kube\\/config)/i", "action": "deny" },
+    { "tool": "bash", "match": "re:^\\s*(env|printenv)\\b", "action": "deny" },
+    { "tool": "powershell", "match": "re:^\\s*(env|printenv|Get-ChildItem\\s+Env:)\\b", "action": "deny" },
+
+    // --- supply chain publishes: deny ---
+    { "tool": "bash", "match": ["*npm publish*", "*twine upload*", "*cargo publish*", "*docker push*", "*gh release*"], "action": "deny" },
+    { "tool": "powershell", "match": ["*npm publish*", "*twine upload*", "*cargo publish*", "*docker push*", "*gh release*"], "action": "deny" },
+
+    // --- exfil / pipe-to-shell: ask (deliberate, per review: prompt, not block) ---
+    { "tool": "bash", "match": "re:\\b(ssh|scp|rsync|nc|ncat|socat)\\b", "action": "ask" },
+    { "tool": "powershell", "match": "re:\\b(ssh|scp|rsync|nc|ncat|socat)\\b", "action": "ask" },
+    { "tool": "bash", "match": "re:\\b(curl|wget)\\b", "action": "ask" },
+    { "tool": "powershell", "match": "re:\\b(Invoke-WebRequest|Invoke-RestMethod|iwr|curl|wget)\\b", "action": "ask" },
+    { "tool": "bash", "match": "re:\\|\\s*(sh|bash)\\b", "action": "ask" },
+    { "tool": "powershell", "match": "re:\\|\\s*(iex|sh|bash)\\b", "action": "ask" },
 
     // --- file reads: deny secrets (other reads fall through to default allow) ---
-    { "tool": "read", "match": ["**/.env*", "**/auth.json", "**/credentials*.json", "**/*token*.json"], "action": "deny" },
-    { "tool": "read", "match": ["**/secrets/**", "**/.ssh/*", "**/*.pem", "**/*.key"], "action": "deny" },
+    { "tool": "read", "match": ["**/.env*", "**/auth.json", "**/credentials*.json", "**/*token*.json", "**/*.p12", "**/*.pfx", "**/*.asc", "**/*.gpg"], "action": "deny" },
+    { "tool": "read", "match": ["**/secrets/**", "**/.ssh/*", "**/.aws/*", "**/.config/gcloud/*", "**/kube/config", "**/.npmrc", "**/.git-credentials", "**/docker/config.json", "**/*.pem", "**/*.key"], "action": "deny" },
 
     // --- writes/edits default to ask (no match = all calls) ---
     { "tool": "write", "action": "ask" },

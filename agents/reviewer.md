@@ -20,7 +20,7 @@ permissions:
     - tool: find
       action: allow
     - tool: read
-      match: ["**/.env*", "**/auth.json", "**/credentials*.json", "**/*token*.json", "**/secrets/**", "**/.ssh/*", "**/*.pem", "**/*.key"]
+      match: ["**/.env*", "**/auth.json", "**/credentials*.json", "**/*token*.json", "**/*.p12", "**/*.pfx", "**/*.asc", "**/*.gpg", "**/secrets/**", "**/.ssh/*", "**/.aws/*", "**/.config/gcloud/*", "**/kube/config", "**/.npmrc", "**/.git-credentials", "**/docker/config.json", "**/*.pem", "**/*.key"]
       action: deny
     - tool: read
       match: "**"
