@@ -148,10 +148,16 @@ export default function (pi: ExtensionAPI) {
 					? `global rule #${result.ruleIndex + 1}`
 					: `default (${result.source})`;
 		const label = `${event.toolName} ${preview(result.target)}`.trim();
+		// Chain context: which segment decided a chained bash/powershell call.
+		const chainInfo =
+			result.segmentCount && result.segmentCount > 1
+				? ` segment=${(result.segmentIndex ?? 0) + 1}/${result.segmentCount} seg=${JSON.stringify((result.segment ?? "").slice(0, 120))}`
+				: "";
 
 		if (result.action === "deny") {
-			void audit("deny", event.toolName, result.target, `via=${where}`);
-			return { block: true, reason: `Blocked by permissions (${where}): ${label}` };
+			void audit("deny", event.toolName, result.target, `via=${where}${chainInfo}`);
+			const reasonSeg = chainInfo ? ` (segment ${(result.segmentIndex ?? 0) + 1}/${result.segmentCount}: ${preview(result.segment ?? "")})` : "";
+			return { block: true, reason: `Blocked by permissions (${where})${reasonSeg}: ${label}` };
 		}
 
 		// action === "ask"
@@ -172,7 +178,7 @@ export default function (pi: ExtensionAPI) {
 			return { block: true, reason: `Blocked by permissions (${where}, no UI to confirm): ${label}` };
 		}
 		const message =
-			`${label}\n\nMatched ${where}${result.rule ? ` — tool="${result.rule.tool}" match=${JSON.stringify(result.rule.match ?? "(any)")}` : ""}\nConfig: ${getGlobalPermissionsPath()}`;
+			`${label}\n\nMatched ${where}${result.rule ? ` — tool="${result.rule.tool}" match=${JSON.stringify(result.rule.match ?? "(any)")}` : ""}${chainInfo}\nConfig: ${getGlobalPermissionsPath()}`;
 		// select() has no body slot — the summary (`write src/foo.txt`)
 		// goes into the dialog title so every choice carries context.
 		// The same title is used for the confirm fallback, so no dialog
@@ -281,8 +287,9 @@ export default function (pi: ExtensionAPI) {
 			const targets = buildTargets(tool, input, ctx.cwd);
 			ctx.ui.notify(
 				[
-					`tool=${tool} action=${r.action} source=${r.source}${r.ruleIndex >= 0 ? ` rule#${r.ruleIndex + 1}` : ""}`,
+					`tool=${tool} action=${r.action} source=${r.source}${r.ruleIndex >= 0 ? ` rule#${r.ruleIndex + 1}` : ""}${r.segmentCount && r.segmentCount > 1 ? ` segment=${(r.segmentIndex ?? 0) + 1}/${r.segmentCount}` : ""}`,
 					...(r.rule ? [`rule: tool="${r.rule.tool}" match=${JSON.stringify(r.rule.match ?? "(any)")}`] : []),
+					...(r.segmentCount && r.segmentCount > 1 && r.segment ? [`segment: ${preview(r.segment, 200)}`] : []),
 					`target: ${preview(targets[0] ?? "", 500)}`,
 				].join("\n"),
 				"info",

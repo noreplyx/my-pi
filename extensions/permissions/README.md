@@ -95,9 +95,12 @@ Agent identity reaches child `pi` processes via `PI_AGENT_NAME`/`PI_AGENT_FILE`
 - `/permissions-clear-session` — revoke all "Allow for this session" grants (prompts will ask again)
 - `/permissions-reload` — re-read configs (also auto-reloads on mtime change)
 
-> Tip: run one command per `bash` tool call so safe-allows (`git status`, `ls`, …)
-> match silently. Chained commands (`;`, `&&`, `||`, pipes) intentionally fall
-> through to `ask` — that is the chaining guard working, not a bug.
+> Tip: chained commands (`;`, `&&`, `||`, pipes, `&`, newlines) are split
+> into quote-aware segments and evaluated independently (strict): any
+> segment `deny` blocks the whole call, all segments `allow` passes
+> silently, otherwise it asks. `git status && git diff` passes when both
+> segments are allowed; `git status; rm -rf /tmp/x` is denied on segment 2.
+> Session grants cover the whole chained command (exact match).
 
 ## Startup validation
 

@@ -16,6 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { matchTargets, matchToolName, hasInvalidRegex } from "./matcher.ts";
+import { splitShellCommands } from "./shell-split.ts";
 import {
 	type PermissionAction,
 	type PermissionRule,
@@ -30,6 +31,10 @@ export interface EvalResult {
 	ruleIndex: number; // index within its layer, -1 for default
 	rule?: PermissionRule;
 	target: string; // primary target string shown in prompts/logs
+	/** Chain context for bash/powershell: which segment decided the result. */
+	segment?: string;
+	segmentIndex?: number; // 0-based within the chain
+	segmentCount?: number;
 }
 
 interface CacheEntry {
@@ -493,7 +498,7 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 	// tool selector matches; a broken `allow`/`ask` is treated as never
 	// matching (falls through to default). Both cases are also reported by
 	// validation (R1) — this only decides the runtime direction.
-	const firstMatch = (rules: PermissionRule[]) => {
+	const firstMatch = (rules: PermissionRule[], cands: string[]) => {
 		for (let i = 0; i < rules.length; i++) {
 			const r = rules[i];
 			if (!matchToolName(r.tool, toolName)) continue;
@@ -501,43 +506,81 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 				if (r.action === "deny") return { index: i, rule: r };
 				continue;
 			}
-			if (!matchTargets(r.match, targets, pathMode)) continue;
+			if (!matchTargets(r.match, cands, pathMode)) continue;
 			return { index: i, rule: r };
 		}
 		return null;
 	};
 
-	// 1. Global deny floor.
-	for (let i = 0; i < globalRules.length; i++) {
-		const r = globalRules[i];
-		if (r.action !== "deny") continue;
-		if (!matchToolName(r.tool, toolName)) continue;
-		if (hasInvalidRegex(r.match)) {
-			return { action: "deny", source: "global", ruleIndex: i, rule: r, target: primary };
+	/** Evaluate one target string through the 5-layer precedence. */
+	const evalOne = (cands: string[], displayTarget: string): EvalResult => {
+		// 1. Global deny floor.
+		for (let i = 0; i < globalRules.length; i++) {
+			const r = globalRules[i];
+			if (r.action !== "deny") continue;
+			if (!matchToolName(r.tool, toolName)) continue;
+			if (hasInvalidRegex(r.match)) {
+				return { action: "deny", source: "global", ruleIndex: i, rule: r, target: displayTarget };
+			}
+			if (!matchTargets(r.match, cands, pathMode)) continue;
+			return { action: "deny", source: "global", ruleIndex: i, rule: r, target: displayTarget };
 		}
-		if (!matchTargets(r.match, targets, pathMode)) continue;
-		return { action: "deny", source: "global", ruleIndex: i, rule: r, target: primary };
+
+		// 2. Agent rules.
+		const agentHit = firstMatch(agentRules, cands);
+		if (agentHit) {
+			return { action: agentHit.rule.action, source: "agent", ruleIndex: agentHit.index, rule: agentHit.rule, target: displayTarget };
+		}
+
+		// 3. Agent default (explicit only — otherwise inherit global).
+		if (agentEntry?.exists && agentEntry.validated.hasDefault) {
+			return { action: agentEntry.validated.config.defaultAction, source: "agent", ruleIndex: -1, target: displayTarget };
+		}
+
+		// 4. Remaining global rules.
+		const globalHit = firstMatch(globalRules, cands);
+		if (globalHit) {
+			return { action: globalHit.rule.action, source: "global", ruleIndex: globalHit.index, rule: globalHit.rule, target: displayTarget };
+		}
+
+		// 5. Global default.
+		return { action: g.validated.config.defaultAction, source: "default", ruleIndex: -1, target: displayTarget };
+	};
+
+	// Chain-aware shell evaluation (strict): split `bash`/`powershell` on
+	// `; && || | |& &` + newlines (quote-aware) and evaluate each segment
+	// independently. Any segment deny → whole call deny; all allow → allow;
+	// otherwise ask. Single commands take the same path with one segment.
+	const lower = toolName.toLowerCase();
+	if (lower === "bash" || lower === "powershell") {
+		try {
+			const segments = splitShellCommands(primary);
+			if (segments.length > 1) {
+				const results = segments.map((seg) => evalOne([seg], primary));
+				// Deny wins — report the first denying segment.
+				for (let i = 0; i < results.length; i++) {
+					if (results[i].action === "deny") {
+						return { ...results[i], target: primary, segment: segments[i], segmentIndex: i, segmentCount: segments.length };
+					}
+				}
+				const firstNonAllow = results.findIndex((r) => r.action !== "allow");
+				if (firstNonAllow === -1) {
+					return { ...results[0], action: "allow", target: primary, segment: segments[0], segmentIndex: 0, segmentCount: segments.length };
+				}
+				return {
+					...results[firstNonAllow],
+					target: primary,
+					segment: segments[firstNonAllow],
+					segmentIndex: firstNonAllow,
+					segmentCount: segments.length,
+				};
+			}
+		} catch {
+			// Fail closed to whole-string evaluation below.
+		}
 	}
 
-	// 2. Agent rules.
-	const agentHit = firstMatch(agentRules);
-	if (agentHit) {
-		return { action: agentHit.rule.action, source: "agent", ruleIndex: agentHit.index, rule: agentHit.rule, target: primary };
-	}
-
-	// 3. Agent default (explicit only — otherwise inherit global).
-	if (agentEntry?.exists && agentEntry.validated.hasDefault) {
-		return { action: agentEntry.validated.config.defaultAction, source: "agent", ruleIndex: -1, target: primary };
-	}
-
-	// 4. Remaining global rules.
-	const globalHit = firstMatch(globalRules);
-	if (globalHit) {
-		return { action: globalHit.rule.action, source: "global", ruleIndex: globalHit.index, rule: globalHit.rule, target: primary };
-	}
-
-	// 5. Global default.
-	return { action: g.validated.config.defaultAction, source: "default", ruleIndex: -1, target: primary };
+	return evalOne(targets, primary);
 }
 
 export function describeStatus(cwd?: string): {

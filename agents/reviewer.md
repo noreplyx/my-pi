@@ -4,8 +4,9 @@ description: Read-only reviewer. May run safe git commands, list/search, and rea
 permissions:
   defaultAction: deny
   rules:
-    # Block shell chaining/redirects/subshells — the git prefix-allow below is
-    # single commands only (`git status; evil` must not match as "safe").
+    # Block shell chaining/redirects/subshells — defense-in-depth alongside
+    # chain splitting (each `; && || | &` segment is evaluated strictly:
+    # single safe segments pass, any denied segment blocks the whole call).
     - tool: bash
       match: "re:[;&|$`<>\\n]"
       action: deny

@@ -123,7 +123,10 @@ function validateRules(
 		}
 
 		// R6: prefix-anchored shell allow without an end anchor or chaining guard.
-		// `re:^git...` matches `git status; evil` — pair with a metachar deny.
+		// Chain splitting evaluates each `; && || | &` segment independently
+		// (strict: every segment must allow), so a prefix allow is safer than
+		// it used to be — but a metachar deny stays recommended
+		// defense-in-depth (redirects/subshells stay inside their segment).
 		if (
 			r.action === "allow" &&
 			(r.tool === "bash" || r.tool === "powershell") &&
@@ -137,8 +140,8 @@ function validateRules(
 			diags.push({
 				severity: "warning",
 				location: loc,
-				message: `prefix-anchored shell allow matches chained commands (e.g. "git status; evil")`,
-				hint: `precede it with a deny on shell metachars (;, &&, ||, |, $(), backticks) or anchor with $`,
+				message: `prefix-anchored shell allow matches chained commands (e.g. "git status; evil") — chain splitting evaluates each segment (strict: all must allow), a metachar deny stays recommended defense-in-depth`,
+				hint: `precede it with a deny on shell metachars (;, &&, ||, |, $(), backticks) or anchor with $, or rely on per-segment evaluation with strict all-allow`,
 			});
 		}
 

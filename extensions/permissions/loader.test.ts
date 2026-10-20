@@ -70,6 +70,66 @@ describe("global deny floor", () => {
 	});
 });
 
+describe("shell chain evaluation (strict, per-segment)", () => {
+	test("all-allow chain passes silently", () => {
+		const f = writeTempJson([
+			{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b", action: "allow" },
+			{ tool: "bash", match: "re:^\\s*git\\s+(diff)\\b", action: "allow" },
+		]);
+		process.env.PI_PERMISSIONS_FILE = f;
+		reloadAll();
+		const r = evaluate("bash", { command: "git status && git diff" }, "/tmp");
+		expect(r.action).toBe("allow");
+		expect(r.segmentCount).toBe(2);
+	});
+	test("one deny segment blocks whole chain with segment index", () => {
+		const f = writeTempJson([
+			{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b", action: "allow" },
+			{ tool: "bash", match: "*rm -rf*", action: "deny" },
+		]);
+		process.env.PI_PERMISSIONS_FILE = f;
+		reloadAll();
+		const r = evaluate("bash", { command: "git status; rm -rf /tmp/x" }, "/tmp");
+		expect(r.action).toBe("deny");
+		expect(r.segmentCount).toBe(2);
+		expect(r.segmentIndex).toBe(1);
+		expect(r.segment).toContain("rm -rf");
+	});
+	test("allowed + unknown segment falls to ask", () => {
+		const f = writeTempJson([{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b", action: "allow" }]);
+		process.env.PI_PERMISSIONS_FILE = f;
+		reloadAll();
+		const r = evaluate("bash", { command: "git status && id" }, "/tmp");
+		expect(r.action).toBe("ask");
+		expect(r.segmentCount).toBe(2);
+		expect(r.segmentIndex).toBe(1);
+	});
+	test("pipes split into segments", () => {
+		const f = writeTempJson([
+			{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b", action: "allow" },
+			{ tool: "bash", match: "re:^\\s*head\\b", action: "allow" },
+		]);
+		process.env.PI_PERMISSIONS_FILE = f;
+		reloadAll();
+		expect(evaluate("bash", { command: "git status | head" }, "/tmp").action).toBe("allow");
+	});
+	test("powershell chains split like bash", () => {
+		const f = writeTempJson([{ tool: "powershell", match: "re:^\\s*git\\s+(status)\\b", action: "allow" }]);
+		process.env.PI_PERMISSIONS_FILE = f;
+		reloadAll();
+		expect(evaluate("powershell", { command: "git status; id" }, "/tmp").action).toBe("ask");
+	});
+	test("quoted delimiters do not create segments", () => {
+		const f = writeTempJson([{ tool: "bash", match: "re:^echo", action: "allow" }], "ask");
+		process.env.PI_PERMISSIONS_FILE = f;
+		reloadAll();
+		// Whole command is one echo segment → allow, not split on quoted ";".
+		const r = evaluate("bash", { command: `echo "a; b"` }, "/tmp");
+		expect(r.action).toBe("allow");
+		expect(r.segmentCount).toBeUndefined();
+	});
+});
+
 describe("fail-closed invalid regex", () => {
 	test("broken deny blocks", () => {
 		const f = writeTempJson([{ tool: "bash", match: "re:([", action: "deny" }]);
