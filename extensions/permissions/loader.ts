@@ -1,0 +1,540 @@
+/**
+ * Config loading + evaluation.
+ *
+ * Layers (first match wins):
+ *   1. per-agent rules (from PI_AGENT_NAME / PI_AGENT_FILE, set by the subagent
+ *      spawner for child `pi` processes; absent in the main session)
+ *   2. global rules (~/.pi/agent/permissions.json)
+ *   3. agent.defaultAction ?? global.defaultAction (fallback: ask)
+ *
+ * Files are re-read when their mtime changes — no long-lived watchers
+ * (per extension lifecycle guidance).
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { matchTargets, matchToolName, hasInvalidRegex } from "./matcher.ts";
+import {
+	type PermissionAction,
+	type PermissionRule,
+	resolveAgentPermissionsRef,
+	validateConfig,
+	type ValidatedConfig,
+} from "./schema.ts";
+
+export interface EvalResult {
+	action: PermissionAction;
+	source: "agent" | "global" | "default";
+	ruleIndex: number; // index within its layer, -1 for default
+	rule?: PermissionRule;
+	target: string; // primary target string shown in prompts/logs
+}
+
+interface CacheEntry {
+	mtimeMs: number;
+	exists: boolean;
+	validated: ValidatedConfig;
+	filePath: string;
+}
+
+const globalCache: { entry: CacheEntry | null } = { entry: null };
+const agentCache: { key: string; entry: CacheEntry | null } = { key: "", entry: null };
+
+export function getGlobalPermissionsPath(): string {
+	const fromEnv = process.env.PI_PERMISSIONS_FILE?.trim();
+	if (fromEnv) return fromEnv;
+	return path.join(getAgentDir(), "permissions.json");
+}
+
+function stripJsonComments(text: string): string {
+	let out = "";
+	let i = 0;
+	let inStr: string | null = null;
+	let escaped = false;
+	while (i < text.length) {
+		const c = text[i];
+		const next = text[i + 1];
+		if (inStr) {
+			out += c;
+			if (escaped) escaped = false;
+			else if (c === "\\") escaped = true;
+			else if (c === inStr) inStr = null;
+			i += 1;
+			continue;
+		}
+		if (c === '"' || c === "'") {
+			inStr = c;
+			out += c;
+			i += 1;
+			continue;
+		}
+		if (c === "/" && next === "/") {
+			while (i < text.length && text[i] !== "\n") i += 1;
+			continue;
+		}
+		if (c === "/" && next === "*") {
+			i += 2;
+			while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i += 1;
+			i += 2;
+			continue;
+		}
+		out += c;
+		i += 1;
+	}
+	return out;
+}
+
+function readJsonFile(filePath: string): { value: unknown; error?: string } {
+	let text: string;
+	try {
+		text = fs.readFileSync(filePath, "utf-8");
+	} catch (e: any) {
+		return { value: undefined, error: `cannot read: ${e?.message ?? e}` };
+	}
+	try {
+		return { value: JSON.parse(stripJsonComments(text)) };
+	} catch (e: any) {
+		return { value: undefined, error: `invalid JSON: ${e?.message ?? e}` };
+	}
+}
+
+function loadFileIntoCache(filePath: string, prev: CacheEntry | null): CacheEntry {
+	let stat: fs.Stats | null = null;
+	try {
+		stat = fs.statSync(filePath);
+	} catch {
+		return { mtimeMs: 0, exists: false, validated: { config: { defaultAction: "ask", rules: [] }, errors: [] }, filePath };
+	}
+	if (prev && prev.exists && prev.mtimeMs === stat.mtimeMs && prev.filePath === filePath) return prev;
+	const { value, error } = readJsonFile(filePath);
+	if (error) {
+		return {
+			mtimeMs: stat.mtimeMs,
+			exists: true,
+			validated: { config: { defaultAction: "ask", rules: [] }, errors: [`${filePath}: ${error}`] },
+			filePath,
+		};
+	}
+	return { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig(value), filePath };
+}
+
+export function loadGlobal(): CacheEntry {
+	const p = getGlobalPermissionsPath();
+	globalCache.entry = loadFileIntoCache(p, globalCache.entry);
+	return globalCache.entry;
+}
+
+/** Resolve the current agent's permissions file/content from the environment. */
+function currentAgentKey(): string {
+	return `${process.env.PI_AGENT_NAME ?? ""}\0${process.env.PI_AGENT_FILE ?? ""}`;
+}
+
+function loadAgentEntry(cwd?: string): CacheEntry | null {
+	const name = process.env.PI_AGENT_NAME?.trim();
+	const file = process.env.PI_AGENT_FILE?.trim();
+	if (!name && !file) return null;
+	const key = `${currentAgentKey()}\0${cwd ?? ""}`;
+	if (agentCache.key === key && agentCache.entry) {
+		// Revalidate mtime if file-backed. Negative (unknown-agent) entries are
+		// NOT pinned — fall through and re-probe so a file created after a
+		// miss is picked up without a reload.
+		const e = agentCache.entry;
+		if (!e.exists) {
+			// fall through to reload
+		} else {
+			try {
+				const stat = fs.statSync(e.filePath);
+				if (stat.mtimeMs === e.mtimeMs) return e;
+			} catch {
+				// fall through to reload
+			}
+		}
+	}
+	let entry: CacheEntry | null = null;
+	if (file) {
+		try {
+			const stat = fs.statSync(file);
+			const content = fs.readFileSync(file, "utf-8");
+			const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+			const ref = resolveAgentPermissionsRef(frontmatter.permissions);
+			if (ref.kind === "none") {
+				entry = { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig({}), filePath: file };
+			} else if (ref.kind === "file") {
+				const resolved = path.resolve(path.dirname(file), ref.path);
+				entry = loadFileIntoCache(resolved, null);
+			} else {
+				entry = { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig(ref.value), filePath: file };
+			}
+		} catch (e: any) {
+			entry = {
+				mtimeMs: 0,
+				exists: true,
+				validated: { config: { defaultAction: "ask", rules: [] }, errors: [`agent file ${file}: ${e?.message ?? e}`] },
+				filePath: file,
+			};
+		}
+	} else if (name) {
+		// No file path — look up <name>.md in user + nearest project agents dirs.
+		const candidates = [path.join(getAgentDir(), "agents", `${name}.md`)];
+		if (cwd) {
+			try {
+				let dir = cwd;
+				while (true) {
+					candidates.push(path.join(dir, CONFIG_DIR_NAME, "agents", `${name}.md`));
+					const parent = path.dirname(dir);
+					if (parent === dir) break;
+					dir = parent;
+				}
+			} catch {
+				// ignore — user-dir candidate still applies
+			}
+		}
+		for (const c of candidates) {
+			try {
+				const stat = fs.statSync(c);
+				const content = fs.readFileSync(c, "utf-8");
+				const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+				const ref = resolveAgentPermissionsRef(frontmatter.permissions);
+				if (ref.kind === "file") entry = loadFileIntoCache(path.resolve(path.dirname(c), ref.path), null);
+				else if (ref.kind === "inline")
+					entry = { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig(ref.value), filePath: c };
+				else
+					entry = { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig({}), filePath: c };
+				break;
+			} catch {
+				continue;
+			}
+		}
+		if (!entry) {
+			entry = {
+				mtimeMs: 0,
+				exists: false,
+				validated: { config: { defaultAction: "ask", rules: [] }, errors: [`unknown agent "${name}"`] },
+				filePath: name,
+			};
+		}
+	}
+	agentCache.key = key;
+	agentCache.entry = entry;
+	return entry;
+}
+
+// ---------------------------------------------------------------------------
+// Target extraction
+// ---------------------------------------------------------------------------
+
+function asString(v: unknown): string | null {
+	return typeof v === "string" ? v : null;
+}
+
+function pickPath(input: Record<string, unknown>): string | null {
+	for (const k of ["path", "file_path", "filePath", "dir", "cwd"]) {
+		const s = asString(input[k]);
+		if (s) return s;
+	}
+	return null;
+}
+
+/**
+ * Build match candidates for a tool call. First entry is the primary target
+ * (used for display); matching succeeds if ANY candidate matches.
+ */
+export function buildTargets(toolName: string, input: Record<string, unknown>, cwd: string): string[] {
+	const lower = toolName.toLowerCase();
+	if (lower === "bash" || lower === "powershell") {
+		const cmd = asString(input.command) ?? "";
+		return [cmd];
+	}
+	if (["read", "write", "edit"].includes(lower)) {
+		const raw = pickPath(input) ?? "";
+		const cands = [raw];
+		if (raw) {
+			try {
+				const abs = path.resolve(cwd, raw);
+				cands.push(abs);
+				const rel = path.relative(cwd, abs);
+				if (rel && !rel.startsWith("..")) cands.push(rel);
+				else if (rel) cands.push(rel);
+			} catch {
+				// ignore
+			}
+		}
+		return cands;
+	}
+	if (lower === "ls") {
+		const raw = pickPath(input) ?? ".";
+		return [raw, path.resolve(cwd, raw)];
+	}
+	if (lower === "find" || lower === "grep") {
+		const p = pickPath(input) ?? ".";
+		const pattern = asString(input.pattern) ?? "";
+		return [pattern ? `${p}:${pattern}` : p, p, pattern].filter(Boolean);
+	}
+	try {
+		const json = JSON.stringify(input);
+		return [json];
+	} catch {
+		return [String(input)];
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation
+// ---------------------------------------------------------------------------
+
+/**
+ * Precedence (first applicable wins):
+ *   1. Global DENY rules — safety floor, nothing overrides them (so a rogue
+ *      agent config can never re-allow `rm -rf` / `sudo` / secrets).
+ *   2. Agent rules (explicit per-agent decisions beat global allow/ask).
+ *   3. Agent defaultAction (only when the agent file sets one).
+ *   4. Remaining global rules (allow/ask).
+ *   5. Global defaultAction (fallback: ask).
+ *
+ * Net effect: the agent is more powerful than global — it can tighten deny
+ * and loosen ask→allow — except it can never loosen a global deny.
+ */
+/** True for tools whose match targets are file paths (segment-aware globs). */
+function isPathTool(toolName: string): boolean {
+	const lower = toolName.toLowerCase();
+	return ["read", "write", "edit", "ls", "find", "grep"].includes(lower);
+}
+
+export function evaluate(toolName: string, input: Record<string, unknown>, cwd: string): EvalResult {
+	const targets = buildTargets(toolName, input, cwd);
+	const primary = targets[0] ?? "";
+	const pathMode = isPathTool(toolName);
+
+	const agentEntry = loadAgentEntry(cwd);
+	const agentRules = agentEntry?.exists ? agentEntry.validated.config.rules : [];
+	const g = loadGlobal();
+	const globalRules = g.validated.config.rules;
+
+	// Fail-closed broken patterns: an uncompilable regex never matches via
+	// `matchOne` (returns false). For `deny` that would be fail-open, so a
+	// deny rule with a broken pattern is treated as matching everything its
+	// tool selector matches; a broken `allow`/`ask` is treated as never
+	// matching (falls through to default). Both cases are also reported by
+	// validation (R1) — this only decides the runtime direction.
+	const firstMatch = (rules: PermissionRule[]) => {
+		for (let i = 0; i < rules.length; i++) {
+			const r = rules[i];
+			if (!matchToolName(r.tool, toolName)) continue;
+			if (hasInvalidRegex(r.match)) {
+				if (r.action === "deny") return { index: i, rule: r };
+				continue;
+			}
+			if (!matchTargets(r.match, targets, pathMode)) continue;
+			return { index: i, rule: r };
+		}
+		return null;
+	};
+
+	// 1. Global deny floor.
+	for (let i = 0; i < globalRules.length; i++) {
+		const r = globalRules[i];
+		if (r.action !== "deny") continue;
+		if (!matchToolName(r.tool, toolName)) continue;
+		if (hasInvalidRegex(r.match)) {
+			return { action: "deny", source: "global", ruleIndex: i, rule: r, target: primary };
+		}
+		if (!matchTargets(r.match, targets, pathMode)) continue;
+		return { action: "deny", source: "global", ruleIndex: i, rule: r, target: primary };
+	}
+
+	// 2. Agent rules.
+	const agentHit = firstMatch(agentRules);
+	if (agentHit) {
+		return { action: agentHit.rule.action, source: "agent", ruleIndex: agentHit.index, rule: agentHit.rule, target: primary };
+	}
+
+	// 3. Agent default (explicit only — otherwise inherit global).
+	if (agentEntry?.exists && agentEntry.validated.hasDefault) {
+		return { action: agentEntry.validated.config.defaultAction, source: "agent", ruleIndex: -1, target: primary };
+	}
+
+	// 4. Remaining global rules.
+	const globalHit = firstMatch(globalRules);
+	if (globalHit) {
+		return { action: globalHit.rule.action, source: "global", ruleIndex: globalHit.index, rule: globalHit.rule, target: primary };
+	}
+
+	// 5. Global default.
+	return { action: g.validated.config.defaultAction, source: "default", ruleIndex: -1, target: primary };
+}
+
+export function describeStatus(cwd?: string): {
+	globalPath: string;
+	globalExists: boolean;
+	globalErrors: string[];
+	globalRuleCount: number;
+	globalDefault: string;
+	agentName: string | null;
+	agentFile: string | null;
+	agentExists: boolean;
+	agentErrors: string[];
+	agentRuleCount: number;
+	agentDefault: string | null;
+} {
+	const g = loadGlobal();
+	const a = loadAgentEntry(cwd);
+	return {
+		globalPath: g.filePath,
+		globalExists: g.exists,
+		globalErrors: g.validated.errors,
+		globalRuleCount: g.validated.config.rules.length,
+		globalDefault: g.validated.config.defaultAction,
+		agentName: process.env.PI_AGENT_NAME?.trim() || null,
+		agentFile: process.env.PI_AGENT_FILE?.trim() || null,
+		agentExists: a?.exists ?? false,
+		agentErrors: a?.validated.errors ?? [],
+		agentRuleCount: a?.validated.config.rules.length ?? 0,
+		agentDefault: a?.exists && a.validated.hasDefault ? a.validated.config.defaultAction : null,
+	};
+}
+
+export function reloadAll(): void {
+	globalCache.entry = null;
+	agentCache.key = "";
+	agentCache.entry = null;
+	agentScanCache.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Startup validation support: load every agent file that declares permissions
+// ---------------------------------------------------------------------------
+
+export interface AgentFileReport {
+	filePath: string;
+	/** Short display path for diagnostics. */
+	label: string;
+	agentName: string;
+	validated: ValidatedConfig;
+}
+
+function shortLabel(filePath: string, cwd: string, projectRoot: string | null): string {
+	const agentDir = getAgentDir();
+	if (filePath.startsWith(agentDir + path.sep)) return filePath.slice(agentDir.length + 1);
+	// Prefer a cwd-relative label when the file is underneath cwd …
+	const rel = path.relative(cwd, filePath);
+	if (rel && !rel.startsWith("..") && rel.length < filePath.length) return rel;
+	// … otherwise anchor project files at their project root (`myproj/.pi/agents/x.md`).
+	if (projectRoot && (filePath === projectRoot || filePath.startsWith(projectRoot + path.sep))) {
+		return path.join(path.basename(projectRoot), path.relative(projectRoot, filePath));
+	}
+	return filePath;
+}
+
+function findNearestProjectAgents(cwd: string): { agentsDir: string; root: string } | null {
+	let dir = cwd;
+	while (true) {
+		const agentsDir = path.join(dir, CONFIG_DIR_NAME, "agents");
+		try {
+			if (fs.statSync(agentsDir).isDirectory()) return { agentsDir, root: dir };
+		} catch {
+			// keep walking up
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+/** Read + validate one agent file. Null = no permissions block, nothing to report. Never throws. */
+function readAgentFileReport(filePath: string, cwd: string, projectRoot: string | null): AgentFileReport | null {
+	const label = shortLabel(filePath, cwd, projectRoot);
+	try {
+		const content = fs.readFileSync(filePath, "utf-8");
+		const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+		const ref = resolveAgentPermissionsRef(frontmatter.permissions);
+		if (ref.kind === "none") return null; // no permissions block — nothing to report
+		const agentName = typeof frontmatter.name === "string" ? frontmatter.name : path.basename(filePath);
+		if (ref.kind === "file") {
+			const resolved = path.resolve(path.dirname(filePath), ref.path);
+			const { value, error } = readJsonFile(resolved);
+			return {
+				filePath,
+				label,
+				agentName,
+				validated: error
+					? { config: { defaultAction: "ask", rules: [] }, errors: [`${resolved}: ${error}`], hasDefault: false }
+					: validateConfig(value),
+			};
+		}
+		return { filePath, label, agentName, validated: validateConfig(ref.value) };
+	} catch (e: any) {
+		return {
+			filePath,
+			label,
+			agentName: path.basename(filePath),
+			validated: { config: { defaultAction: "ask", rules: [] }, errors: [`cannot read: ${e?.message ?? e}`], hasDefault: false },
+		};
+	}
+}
+
+interface AgentScanCacheEntry {
+	mtimeMs: number;
+	cwd: string;
+	projectRoot: string | null;
+	report: AgentFileReport | null;
+}
+
+// File reads are cached by mtime (readdir itself stays uncached — it is cheap
+// and is the authoritative source for added/removed files).
+const agentScanCache = new Map<string, AgentScanCacheEntry>();
+
+function scanAgentFile(filePath: string, cwd: string, projectRoot: string | null): AgentFileReport | null {
+	let mtimeMs = 0;
+	try {
+		mtimeMs = fs.statSync(filePath).mtimeMs;
+	} catch {
+		agentScanCache.delete(filePath);
+		return null;
+	}
+	const prev = agentScanCache.get(filePath);
+	if (prev && prev.mtimeMs === mtimeMs) {
+		if (!prev.report || (prev.cwd === cwd && prev.projectRoot === projectRoot)) return prev.report;
+		// Same content, different viewer location — relabel without re-reading.
+		const relabeled: AgentFileReport = { ...prev.report, label: shortLabel(filePath, cwd, projectRoot) };
+		agentScanCache.set(filePath, { mtimeMs, cwd, projectRoot, report: relabeled });
+		return relabeled;
+	}
+	const report = readAgentFileReport(filePath, cwd, projectRoot);
+	agentScanCache.set(filePath, { mtimeMs, cwd, projectRoot, report });
+	return report;
+}
+
+/** Every agent file (user + project-local) that declares a permissions block. */
+export function loadAllAgentFiles(cwd: string): AgentFileReport[] {
+	const seen = new Set<string>();
+	const out: AgentFileReport[] = [];
+	const project = findNearestProjectAgents(cwd);
+	const projectRoot = project?.root ?? null;
+	const dirs = [path.join(getAgentDir(), "agents")];
+	if (project) dirs.push(project.agentsDir);
+	for (const dir of dirs) {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (!entry.name.endsWith(".md")) continue;
+			if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+			const filePath = path.join(dir, entry.name);
+			if (seen.has(filePath)) continue;
+			seen.add(filePath);
+			const report = scanAgentFile(filePath, cwd, projectRoot);
+			if (report) out.push(report);
+		}
+	}
+	// Drop cache entries for files gone from every scanned dir (readdir is authoritative).
+	for (const key of [...agentScanCache.keys()]) {
+		if (!seen.has(key) && dirs.some((d) => key === d || key.startsWith(d + path.sep))) {
+			agentScanCache.delete(key);
+		}
+	}
+	return out;
+}

@@ -1,0 +1,31 @@
+{
+  // Global permission policy. Per-agent `permissions:` in agents/*.md is evaluated first,
+  // but global `deny` rules form a safety floor nothing can override (see extensions/permissions/README.md).
+  // Rule: { "tool": "<name|glob>", "match": "<glob|re:regex|/regex/flags|substring>", "action": "allow|ask|deny" }
+  // Omit "match" to match all calls of that tool.
+  "defaultAction": "ask",
+  "rules": [
+    // --- safe read-only bash: allow without prompting ---
+    // Anchored + metachar-excluding so `git status; evil` / `echo hi && evil`
+    // fall through to ask instead of matching. Destructive floor below stays
+    // as backstop for anything that slips through.
+    { "tool": "bash", "match": "re:^\\s*git\\s+(status|diff|log|branch)\\b[^;&|$`<>\\n]*$", "action": "allow" },
+    { "tool": "bash", "match": "re:^\\s*(ls|pwd|echo|true|which|whoami)\\b[^;&|$`<>\\n]*$", "action": "allow" },
+
+    // --- destructive bash: deny outright ---
+    { "tool": "bash", "match": "*rm -rf*", "action": "deny" },
+    { "tool": "bash", "match": "re:\\bsudo\\b", "action": "deny" },
+    { "tool": "bash", "match": "*chmod*777*", "action": "deny" },
+    { "tool": "bash", "match": "*npm publish*", "action": "deny" },
+    { "tool": "bash", "match": "re:git\\s+push.*--force", "action": "deny" },
+
+    // --- file reads: deny secrets (other reads fall through to default ask) ---
+    { "tool": "read", "match": "**/.env*", "action": "deny" },
+    { "tool": "read", "match": "**/secrets/**", "action": "deny" },
+    { "tool": "read", "match": "**/.ssh/*", "action": "deny" },
+
+    // --- writes/edits default to ask (no match = all calls) ---
+    { "tool": "write", "action": "ask" },
+    { "tool": "edit", "action": "ask" }
+  ]
+}

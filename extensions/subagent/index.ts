@@ -345,6 +345,7 @@ async function runSingleAgent(
 				cwd: cwd ?? defaultCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				env: { ...process.env, PI_AGENT_NAME: agent.name, PI_AGENT_FILE: agent.filePath },
 			});
 			let buffer = "";
 
