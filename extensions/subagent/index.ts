@@ -121,7 +121,7 @@ function formatToolCall(
 
 const COLLAPSED_ITEM_COUNT = 10;
 
-interface SingleResult {
+export interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	task: string;
@@ -137,7 +137,7 @@ interface SingleResult {
 	step?: number;
 }
 
-interface SubagentDetails {
+export interface SubagentDetails {
 	mode: "single" | "parallel" | "chain";
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
@@ -194,14 +194,14 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
-type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
+export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
-interface DispatchDefaults {
+export interface DispatchDefaults {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
 }
 
-async function runSingleAgent(
+export async function runSingleAgent(
 	defaultCwd: string,
 	dispatchDefaults: DispatchDefaults,
 	agents: AgentConfig[],
@@ -210,8 +210,8 @@ async function runSingleAgent(
 	cwd: string | undefined,
 	step: number | undefined,
 	signal: AbortSignal | undefined,
-	onUpdate: OnUpdateCallback | undefined,
-	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	onUpdate: ((partial: AgentToolResult<any>) => void) | undefined,
+	makeDetails: (results: SingleResult[]) => any,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name.toLowerCase() === agentName.toLowerCase());
 
