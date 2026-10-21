@@ -1,0 +1,10 @@
+{
+  "name": "pi-sql-reader",
+  "version": "1.0.0",
+  "description": "Read-only SQL Server + Postgres reader extension for Pi (TLS / non-TLS)",
+  "type": "module",
+  "dependencies": {
+    "pg": "^8.13.1",
+    "tedious": "^18.6.1"
+  }
+}
