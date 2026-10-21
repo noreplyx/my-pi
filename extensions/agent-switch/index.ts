@@ -332,25 +332,4 @@ export default function (pi: ExtensionAPI) {
 			await applyAgent(pi, ctx, agent);
 		},
 	});
-
-	pi.registerCommand("agents", {
-		description: "List available agents (● = current)",
-		handler: async (_args, ctx) => {
-			const discovery = discoverAgents(ctx.cwd, "both");
-			const lines = [
-				`Current: ${current ? `${current.name} (${current.source})` : "(default session)"}`,
-				...discovery.agents.map(
-					(a) => `${a.name === current?.name ? "●" : "○"} ${a.name} [${a.source}] — ${truncate(a.description, 80)}`,
-				),
-			];
-			if (discovery.agents.length === 0) lines.push("(no agents found)");
-			if (discovery.warnings.length > 0) {
-				lines.push(
-					`warnings:\n${discovery.warnings.slice(0, 5).map((w) => `- ${truncate(w, 160)}`).join("\n")}` +
-						(discovery.warnings.length > 5 ? `\n…and ${discovery.warnings.length - 5} more` : ""),
-				);
-			}
-			ctx.ui.notify(lines.join("\n"), "info");
-		},
-	});
 }

@@ -138,20 +138,4 @@ describe("agent-switch", () => {
 		await handlers.get("session_shutdown")({ type: "session_shutdown" }, ctx);
 		expect(process.env.PI_AGENT_NAME).toBeUndefined();
 	});
-
-	test("/agents lists agents with the current one marked", async () => {
-		const { handlers, commands } = load();
-		const { ctx, notices } = makeCtx();
-		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
-		await commands.get("agents").handler("", ctx);
-		expect(notices.at(-1)?.message).toContain("Current: (default session)");
-		expect(notices.at(-1)?.message).toContain("○ planner [user]");
-
-		await commands.get("agent").handler("planner", ctx);
-		await commands.get("agents").handler("", ctx);
-		expect(notices.at(-1)?.message).toContain("Current: planner (user)");
-		expect(notices.at(-1)?.message).toContain("● planner [user]");
-
-		await commands.get("agent").handler("reset", ctx);
-	});
 });
