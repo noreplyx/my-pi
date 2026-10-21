@@ -12,7 +12,6 @@ Tracked in git; secrets and machine-local state are gitignored.
 | `agents/` | Per-agent frontmatter (`permissions:` overrides global, except global `deny` always wins) |
 | `extensions/permissions/` | Permission enforcement extension + tests |
 | `extensions/subagent/` | Subagent delegation extension (spawns isolated `pi` processes) |
-| `extensions/swarm-agent/` | Swarm fan-out extension (template × items → isolated `pi` children, shares subagent spawner) |
 | `permissions/audit.log` | Append-only permission decision log (gitignored) |
 | `auth.json` | Credentials — **never committed** (gitignored) |
 | `install/`, `bin/` | Managed install binaries/releases — reproducible via installer (gitignored) |

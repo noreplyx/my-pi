@@ -299,17 +299,6 @@ describe("describeCall structured tools", () => {
 		expect(describeCall("subagent", { task: "just\n  a\ntask" }, "/p")).toBe('subagent "just a task"');
 	});
 
-	test("swarm shows agent + template + item count + first item", () => {
-		expect(
-			describeCall("swarm", { agent: "reviewer", template: "Review {item} for bugs", items: ["src/a.ts", "src/b.ts"] }, "/p"),
-		).toBe('swarm reviewer "Review {item} for bugs" (2 items) e.g. "src/a.ts"');
-		expect(describeCall("swarm", { agent: "reviewer", template: "Do {item}", items: ["only"] }, "/p")).toBe(
-			'swarm reviewer "Do {item}" (1 item) e.g. "only"',
-		);
-		expect(describeCall("swarm", {}, "/p")).toBe("swarm (no details)");
-		expect(describeCall("swarm", { items: ["a", "b", "c"] }, "/p")).toBe("swarm (3 items) e.g. \"a\"");
-	});
-
 	test("shortenHome shortens leading home only", () => {
 		const home = os.homedir();
 		expect(shortenHome(`${home}/x/y`)).toBe("~/x/y");

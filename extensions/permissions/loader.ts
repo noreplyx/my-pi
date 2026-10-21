@@ -356,9 +356,6 @@ export function describeCall(toolName: string, input: Record<string, unknown>, c
 	if (lower === "subagent") {
 		return `${toolName} ${describeSubagent(input)}`;
 	}
-	if (lower === "swarm") {
-		return `${toolName} ${describeSwarm(input)}`;
-	}
 	return `${toolName} ${compactArgs(input)}`;
 }
 
@@ -411,24 +408,6 @@ function describeSubagent(input: Record<string, unknown>): string {
 		return `parallel (${tasks.length} task${tasks.length === 1 ? "" : "s"}): ${describeSubagentItem(tasks[0])}`;
 	}
 	return describeSubagentItem(input) || "(no details)";
-}
-
-/** Human shape for swarm calls: `agent "template" (N items)` plus the first item as an example. */
-function describeSwarm(input: Record<string, unknown>): string {
-	const agent = asString(input.agent) ?? "";
-	const template = oneLine(asString(input.template) ?? "");
-	const items = Array.isArray(input.items) ? input.items : [];
-	if (!agent && !template && items.length === 0) return "(no details)";
-	const count = `(${items.length} item${items.length === 1 ? "" : "s"})`;
-	const head = [agent, template ? `"${truncate(shortenHomeInText(template), 60)}"` : ""]
-		.filter(Boolean)
-		.join(" ");
-	const first =
-		items.length > 0 && typeof items[0] === "string" && (items[0] as string).trim()
-			? ` e.g. "${truncate(shortenHomeInText(oneLine(items[0] as string)), 40)}"`
-			: "";
-	const body = [head, count].filter(Boolean).join(" ");
-	return `${body}${first}`.trim() || "(no details)";
 }
 
 /** Compact `key=value` pairs (transcript-row convention), one line, capped. */
