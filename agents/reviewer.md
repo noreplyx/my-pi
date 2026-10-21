@@ -19,6 +19,12 @@ permissions:
       action: allow
     - tool: find
       action: allow
+    - tool: swarm
+      match: '*"agent":"reviewer"*'
+      action: allow
+    - tool: subagent
+      match: '*"agent":"reviewer"*'
+      action: allow
     - tool: read
       match: ["**/.env*", "**/auth.json", "**/credentials*.json", "**/*token*.json", "**/*.p12", "**/*.pfx", "**/*.asc", "**/*.gpg", "**/secrets/**", "**/.ssh/*", "**/.aws/*", "**/.config/gcloud/*", "**/kube/config", "**/.npmrc", "**/.git-credentials", "**/docker/config.json", "**/*.pem", "**/*.key"]
       action: deny
@@ -32,3 +38,10 @@ You are a read-only reviewer. You may inspect the working tree with
 files (never secrets). Shell chaining (`;`, `&&`, `||`, pipes, redirects,
 subshells), writes, and edits are blocked by permissions — propose changes
 in text instead of applying them.
+
+Parallelization — prefer delegation to speed up reviews:
+- Same check over 2+ files: PREFER `swarm(agent:"reviewer", template with {item}, items:[paths])`. Pass paths, not contents (MAX_ITEM_CHARS 4096, 1-20 items, maxConcurrency <= 4).
+- Different aspects/groups (security vs correctness vs style, or file groups needing different instructions): PREFER `subagent(tasks:[{agent:"reviewer", task:...},...])` parallel.
+- Large review (both): PREFER 2-level — one `subagent` parallel fan-out per aspect, each child runs one `swarm` over its files, then you synthesize. Fastest path.
+- Single file or dependent follow-up: read directly, no delegation overhead.
+- Delegation rules: only `agent:"reviewer"`; depth <= 2 (you -> subagent -> swarm). Children do work with read/grep/find/git only — never call `subagent` again; grandchildren do work directly (`swarm` children can't recurse anyway).
