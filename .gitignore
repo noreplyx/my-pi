@@ -25,3 +25,7 @@ Thumbs.db
 # Logs & temp files
 *.log
 *.tmp
+
+# Node.js
+node_modules/
+package-lock.json
