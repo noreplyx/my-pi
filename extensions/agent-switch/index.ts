@@ -33,7 +33,6 @@ import { describeStatus } from "../permissions/loader.ts";
 const ENV_NAME = "PI_AGENT_NAME";
 const ENV_FILE = "PI_AGENT_FILE";
 const STATUS_KEY = "agent-switch";
-const WIDGET_KEY = "agent-switch";
 const RESET_WORDS = new Set(["reset", "default", "clear", "off"]);
 
 /** Active override. Null = default session (no agent). */
@@ -75,14 +74,6 @@ function statusText(ctx: ExtensionCommandContext): void {
 		ctx.ui.setStatus(STATUS_KEY, current ? `agent:${current.name}` : undefined);
 	} catch {
 		// Status bar is TUI-only; never break the switch on it.
-	}
-	try {
-		// Persistent one-liner above the editor, shown only while switched.
-		ctx.ui.setWidget(WIDGET_KEY, current ? [`agent: ${current.name}`] : undefined, {
-			placement: "aboveEditor",
-		});
-	} catch {
-		// Widgets are TUI-only; never break the switch on them.
 	}
 }
 

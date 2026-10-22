@@ -50,15 +50,11 @@ function makeCtx(over: Record<string, any> = {}) {
 			setStatus: (...args: unknown[]) => {
 				(statusLog as unknown[]).push(args);
 			},
-			setWidget: (...args: unknown[]) => {
-				(widgetLog as unknown[]).push(args);
-			},
 		},
 		...over,
 	};
 	const statusLog: unknown[][] = [];
-	const widgetLog: unknown[][] = [];
-	return { ctx, notices, statusLog, widgetLog };
+	return { ctx, notices, statusLog };
 }
 
 function load() {
@@ -68,16 +64,16 @@ function load() {
 }
 
 describe("agent-switch", () => {
-	test("startup captures defaults; /agent planner switches prompt+tools+env+widget", async () => {
+	test("startup captures defaults; /agent planner switches prompt+tools+env+status", async () => {
 		const { handlers, commands, calls } = load();
-		const { ctx, notices, widgetLog } = makeCtx();
+		const { ctx, notices, statusLog } = makeCtx();
 		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
 
 		await commands.get("agent").handler("planner", ctx);
 		expect(process.env.PI_AGENT_NAME).toBe("planner");
 		expect(process.env.PI_AGENT_FILE ?? "").toMatch(/planner\.md$/);
 		expect(calls.setActiveTools.at(-1)).toEqual(["read", "write", "bash", "subagent"]);
-		expect(widgetLog.at(-1)?.[1]).toEqual(["agent: planner"]);
+		expect(statusLog.at(-1)).toEqual(["agent-switch", "agent: planner"]);
 
 		const event: any = { systemPromptOptions: { sections: {} } };
 		await handlers.get("before_agent_start")(event, ctx);
@@ -88,7 +84,7 @@ describe("agent-switch", () => {
 		await commands.get("agent").handler("reset", ctx);
 		expect(process.env.PI_AGENT_NAME).toBeUndefined();
 		expect(calls.setActiveTools.at(-1)).toEqual(["read", "bash", "edit", "write"]);
-		expect(widgetLog.at(-1)?.[1]).toBeUndefined();
+		expect(statusLog.at(-1)).toEqual(["agent-switch", undefined]);
 	});
 
 	test("unknown agent is fail-closed", async () => {
