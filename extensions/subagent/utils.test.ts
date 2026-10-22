@@ -1,18 +1,28 @@
 import { describe, expect, test } from "bun:test";
 import {
+	MAX_SWARM_DEPTH,
 	aggregateUsage,
 	appendBounded,
 	buildChildEnv,
 	capPreviousOutput,
 	emptyUsage,
+	ensureSwarmTools,
 	formatUsageStats,
+	generateRunId,
 	getFinalOutput,
 	isFailedResult,
 	isValidAgentName,
+	isValidRunId,
+	isValidWorkerId,
+	makeSwarmMessage,
 	mapWithConcurrencyLimit,
+	nextSwarmDepth,
 	normalizeAgentName,
+	parseSwarmDepth,
+	parseSwarmMessageLine,
 	parseToolList,
 	substitutePrevious,
+	swarmProtocolSnippet,
 	truncateToBudget,
 	validateModelString,
 	validateToolList,
@@ -217,5 +227,47 @@ describe("mapWithConcurrencyLimit", () => {
 
 	test("empty input", async () => {
 		expect(await mapWithConcurrencyLimit([], 4, async (x: number) => x)).toEqual([]);
+	});
+});
+
+describe("swarm guards", () => {
+	test("depth increments until cap, then rejects", () => {
+		expect(nextSwarmDepth(0)).toEqual({ depth: 1 });
+		expect(nextSwarmDepth(MAX_SWARM_DEPTH - 1)).toEqual({ depth: MAX_SWARM_DEPTH });
+		expect((nextSwarmDepth(MAX_SWARM_DEPTH) as { error: string }).error).toContain("depth");
+		expect((nextSwarmDepth(-1) as { error: string }).error).toBeDefined();
+	});
+
+	test("parseSwarmDepth defaults to 0 on garbage", () => {
+		expect(parseSwarmDepth(undefined)).toBe(0);
+		expect(parseSwarmDepth("2")).toBe(2);
+		expect(parseSwarmDepth("nope")).toBe(0);
+	});
+
+	test("run/worker ids validate", () => {
+		const id = generateRunId(1710000000000, 0.5);
+		expect(isValidRunId(id)).toBe(true);
+		expect(isValidRunId("bad")).toBe(false);
+		expect(isValidWorkerId("explorer-1")).toBe(true);
+		expect(isValidWorkerId("Bad Name")).toBe(false);
+	});
+
+	test("swarm tools merge without dupes", () => {
+		expect(ensureSwarmTools(["read"])).toEqual(["read", "subagent", "write", "bash"]);
+		expect(ensureSwarmTools(undefined)).toEqual(["subagent", "read", "write", "bash"]);
+	});
+
+	test("swarm message round-trips, bad lines null", () => {
+		const line = makeSwarmMessage("a", "b", "hi $&");
+		expect(parseSwarmMessageLine(line)?.body).toBe("hi $&");
+		expect(parseSwarmMessageLine("")).toBeNull();
+		expect(parseSwarmMessageLine("{bad")).toBeNull();
+	});
+
+	test("protocol snippet mentions blackboard + depth", () => {
+		const s = swarmProtocolSnippet("/repo/.swarm/r1", "w1", "r1", 1);
+		expect(s).toContain(".swarm");
+		expect(s).toContain("w1");
+		expect(s).toContain(String(MAX_SWARM_DEPTH));
 	});
 });

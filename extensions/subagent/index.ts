@@ -4,10 +4,13 @@
  * Spawns a separate `pi` process for each subagent invocation,
  * giving it an isolated context window.
  *
- * Supports three modes:
+ * Supports four modes:
  *   - Single: { agent: "name", task: "..." }
  *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
  *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
+ *   - Swarm: { swarm: { goal, workers: [{ id, agent, task }...], merger? } }
+ *     Hierarchical blackboard swarm in <cwd>/.swarm/<runId>/ with depth<=3,
+ *     total<=8, concurrency<=4. Workers publish to done/<id>.md + outbox.
  *
  * Uses JSON mode to capture structured output from subagents.
  */
@@ -30,23 +33,36 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents, formatAgentList } from "./agents.ts";
+import { appendOutbox, appendTaskLedger, createSwarmRun, readDoneFiles } from "./swarm.ts";
 import {
 	MAX_CONCURRENCY,
 	MAX_MESSAGES,
 	MAX_PARALLEL_TASKS,
+	MAX_SWARM_DEPTH,
+	MAX_SWARM_TOTAL,
 	RESULT_RUNNING,
 	STDERR_CAP,
 	STDOUT_CAP,
+	SWARM_ENV_DEPTH,
+	SWARM_ENV_DIR,
+	SWARM_ENV_ID,
+	SWARM_ENV_RUN,
 	aggregateUsage,
 	appendBounded,
 	buildChildEnv,
 	capPreviousOutput,
 	emptyUsage,
+	ensureSwarmTools,
 	formatUsageStats,
+	generateRunId,
 	getFinalOutput,
 	isFailedResult,
+	isValidWorkerId,
 	mapWithConcurrencyLimit,
+	nextSwarmDepth,
+	parseSwarmDepth,
 	substitutePrevious,
+	swarmProtocolSnippet,
 	truncateParallelOutput,
 	truncateSingleOutput,
 	validateModelString,
@@ -137,13 +153,27 @@ export interface SingleResult {
 	step?: number;
 }
 
+export interface SwarmInfo {
+	runId: string;
+	swarmDir: string;
+	depth: number;
+}
+
 export interface SubagentDetails {
-	mode: "single" | "parallel" | "chain";
+	mode: "single" | "parallel" | "chain" | "swarm";
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
 	/** Non-fatal discovery diagnostics (shadowed/skipped agents). */
 	warnings: string[];
+	swarm?: SwarmInfo;
+}
+
+export interface SwarmCtx {
+	depth: number;
+	swarmDir: string;
+	runId: string;
+	agentId: string;
 }
 
 function getResultOutput(result: SingleResult): string {
@@ -212,7 +242,23 @@ export async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: ((partial: AgentToolResult<any>) => void) | undefined,
 	makeDetails: (results: SingleResult[]) => any,
+	swarmCtx?: SwarmCtx,
 ): Promise<SingleResult> {
+	if (swarmCtx && swarmCtx.depth > MAX_SWARM_DEPTH) {
+		return {
+			agent: agentName,
+			agentSource: "unknown",
+			task,
+			cwd: defaultCwd,
+			exitCode: 1,
+			messages: [],
+			stderr: `Max swarm depth ${MAX_SWARM_DEPTH} exceeded.`,
+			usage: emptyUsage(),
+			step,
+			stopReason: "error",
+			errorMessage: `Max swarm depth ${MAX_SWARM_DEPTH} exceeded.`,
+		};
+	}
 	const agent = agents.find((a) => a.name.toLowerCase() === agentName.toLowerCase());
 
 	const failedResult = (stderr: string): SingleResult => ({
@@ -286,7 +332,9 @@ export async function runSingleAgent(
 			agentSource: agent.source,
 		};
 	}
-	if (toolCheck.tools && toolCheck.tools.length > 0) args.push("--tools", toolCheck.tools.join(","));
+	// Swarm workers need blackboard + recursion tools even when frontmatter is restrictive.
+	const effectiveTools = swarmCtx ? ensureSwarmTools(toolCheck.tools) : toolCheck.tools;
+	if (effectiveTools && effectiveTools.length > 0) args.push("--tools", effectiveTools.join(","));
 
 	let tmpPromptDir: string | null = null;
 
@@ -321,21 +369,36 @@ export async function runSingleAgent(
 
 		// `--` guards the task positional: a task starting with `-`
 		// (e.g. `--help`) must never be parsed as a CLI flag.
-		args.push("--", `Task: ${task}`);
+		const fullTask = swarmCtx
+			? `Task: ${task}${swarmProtocolSnippet(swarmCtx.swarmDir, swarmCtx.agentId, swarmCtx.runId, swarmCtx.depth)}`
+			: `Task: ${task}`;
+		args.push("--", fullTask);
 		let abortRequested = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
+			const childExtra: Record<string, string> = {
+				PI_AGENT_NAME: agent.name,
+				PI_AGENT_FILE: agent.filePath,
+			};
+			if (swarmCtx) {
+				childExtra[SWARM_ENV_DIR] = swarmCtx.swarmDir;
+				childExtra[SWARM_ENV_RUN] = swarmCtx.runId;
+				childExtra[SWARM_ENV_ID] = swarmCtx.agentId;
+				childExtra[SWARM_ENV_DEPTH] = String(swarmCtx.depth);
+			} else {
+				// Root dispatch runs at depth 0 so children can recurse with a budget.
+				const parentDepth = parseSwarmDepth(process.env[SWARM_ENV_DEPTH]);
+				childExtra[SWARM_ENV_DEPTH] = String(parentDepth);
+			}
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: resolvedCwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				detached: true,
 				// Minimal allowlist env: never propagate parent secrets
 				// (API keys, tokens) into repo-influenced agent contexts.
-				env: buildChildEnv(process.env, {
-					PI_AGENT_NAME: agent.name,
-					PI_AGENT_FILE: agent.filePath,
-				}),
+				env: buildChildEnv(process.env, childExtra),
 			});
 			let stdoutBuffer = "";
 			let stdoutTruncated = false;
@@ -420,13 +483,25 @@ export async function runSingleAgent(
 			const killProc = () => {
 				abortRequested = true;
 				if (exited) return;
-				proc.kill("SIGTERM");
+				// Process-group kill: children spawned with detached:true form
+				// their own pgid, so SIGTERM cascades to recursive grandchildren.
+				try {
+					if (proc.pid !== undefined) process.kill(-proc.pid, "SIGTERM");
+					else proc.kill("SIGTERM");
+				} catch {
+					try {
+						proc.kill("SIGTERM");
+					} catch {
+						/* already gone */
+					}
+				}
 				killTimer = setTimeout(() => {
 					// `proc.killed` is true immediately after SIGTERM, so
 					// escalation must be gated on actual exit, not on it.
 					if (!exited) {
 						try {
-							proc.kill("SIGKILL");
+							if (proc.pid !== undefined) process.kill(-proc.pid, "SIGKILL");
+							else proc.kill("SIGKILL");
 						} catch {
 							/* already gone */
 						}
@@ -499,11 +574,30 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 	default: "user",
 });
 
+const SwarmWorker = Type.Object({
+	id: Type.String({ description: "Worker ID (lowercase, used for done/<id>.md + inbox/<id>.jsonl)" }),
+	agent: Type.String({ description: "Name of the agent to invoke" }),
+	task: Type.String({ description: "Task to delegate to the worker" }),
+	cwd: Type.Optional(Type.String({ description: "Working directory for the worker process" })),
+});
+
+const SwarmSpec = Type.Object({
+	goal: Type.String({ description: "Overall swarm goal recorded in tasks.jsonl" }),
+	workers: Type.Array(SwarmWorker, { description: "Workers to run in parallel (max 8)" }),
+	merger: Type.Optional(
+		Type.Object({
+			agent: Type.String({ description: "Agent to synthesize worker outputs" }),
+			task: Type.String({ description: "Merger task; {previous} = concatenated done/*.md" }),
+		}),
+	),
+});
+
 const SubagentParams = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
+	swarm: Type.Optional(SwarmSpec),
 	agentScope: Type.Optional(AgentScopeSchema),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 });
@@ -514,7 +608,8 @@ export default function (pi: ExtensionAPI) {
 		label: "Subagent",
 		description: [
 			"Delegate tasks to specialized subagents with isolated context.",
-			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
+			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder),",
+			"swarm ({goal, workers[{id,agent,task}], merger?} hierarchical blackboard in .swarm/<runId>/).",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
@@ -532,16 +627,20 @@ export default function (pi: ExtensionAPI) {
 			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
 			const hasSingle = Boolean(params.agent && params.task);
-			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
+			const hasSwarm = Boolean(params.swarm && params.swarm.workers?.length);
+			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle) + Number(hasSwarm);
+
+			const parentDepth = parseSwarmDepth(process.env[SWARM_ENV_DEPTH]);
 
 			const makeDetails =
-				(mode: "single" | "parallel" | "chain") =>
+				(mode: "single" | "parallel" | "chain" | "swarm", swarm?: SwarmInfo) =>
 				(results: SingleResult[]): SubagentDetails => ({
 					mode,
 					agentScope,
 					projectAgentsDir: discovery.projectAgentsDir,
 					results,
 					warnings: discovery.warnings,
+					...(swarm ? { swarm } : {}),
 				});
 
 			if (modeCount !== 1) {
@@ -568,6 +667,10 @@ export default function (pi: ExtensionAPI) {
 				if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
 				if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
 				if (params.agent) requestedAgentNames.add(params.agent);
+				if (params.swarm) {
+					for (const w of params.swarm.workers) requestedAgentNames.add(w.agent);
+					if (params.swarm.merger) requestedAgentNames.add(params.swarm.merger.agent);
+				}
 
 				const projectAgentsRequested = Array.from(requestedAgentNames)
 					.map((name) => agents.find((a) => a.name.toLowerCase() === name.toLowerCase()))
@@ -586,7 +689,7 @@ export default function (pi: ExtensionAPI) {
 										`but there is no UI to confirm in. Run with a trusted project or a user-scoped agent.`,
 								},
 							],
-							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
+							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : hasSwarm ? "swarm" : "single")([]),
 						};
 					}
 					const ok = await ctx.ui.confirm(
@@ -596,9 +699,191 @@ export default function (pi: ExtensionAPI) {
 					if (!ok)
 						return {
 							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : "single")([]),
+							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : hasSwarm ? "swarm" : "single")([]),
 						};
 				}
+			}
+
+			if (params.swarm && params.swarm.workers.length > 0) {
+				const spec = params.swarm;
+				if (spec.workers.length > MAX_SWARM_TOTAL)
+					return {
+						content: [
+							{ type: "text", text: `Too many swarm workers (${spec.workers.length}). Max is ${MAX_SWARM_TOTAL}.` },
+						],
+						details: makeDetails("swarm")([]),
+					};
+				const seenIds = new Set<string>();
+				for (const w of spec.workers) {
+					if (!isValidWorkerId(w.id))
+						return {
+							content: [{ type: "text", text: `Invalid worker id "${w.id}": use lowercase letters, digits, -, _.` }],
+							details: makeDetails("swarm")([]),
+						};
+					const key = w.id.toLowerCase();
+					if (seenIds.has(key))
+						return {
+							content: [{ type: "text", text: `Duplicate worker id "${w.id}".` }],
+							details: makeDetails("swarm")([]),
+						};
+					seenIds.add(key);
+				}
+				const depthCheck = nextSwarmDepth(parentDepth);
+				if ("error" in depthCheck)
+					return {
+						content: [{ type: "text", text: `Swarm rejected: ${depthCheck.error}.` }],
+						details: makeDetails("swarm")([]),
+					};
+				const workerDepth = depthCheck.depth;
+				const runId = generateRunId();
+				let run;
+				try {
+					run = await createSwarmRun(ctx.cwd, runId);
+				} catch (e) {
+					return {
+						content: [{ type: "text", text: `Swarm setup failed: ${(e as Error)?.message ?? e}` }],
+						details: makeDetails("swarm")([]),
+						isError: true,
+					};
+				}
+				const swarmInfo: SwarmInfo = { runId, swarmDir: run.swarmDir, depth: workerDepth };
+				await appendTaskLedger(
+					run.swarmDir,
+					JSON.stringify({ runId, goal: spec.goal, workers: spec.workers.map((w) => ({ id: w.id, agent: w.agent })) }),
+				);
+				const allResults: SingleResult[] = new Array(spec.workers.length);
+				for (let i = 0; i < spec.workers.length; i++) {
+					allResults[i] = {
+						agent: spec.workers[i].agent,
+						agentSource: "unknown",
+						task: spec.workers[i].task,
+						cwd: ctx.cwd,
+						exitCode: RESULT_RUNNING,
+						messages: [],
+						stderr: "",
+						usage: emptyUsage(),
+					};
+				}
+				const emitSwarmUpdate = () => {
+					if (onUpdate) {
+						const running = allResults.filter((r) => r.exitCode === RESULT_RUNNING).length;
+						const done = allResults.filter((r) => r.exitCode !== RESULT_RUNNING).length;
+						onUpdate({
+							content: [{ type: "text", text: `Swarm ${runId}: ${done}/${allResults.length} done, ${running} running...` }],
+							details: makeDetails("swarm", swarmInfo)([...allResults]),
+						});
+					}
+				};
+				let aborted = false;
+				const workerResults = await mapWithConcurrencyLimit(spec.workers, MAX_CONCURRENCY, async (w, index) => {
+					let result: SingleResult;
+					try {
+						if (signal?.aborted) throw new Error("Subagent was aborted");
+						result = await runSingleAgent(
+							ctx.cwd,
+							dispatchDefaults,
+							agents,
+							w.agent,
+							w.task,
+							w.cwd,
+							undefined,
+							signal,
+							(partial) => {
+								if (partial.details?.results[0]) {
+									allResults[index] = partial.details.results[0];
+									emitSwarmUpdate();
+								}
+							},
+							makeDetails("swarm", swarmInfo),
+							{ depth: workerDepth, swarmDir: run.swarmDir, runId, agentId: w.id },
+						);
+					} catch (e) {
+						if (signal?.aborted) {
+							aborted = true;
+							result = {
+								agent: w.agent,
+								agentSource: "unknown",
+								task: w.task,
+								cwd: ctx.cwd,
+								exitCode: 1,
+								messages: [],
+								stderr: `Worker ${w.id} aborted.`,
+								usage: emptyUsage(),
+								stopReason: "aborted",
+								errorMessage: "Subagent was aborted",
+							};
+						} else {
+							result = {
+								agent: w.agent,
+								agentSource: "unknown",
+								task: w.task,
+								cwd: ctx.cwd,
+								exitCode: 1,
+								messages: [],
+								stderr: `Worker ${w.id} failed before completion: ${(e as Error)?.message ?? e}`,
+								usage: emptyUsage(),
+								stopReason: "error",
+								errorMessage: (e as Error)?.message ?? String(e),
+							};
+						}
+					}
+					allResults[index] = result;
+					// Best-effort: persist worker summary to blackboard even on failure.
+					try {
+						await appendOutbox(
+							run.swarmDir,
+							JSON.stringify({ ts: new Date().toISOString(), from: w.id, to: "all", body: truncateParallelOutput(getResultOutput(result)).slice(0, 2000) }),
+						);
+					} catch {
+						/* ignore */
+					}
+					emitSwarmUpdate();
+					return result;
+				});
+				if (aborted) {
+					return {
+						content: [{ type: "text", text: `Swarm ${runId} aborted. Partial: ${workerResults.filter((r) => !isFailedResult(r)).length}/${workerResults.length} succeeded. Blackboard kept at ${run.swarmDir}.` }],
+						details: makeDetails("swarm", swarmInfo)(workerResults),
+						isError: true,
+					};
+				}
+				const successCount = workerResults.filter((r) => !isFailedResult(r)).length;
+				const doneFiles = await readDoneFiles(run.swarmDir).catch(() => []);
+				const doneSection =
+					doneFiles.length > 0
+						? doneFiles.map((d) => `#### done/${d.id}.md\n\n${d.body.slice(0, 4000)}`).join("\n\n---\n\n")
+						: workerResults
+								.map((r, i) => `#### ${spec.workers[i].id} (${r.agent})\n\n${truncateParallelOutput(getResultOutput(r))}`)
+								.join("\n\n---\n\n");
+				let mergerOutput = "";
+				let mergerResult: SingleResult | null = null;
+				if (spec.merger && successCount > 0) {
+					if (signal?.aborted) throw new Error("Subagent was aborted");
+					mergerResult = await runSingleAgent(
+						ctx.cwd,
+						dispatchDefaults,
+						agents,
+						spec.merger.agent,
+						substitutePrevious(spec.merger.task, capPreviousOutput(doneSection)),
+						undefined,
+						workerResults.length + 1,
+						signal,
+						onUpdate,
+						makeDetails("swarm", swarmInfo),
+						{ depth: workerDepth, swarmDir: run.swarmDir, runId, agentId: "merger" },
+					);
+					mergerOutput = getFinalOutput(mergerResult.messages) || "";
+				}
+				const allForDetails = mergerResult ? [...workerResults, mergerResult] : workerResults;
+				const header = `Swarm ${runId}: ${successCount}/${workerResults.length} workers succeeded. Blackboard: ${run.swarmDir}`;
+				const body = mergerResult
+					? `${header}\n\n## Merger (${spec.merger?.agent})\n\n${truncateSingleOutput(mergerOutput || "(no output)")}`
+					: `${header}\n\n${doneSection.slice(0, 8000)}`;
+				return {
+					content: [{ type: "text", text: body }],
+					details: makeDetails("swarm", swarmInfo)(allForDetails),
+					isError: successCount === 0,
+				};
 			}
 
 			if (params.chain && params.chain.length > 0) {
@@ -834,6 +1119,20 @@ export default function (pi: ExtensionAPI) {
 					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
 				}
 				if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
+				return new Text(text, 0, 0);
+			}
+			if (args.swarm && args.swarm.workers?.length > 0) {
+				const workers = args.swarm.workers;
+				let text =
+					theme.fg("toolTitle", theme.bold("subagent ")) +
+					theme.fg("accent", `swarm (${workers.length} workers${args.swarm.merger ? " + merger" : ""})`) +
+					theme.fg("muted", ` [${scope}]`);
+				for (const w of workers.slice(0, 3)) {
+					const preview = w.task.length > 40 ? `${w.task.slice(0, 40)}...` : w.task;
+					text += `\n  ${theme.fg("accent", `${w.id}:${w.agent}`)}${theme.fg("dim", ` ${preview}`)}`;
+				}
+				if (workers.length > 3) text += `\n  ${theme.fg("muted", `... +${workers.length - 3} more`)}`;
+				if (args.swarm.goal) text += `\n  ${theme.fg("dim", `goal: ${args.swarm.goal.slice(0, 80)}`)}`;
 				return new Text(text, 0, 0);
 			}
 			const agentName = args.agent || "...";
@@ -1079,6 +1378,34 @@ export default function (pi: ExtensionAPI) {
 
 				// Collapsed view (or still running)
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
+				for (const r of details.results) {
+					const rIcon =
+						r.exitCode === RESULT_RUNNING
+							? theme.fg("warning", "⏳")
+							: isFailedResult(r)
+								? theme.fg("error", "✗")
+								: theme.fg("success", "✓");
+					const displayItems = getDisplayItems(r.messages);
+					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
+					if (displayItems.length === 0)
+						text += `\n${theme.fg("muted", r.exitCode === RESULT_RUNNING ? "(running...)" : "(no output)")}`;
+					else text += `\n${renderDisplayItems(displayItems, 5)}`;
+				}
+				if (!isRunning) {
+					const usageStr = formatUsageStats(aggregateUsage(details.results));
+					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
+				}
+				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+				return new Text(text, 0, 0);
+			}
+
+			if (details.mode === "swarm") {
+				const running = details.results.filter((r) => r.exitCode === RESULT_RUNNING).length;
+				const successCount = details.results.filter((r) => r.exitCode !== RESULT_RUNNING && !isFailedResult(r)).length;
+				const isRunning = running > 0;
+				const icon = isRunning ? theme.fg("warning", "⏳") : theme.fg("success", "✓");
+				const swarmLine = details.swarm ? ` ${details.swarm.runId} @ ${details.swarm.swarmDir}` : "";
+				let text = `${icon} ${theme.fg("toolTitle", theme.bold("swarm "))}${theme.fg("accent", `${successCount}/${details.results.length} workers`)}${theme.fg("muted", swarmLine)}`;
 				for (const r of details.results) {
 					const rIcon =
 						r.exitCode === RESULT_RUNNING

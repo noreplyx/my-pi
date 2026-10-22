@@ -76,7 +76,7 @@ describe("agent-switch", () => {
 		await commands.get("agent").handler("planner", ctx);
 		expect(process.env.PI_AGENT_NAME).toBe("planner");
 		expect(process.env.PI_AGENT_FILE ?? "").toMatch(/planner\.md$/);
-		expect(calls.setActiveTools.at(-1)).toEqual(["read"]);
+		expect(calls.setActiveTools.at(-1)).toEqual(["read", "write", "bash", "subagent"]);
 		expect(widgetLog.at(-1)?.[1]).toEqual(["agent: planner"]);
 
 		const event: any = { systemPromptOptions: { sections: {} } };

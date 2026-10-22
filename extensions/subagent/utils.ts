@@ -9,6 +9,21 @@
 
 export const MAX_PARALLEL_TASKS = 8;
 export const MAX_CONCURRENCY = 4;
+/** Hierarchical swarm caps (user-confirmed defaults). */
+export const MAX_SWARM_DEPTH = 3;
+export const MAX_SWARM_TOTAL = 8;
+/** Blackboard dir name inside repo cwd: <cwd>/.swarm/<runId>/ */
+export const SWARM_DIR_NAME = ".swarm";
+/** Env keys threaded into child `pi` processes for swarm identity. */
+export const SWARM_ENV_DIR = "PI_SWARM_DIR";
+export const SWARM_ENV_RUN = "PI_SWARM_RUN";
+export const SWARM_ENV_ID = "PI_SWARM_ID";
+export const SWARM_ENV_DEPTH = "PI_SUBAGENT_DEPTH";
+/** Tools a swarm worker needs for blackboard + recursion. Merged, never removed. */
+export const SWARM_REQUIRED_TOOLS = ["subagent", "read", "write", "bash"];
+/** Run IDs are fs-safe timestamps: swarm-YYYYMMDD-HHMMSS-xxxx */
+export const SWARM_RUN_ID_RE = /^swarm-\d{8}-\d{6}-[a-z0-9]{4}$/;
+export const SWARM_WORKER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 /** Cap for per-task text surfaced in parallel summaries. */
 export const PER_TASK_OUTPUT_CAP = 50 * 1024;
 /** Cap for single/chain final output surfaced in the tool result. */
@@ -288,6 +303,91 @@ export function appendBounded(current: string, chunk: string, capBytes: number):
 	let text = (current + chunk.slice(0, Math.max(0, end - current.length))).slice(0, end);
 	while (Buffer.byteLength(text, "utf8") > capBytes) text = text.slice(0, -1);
 	return { text, truncated: true };
+}
+
+/** Swarm: depth guard. Root dispatch is depth 0, workers run at depth+1. */
+export function nextSwarmDepth(parentDepth: number): { depth: number } | { error: string } {
+	if (!Number.isInteger(parentDepth) || parentDepth < 0) return { error: `invalid depth: ${parentDepth}` };
+	const depth = parentDepth + 1;
+	if (depth > MAX_SWARM_DEPTH) return { error: `max swarm depth ${MAX_SWARM_DEPTH} exceeded` };
+	return { depth };
+}
+
+export function parseSwarmDepth(raw: unknown): number {
+	const n = typeof raw === "string" ? Number.parseInt(raw, 10) : typeof raw === "number" ? raw : NaN;
+	return Number.isInteger(n) && n >= 0 ? n : 0;
+}
+
+export function isValidRunId(runId: string): boolean {
+	return SWARM_RUN_ID_RE.test(runId);
+}
+
+export function isValidWorkerId(id: string): boolean {
+	return SWARM_WORKER_ID_RE.test(id);
+}
+
+export function generateRunId(now = Date.now(), rand = Math.random()): string {
+	const d = new Date(now);
+	const pad = (n: number) => String(n).padStart(2, "0");
+	const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+	const suffix = Math.floor(rand * 46656)
+		.toString(36)
+		.padStart(3, "0");
+	// 4th char from fractional time to avoid collisions within same second.
+	const extra = Math.floor((now % 1000) / 28)
+		.toString(36)
+		.padStart(1, "0");
+	return `swarm-${stamp}-${suffix}${extra}`;
+}
+
+/** Merge required swarm tools into a validated tool list (dedup, preserve order). */
+export function ensureSwarmTools(existing: string[] | undefined): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const t of [...(existing ?? []), ...SWARM_REQUIRED_TOOLS]) {
+		const k = t.toLowerCase();
+		if (!seen.has(k)) {
+			seen.add(k);
+			out.push(t);
+		}
+	}
+	return out;
+}
+
+export interface SwarmMessage {
+	ts: string;
+	from: string;
+	to: string;
+	body: string;
+}
+
+export function makeSwarmMessage(from: string, to: string, body: string, ts = new Date().toISOString()): string {
+	return JSON.stringify({ ts, from, to, body });
+}
+
+export function parseSwarmMessageLine(line: string): SwarmMessage | null {
+	if (!line.trim()) return null;
+	try {
+		const v = JSON.parse(line) as Partial<SwarmMessage>;
+		if (typeof v.from !== "string" || typeof v.body !== "string") return null;
+		return { ts: typeof v.ts === "string" ? v.ts : "", from: v.from, to: typeof v.to === "string" ? v.to : "all", body: v.body };
+	} catch {
+		return null;
+	}
+}
+
+/** Short protocol injected into every swarm worker prompt (keeps blackboard discoverable). */
+export function swarmProtocolSnippet(swarmDir: string, workerId: string, runId: string, depth: number): string {
+	return [
+		``,
+		`Swarm context: run ${runId}, you are worker "${workerId}" at depth ${depth}/${MAX_SWARM_DEPTH}.`,
+		`Blackboard dir (repo-local): ${swarmDir}`,
+		` - Read tasks: tasks.jsonl | peers' outputs: done/<workerId>.md | inbox: inbox/${workerId}.jsonl`,
+		` - Publish: write your findings to done/${workerId}.md, then append one JSON line`,
+		`   {"ts":"<iso>","from":"${workerId}","to":"all","body":"<summary>"} to outbox.jsonl`,
+		` - Message a peer: append {"from":"${workerId}","to":"<peerId>","body":"..."} to inbox/<peerId>.jsonl`,
+		` - Recurse (depth < ${MAX_SWARM_DEPTH}): use subagent with ≤${MAX_SWARM_TOTAL} total workers.`,
+	].join("\n");
 }
 
 export async function mapWithConcurrencyLimit<TIn, TOut>(

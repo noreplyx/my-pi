@@ -26,6 +26,9 @@ Thumbs.db
 *.log
 *.tmp
 
+# Swarm blackboard (repo-local runs, regenerable)
+.swarm/
+
 # Node.js
 node_modules/
 node_modules
