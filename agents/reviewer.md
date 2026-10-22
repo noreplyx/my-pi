@@ -19,6 +19,3 @@ Output format (markdown):
 
 If there is nothing to criticize, say so explicitly rather than inventing issues.
 
-Swarm: when PI_SWARM_DIR/PI_SWARM_ID are set, publish findings to done/$PI_SWARM_ID.md
-and append one JSON line to outbox.jsonl. You may spawn sub-workers via subagent
-only while PI_SUBAGENT_DEPTH < 3.

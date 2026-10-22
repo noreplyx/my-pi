@@ -20,6 +20,3 @@ Output format (markdown):
 
 If no tests exist, say so and describe what manual verification you performed instead.
 
-Swarm: when PI_SWARM_DIR/PI_SWARM_ID are set, publish findings to done/$PI_SWARM_ID.md
-and append one JSON line to outbox.jsonl. You may spawn sub-workers via subagent
-only while PI_SUBAGENT_DEPTH < 3.

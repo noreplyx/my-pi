@@ -31,8 +31,8 @@ export const SWARM_ENV_ID = "PI_SWARM_ID";
 export const SWARM_ENV_DEPTH = "PI_SUBAGENT_DEPTH";
 /** Tools a swarm worker needs for blackboard + recursion. Merged, never removed. */
 export const SWARM_REQUIRED_TOOLS = ["subagent", "read", "write", "bash"];
-/** Run IDs are fs-safe timestamps: swarm-YYYYMMDD-HHMMSS-xxxx */
-export const SWARM_RUN_ID_RE = /^swarm-\d{8}-\d{6}-[a-z0-9]{4}$/;
+/** Run IDs are fs-safe timestamps: swarm-YYYYMMDD-HHMMSS-xxxx, forks append -rN */
+export const SWARM_RUN_ID_RE = /^swarm-\d{8}-\d{6}-[a-z0-9]{4}(?:-r\d+)?$/;
 export const SWARM_WORKER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 /** Cap for per-task text surfaced in parallel summaries. */
 export const PER_TASK_OUTPUT_CAP = 50 * 1024;
@@ -57,7 +57,17 @@ export const MAX_DESCRIPTION_CHARS = 2000;
 export const RESULT_RUNNING = -1;
 
 /** Machine-readable cause for a subagent result. */
-export type SubagentErrorCode = "ok" | "spawn-failed" | "timeout" | "aborted" | "non-zero" | "setup-error";
+export type SubagentErrorCode =
+	| "ok"
+	| "spawn-failed"
+	| "timeout"
+	| "aborted"
+	| "non-zero"
+	| "setup-error"
+	| "budget-exceeded";
+
+/** Budget for packing merger input (done/*.md + outbox fallback). */
+export const MERGER_INPUT_BUDGET = 24 * 1024;
 
 /** Clamp a caller-supplied timeoutMs to [1, TIMEOUT_MAX_MS]; undefined → default. */
 export function clampTimeoutMs(raw: unknown): { timeoutMs: number; clamped: boolean; error?: string } {
@@ -132,6 +142,38 @@ export function formatUsageStats(
 	}
 	if (model) parts.push(model);
 	return parts.join(" ");
+}
+
+/**
+ * Pack worker outputs into a merger prompt section within a byte budget.
+ * Deterministic order (sorted by id); each section is capped so one giant
+ * worker cannot evict the rest. Returns the packed text + omitted count.
+ */
+export function buildMergerInput(
+	sections: Array<{ id: string; agent: string; body: string }>,
+	budgetBytes = MERGER_INPUT_BUDGET,
+): { text: string; included: number; omitted: number } {
+	const sorted = [...sections].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	if (sorted.length === 0) return { text: "(no worker outputs)", included: 0, omitted: 0 };
+	const perSectionCap = Math.max(1024, Math.floor(budgetBytes / Math.max(1, sorted.length)));
+	const parts: string[] = [];
+	let omitted = 0;
+	for (const s of sorted) {
+		const header = `#### ${s.id} (${s.agent})`;
+		const capped = truncateToBudget(s.body || "(no output)", perSectionCap, `Output ${s.id}`);
+		const section = `${header}\n\n${capped}`;
+		const currentBytes = Buffer.byteLength(parts.join("\n\n---\n\n"), "utf8");
+		if (currentBytes + Buffer.byteLength(section, "utf8") > budgetBytes) {
+			omitted++;
+			continue;
+		}
+		parts.push(section);
+	}
+	return {
+		text: parts.join("\n\n---\n\n") || "(all worker outputs exceeded budget)",
+		included: parts.length,
+		omitted,
+	};
 }
 
 /** Sum usage across results. contextTokens takes the max (high-water mark). */
