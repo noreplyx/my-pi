@@ -1,6 +1,5 @@
 {
   "lastChangelogVersion": "1.3.0",
   "defaultProvider": "opencode-go",
-  "defaultModel": "kimi-k3",
-  "backgroundAuto": true
+  "defaultModel": "kimi-k3"
 }
