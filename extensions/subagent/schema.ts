@@ -32,11 +32,21 @@ export const OnErrorSchema = Type.Optional(
 	}),
 );
 
+export const AllowQuestionsSchema = Type.Optional(
+	Type.Boolean({ description: "Allow the subagent to ask the user questions via ask_user (default true). When false, questions are auto-dismissed." }),
+);
+
+export const QuestionTimeoutMsSchema = Type.Optional(
+	Type.Number({ description: "Per-question dialog budget in ms (default: inherit task timeout). Unanswered questions auto-dismiss." }),
+);
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	timeoutMs: TimeoutMsSchema,
+	allowQuestions: AllowQuestionsSchema,
+	questionTimeoutMs: QuestionTimeoutMsSchema,
 });
 
 const ChainItem = Type.Object({
@@ -44,6 +54,8 @@ const ChainItem = Type.Object({
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	timeoutMs: TimeoutMsSchema,
+	allowQuestions: AllowQuestionsSchema,
+	questionTimeoutMs: QuestionTimeoutMsSchema,
 });
 
 export const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
@@ -57,6 +69,8 @@ const SwarmWorker = Type.Object({
 	task: Type.String({ description: "Task to delegate to the worker" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the worker process" })),
 	timeoutMs: TimeoutMsSchema,
+	allowQuestions: AllowQuestionsSchema,
+	questionTimeoutMs: QuestionTimeoutMsSchema,
 });
 
 const SwarmSpec = Type.Object({
@@ -68,6 +82,8 @@ const SwarmSpec = Type.Object({
 			task: Type.String({ description: "Merger task; {previous} = concatenated done/*.md" }),
 			cwd: Type.Optional(Type.String({ description: "Working directory for the merger process" })),
 			timeoutMs: TimeoutMsSchema,
+			allowQuestions: AllowQuestionsSchema,
+			questionTimeoutMs: QuestionTimeoutMsSchema,
 		}),
 	),
 	cleanup: Type.Optional(
@@ -90,6 +106,8 @@ export const SubagentParams = Type.Object({
 	retry: RetrySchema,
 	totalTimeoutMs: TotalTimeoutMsSchema,
 	onError: OnErrorSchema,
+	allowQuestions: AllowQuestionsSchema,
+	questionTimeoutMs: QuestionTimeoutMsSchema,
 });
 
 export type SubagentParamsType = typeof SubagentParams.static;

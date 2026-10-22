@@ -1,8 +1,16 @@
 /**
- * Single-agent dispatch: spawn one isolated `pi --mode json` child process.
+ * Single-agent dispatch: spawn one isolated `pi --mode rpc` child process.
  *
- * Moved verbatim from index.ts (runSingleAgent + helpers) so orchestrators
- * share it without pulling in the tool wiring.
+ * Option C (interactive forwarding): the child runs as an RPC server with
+ * a piped stdin. The parent sends a `prompt` command, streams
+ * `message_end` events for the result, forwards `extension_ui_request`
+ * (select / confirm / input, from `ask_user` or permission prompts) to
+ * the parent `ctx.ui` under a global mutex, and kills the child on
+ * `agent_settled`.
+ *
+ * Frontmatter gating (Q2): `ask_user` is only visible to the child model
+ * when the agent's frontmatter `tools:` lists it — enforced by the
+ * `--tools` allowlist below, not by force-adding here.
  */
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -12,7 +20,8 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, formatAgentList } from "./agents.ts";
-import type { DispatchDefaults, RunSingleAgentOptions, SingleResult, SwarmCtx } from "./types.ts";
+import { isFireAndForgetMethod, isForwardedMethod, withQuestionLock } from "./questions.ts";
+import type { DispatchDefaults, ParentUI, RunSingleAgentOptions, SingleResult, SwarmCtx } from "./types.ts";
 import {
 	KILL_GRACE_MS,
 	MAX_MESSAGES,
@@ -64,6 +73,16 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
+function safeWriteStdin(proc: { stdin?: { write: (s: string) => unknown; writable?: boolean } | null }, obj: unknown): void {
+	try {
+		const stdin = proc.stdin as { write: (s: string) => unknown; writable?: boolean } | null | undefined;
+		if (!stdin || stdin.writable === false) return;
+		stdin.write(`${JSON.stringify(obj)}\n`);
+	} catch {
+		/* child going away — settled/timeout path owns the outcome */
+	}
+}
+
 export async function runSingleAgent(
 	defaultCwd: string,
 	dispatchDefaults: DispatchDefaults,
@@ -81,6 +100,10 @@ export async function runSingleAgent(
 	const startTime = Date.now();
 	const timeoutClamp = clampTimeoutMs(opts?.timeoutMs);
 	const effectiveTimeoutMs = timeoutClamp.timeoutMs;
+	const allowQuestions = opts?.allowQuestions ?? true;
+	const questionTimeoutMs = opts?.questionTimeoutMs;
+	const parentUI = opts?.parentUI as ParentUI | undefined;
+	const labelPrefix = opts?.labelPrefix;
 	const setupFailed = (stderr: string): SingleResult => ({
 		agent: agentName,
 		agentSource: "unknown",
@@ -143,7 +166,7 @@ export async function runSingleAgent(
 		resolvedCwd = candidate;
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	const args: string[] = ["--mode", "rpc", "--no-session"];
 	const inheritsDispatchConfig = !agent.model;
 	const modelCheck = validateModelString(agent.model);
 	const dispatchModelCheck: { model?: string; error?: string } = agent.model
@@ -211,7 +234,6 @@ export async function runSingleAgent(
 		const fullTask = swarmCtx
 			? `Task: ${task}${swarmProtocolSnippet(swarmCtx.swarmDir, swarmCtx.agentId, swarmCtx.runId, swarmCtx.depth)}`
 			: `Task: ${task}`;
-		args.push("--", fullTask);
 		let abortRequested = false;
 		let timedOut = false;
 		let spawnFailed = false;
@@ -234,17 +256,119 @@ export async function runSingleAgent(
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: resolvedCwd,
 				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: ["pipe", "pipe", "pipe"],
 				detached: true,
 				env: buildChildEnv(process.env, childExtra),
 			});
 			let stdoutBuffer = "";
 			let stdoutTruncated = false;
 			let stderrTruncated = false;
+			let settled = false;
+			let resolveOnce = (code: number) => {
+				if (settled) return;
+				settled = true;
+				resolve(code);
+			};
+			// Reassign to guard double-resolve from close + settled paths.
+			resolveOnce = ((orig: (code: number) => void) => {
+				let done = false;
+				return (code: number) => {
+					if (done) return;
+					done = true;
+					settled = true;
+					orig(code);
+				};
+			})(resolve);
 
 			const pushMessage = (msg: Message) => {
 				if (currentResult.messages.length >= MAX_MESSAGES) return;
 				currentResult.messages.push(msg);
+			};
+
+			const finishSettled = (code: number) => {
+				cleanupListeners();
+				killGroup("SIGTERM");
+				escalateKill();
+				resolveOnce(code);
+			};
+
+			const forwardUIRequest = (req: any) => {
+				const id = req?.id;
+				const method = req?.method;
+				if (typeof id !== "string" || typeof method !== "string") return;
+				if (isFireAndForgetMethod(method)) {
+					if (method === "notify" && parentUI?.hasUI) {
+						try {
+							parentUI.notify(
+								`${labelPrefix ? `${labelPrefix} ` : ""}${String(req.message ?? "(notification)").slice(0, 500)}`,
+								req.notifyType ?? "info",
+							);
+						} catch {
+							/* never break the child on notify */
+						}
+					}
+					return;
+				}
+				if (!isForwardedMethod(method)) {
+					currentResult.stderr += `\n[question skipped: unsupported method "${method}"]`;
+					safeWriteStdin(proc, { type: "extension_ui_response", id, cancelled: true });
+					return;
+				}
+				if (!allowQuestions || !parentUI?.hasUI) {
+					const reason = !parentUI?.hasUI ? "no UI to confirm in" : "questions disabled for this task";
+					currentResult.stderr += `\n[question skipped (${reason}): ${String(req.title ?? method).slice(0, 120)}]`;
+					if (method === "confirm") {
+						safeWriteStdin(proc, { type: "extension_ui_response", id, confirmed: false });
+					} else {
+						safeWriteStdin(proc, { type: "extension_ui_response", id, cancelled: true });
+					}
+					return;
+				}
+				void withQuestionLock(async () => {
+					if (settled || signal?.aborted) {
+						safeWriteStdin(proc, method === "confirm" ? { type: "extension_ui_response", id, confirmed: false } : { type: "extension_ui_response", id, cancelled: true });
+						return;
+					}
+					const title = `${labelPrefix ? `${labelPrefix} ` : `[${agentName}] `}${String(req.title ?? "Subagent question").slice(0, 300)}`;
+					const ctrl = new AbortController();
+					const onParentAbort = () => ctrl.abort();
+					let qTimer: ReturnType<typeof setTimeout> | null = null;
+					if (signal) {
+						if (signal.aborted) ctrl.abort();
+						else signal.addEventListener("abort", onParentAbort, { once: true });
+					}
+					if (typeof questionTimeoutMs === "number" && Number.isFinite(questionTimeoutMs) && questionTimeoutMs > 0) {
+						qTimer = setTimeout(() => ctrl.abort(), Math.floor(questionTimeoutMs));
+					}
+					try {
+						if (method === "select") {
+							const options = Array.isArray(req.options) ? req.options.filter((o: unknown) => typeof o === "string").slice(0, 20) : [];
+							const picked = await parentUI.select(title, options, { signal: ctrl.signal });
+							if (picked === undefined) {
+								safeWriteStdin(proc, { type: "extension_ui_response", id, cancelled: true });
+							} else {
+								safeWriteStdin(proc, { type: "extension_ui_response", id, value: picked });
+							}
+						} else if (method === "confirm") {
+							const ok = await parentUI.confirm(title, String(req.message ?? "").slice(0, 2000), { signal: ctrl.signal });
+							safeWriteStdin(proc, { type: "extension_ui_response", id, confirmed: ok });
+						} else {
+							const text = await parentUI.input(title, typeof req.placeholder === "string" ? req.placeholder : undefined, {
+								signal: ctrl.signal,
+							});
+							if (text === undefined) {
+								safeWriteStdin(proc, { type: "extension_ui_response", id, cancelled: true });
+							} else {
+								safeWriteStdin(proc, { type: "extension_ui_response", id, value: text });
+							}
+						}
+					} catch {
+						safeWriteStdin(proc, method === "confirm" ? { type: "extension_ui_response", id, confirmed: false } : { type: "extension_ui_response", id, cancelled: true });
+					} finally {
+						if (qTimer) clearTimeout(qTimer);
+						if (signal) signal.removeEventListener("abort", onParentAbort);
+					}
+				});
 			};
 
 			const processLine = (line: string) => {
@@ -253,6 +377,23 @@ export async function runSingleAgent(
 				try {
 					event = JSON.parse(line);
 				} catch {
+					return;
+				}
+
+				if (event.type === "extension_ui_request") {
+					forwardUIRequest(event);
+					return;
+				}
+
+				if (event.type === "response" && event.command === "prompt") {
+					if (event.success === false) {
+						currentResult.stderr += `\n[prompt rejected: ${String(event.error ?? "unknown error").slice(0, 500)}]`;
+					}
+					return;
+				}
+
+				if (event.type === "agent_settled") {
+					finishSettled(0);
 					return;
 				}
 
@@ -277,11 +418,6 @@ export async function runSingleAgent(
 						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
 						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 					}
-					emitUpdate();
-				}
-
-				if (event.type === "tool_result_end" && event.message) {
-					pushMessage(event.message as Message);
 					emitUpdate();
 				}
 			};
@@ -346,13 +482,14 @@ export async function runSingleAgent(
 
 			const killProc = () => {
 				abortRequested = true;
+				safeWriteStdin(proc, { id: `abort-${Date.now()}`, type: "abort" });
 				if (exited) return;
 				killGroup("SIGTERM");
 				escalateKill();
 			};
 
 			const onTimeout = () => {
-				if (exited) return;
+				if (exited || settled) return;
 				timedOut = true;
 				abortRequested = true;
 				currentResult.stderr += `\n[timeout after ${formatDuration(effectiveTimeoutMs)} (limit ${effectiveTimeoutMs}ms)]`;
@@ -375,7 +512,7 @@ export async function runSingleAgent(
 				if (currentResult.messages.length >= MAX_MESSAGES) {
 					currentResult.stderr += `\n[message log capped at ${MAX_MESSAGES} messages]`;
 				}
-				resolve(code ?? 0);
+				resolveOnce(code ?? 0);
 			});
 
 			proc.on("error", (err) => {
@@ -383,7 +520,7 @@ export async function runSingleAgent(
 				spawnFailed = true;
 				cleanupListeners();
 				currentResult.stderr += `Failed to start agent process: ${err?.message ?? err}`;
-				resolve(1);
+				resolveOnce(1);
 			});
 
 			if (signal) {
@@ -392,6 +529,8 @@ export async function runSingleAgent(
 			}
 			timeoutTimer = setTimeout(onTimeout, effectiveTimeoutMs);
 			timeoutTimer.unref?.();
+
+			safeWriteStdin(proc, { id: `prompt-${Date.now()}`, type: "prompt", message: fullTask });
 		});
 
 		currentResult.exitCode = exitCode;

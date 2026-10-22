@@ -1,14 +1,16 @@
 # Subagent extension
 
-Delegate tasks to specialized agents with isolated context (`pi --mode json` child processes).
+Delegate tasks to specialized agents with isolated context (`pi --mode rpc` child processes with question forwarding).
 
 ## Layout
 
 | File | Contents |
 |---|---|
-| `index.ts` | Tool wiring only (`subagent`, `swarm_status/cancel/resume/gc`, `/swarm-gc`) + TUI renderers |
-| `types.ts` | `SingleResult`, `SwarmInfo`, `SubagentDetails`, `SwarmCtx`, dispatch types |
-| `single.ts` | `runSingleAgent()` — one isolated child process + streaming + process-group kill |
+| `index.ts` | Tool wiring only (`subagent`, `ask_user`, `swarm_status/cancel/resume/gc`, `/swarm-gc`) + TUI renderers |
+| `types.ts` | `SingleResult`, `SwarmInfo`, `SubagentDetails`, `SwarmCtx`, `ParentUI`, dispatch types |
+| `single.ts` | `runSingleAgent()` — one isolated `--mode rpc` child + UI forwarding + process-group kill |
+| `ask-user-tool.ts` | `ask_user` tool (frontmatter-gated, child calls `ctx.ui`, parent proxies) |
+| `questions.ts` | Parent-UI bridge: global question mutex, `decideQuestionResponse`, fire-and-forget filter |
 | `parallel.ts` | `runParallel()` — concurrency 4, per-task retry, total budget |
 | `chain.ts` | `runChain()` — sequential `{previous}`, per-step retry, `onError` |
 | `swarm-orchestrator.ts` | `runSwarm()`, `validateWorkers()`, `resumeMissingWorkers()` |
@@ -22,10 +24,28 @@ Delegate tasks to specialized agents with isolated context (`pi --mode json` chi
 
 | Mode | Params | Notes |
 |---|---|---|
-| single | `agent`, `task`, `cwd?`, `timeoutMs?` | Retried once by default |
-| parallel | `tasks[{agent,task,cwd?,timeoutMs?}]` | Max 8 tasks, concurrency 4, abort/budget drains queue |
-| chain | `chain[{agent,task,cwd?,timeoutMs?}]` | Sequential, `{previous}` = capped prior output; `onError: abort` (default) or `continue` |
-| swarm | `swarm{goal, workers[{id,agent,task,cwd?,timeoutMs?}], merger?, cleanup?}` | Blackboard `.swarm/<runId>/`, depth ≤3, total ≤8 |
+| single | `agent`, `task`, `cwd?`, `timeoutMs?`, `allowQuestions?`, `questionTimeoutMs?` | Retried once by default |
+| parallel | `tasks[{agent,task,cwd?,timeoutMs?,allowQuestions?,questionTimeoutMs?}]` | Max 8 tasks, concurrency 4, abort/budget drains queue |
+| chain | `chain[{agent,task,cwd?,timeoutMs?,allowQuestions?,questionTimeoutMs?}]` | Sequential, `{previous}` = capped prior output; `onError: abort` (default) or `continue` |
+| swarm | `swarm{goal, workers[{id,agent,task,cwd?,timeoutMs?,allowQuestions?,questionTimeoutMs?}], merger?, cleanup?}` | Blackboard `.swarm/<runId>/`, depth ≤3, total ≤8 |
+
+## Questions (Option C)
+
+Children run as `pi --mode rpc` servers. `ask_user` calls and permission
+prompts arrive as `extension_ui_request` on stdout; the parent forwards
+`select` / `confirm` / `input` to its own `ctx.ui` under a global FIFO mutex
+(parallel / swarm workers queue — titles are prefixed `[parallel …]`,
+`[chain …]`, `[swarm <runId>/<workerId>]`), then writes
+`extension_ui_response` back to the child's stdin.
+
+* `ask_user` is frontmatter-gated: the child model sees it only when the
+  agent's `tools:` lists `ask_user` (via the `--tools` allowlist).
+* `allowQuestions:false` (per-task or top-level) auto-dismisses;
+  `questionTimeoutMs` bounds each dialog.
+* `editor` / `custom` are rejected visibly (`[question skipped]` in stderr);
+  `notify` / `setStatus` / `setWidget` are mirrored one-way.
+* No-UI parents (`!ctx.hasUI`, e.g. headless) auto-dismiss with a stderr note,
+  preserving the old fail-closed behavior.
 
 Common: `retry {attempts (default 2), backoffMs (default 1000)}`, `totalTimeoutMs` (whole-operation
 budget, default unset = unbounded; chain recommends sum of steps, parallel/swarm max + 60s),

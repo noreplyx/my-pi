@@ -5,7 +5,7 @@
 import type { AgentConfig } from "./agents.ts";
 import { isBudgetExceeded, runWithRetry, totalDeadline } from "./resilience.ts";
 import { runSingleAgent } from "./single.ts";
-import type { DispatchDefaults, OnUpdateCallback, SingleResult } from "./types.ts";
+import type { DispatchDefaults, OnUpdateCallback, ParentUI, SingleResult } from "./types.ts";
 import { capPreviousOutput, emptyUsage, getFinalOutput, isFailedResult, substitutePrevious, truncateSingleOutput } from "./utils.ts";
 
 export interface ChainStepInput {
@@ -13,6 +13,8 @@ export interface ChainStepInput {
 	task: string;
 	cwd?: string;
 	timeoutMs?: number;
+	allowQuestions?: boolean;
+	questionTimeoutMs?: number;
 }
 
 export interface ChainOptions {
@@ -21,6 +23,8 @@ export interface ChainOptions {
 	retryBackoffMs?: number;
 	totalTimeoutMs?: number;
 	onError?: "abort" | "continue";
+	allowQuestions?: boolean;
+	questionTimeoutMs?: number;
 }
 
 export interface ChainDeps {
@@ -30,6 +34,7 @@ export interface ChainDeps {
 	signal?: AbortSignal;
 	onUpdate?: OnUpdateCallback;
 	makeDetails: (results: SingleResult[]) => any;
+	parentUI?: ParentUI;
 }
 
 function getResultOutput(result: SingleResult): string {
@@ -44,7 +49,7 @@ export async function runChain(
 	opts: ChainOptions,
 	deps: ChainDeps,
 ): Promise<{ results: SingleResult[]; text: string; isError: boolean }> {
-	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails } = deps;
+	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, parentUI } = deps;
 	const onError = opts.onError ?? "abort";
 	const deadline = totalDeadline(opts.totalTimeoutMs);
 	const results: SingleResult[] = [];
@@ -99,9 +104,15 @@ export async function runChain(
 					signal,
 					chainUpdate,
 					makeDetails,
-					undefined,
-					{ timeoutMs: step.timeoutMs ?? opts.fallbackTimeoutMs },
-				),
+							undefined,
+							{
+								timeoutMs: step.timeoutMs ?? opts.fallbackTimeoutMs,
+								allowQuestions: step.allowQuestions ?? opts.allowQuestions ?? true,
+								questionTimeoutMs: step.questionTimeoutMs ?? opts.questionTimeoutMs,
+								parentUI,
+								labelPrefix: `[chain ${i + 1}/${steps.length} ${step.agent}]`,
+							},
+						),
 			{ attempts: opts.retryAttempts, backoffMs: opts.retryBackoffMs, signal },
 		);
 		const withAttempts: SingleResult = { ...result, attempts };

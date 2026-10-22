@@ -43,7 +43,8 @@ import {
 } from "./swarm.ts";
 import { createSwarmRun } from "./swarm.ts";
 import { resumeMissingWorkers, runSwarm, validateWorkers } from "./swarm-orchestrator.ts";
-import type { SingleResult, SubagentDetails, SwarmInfo } from "./types.ts";
+import { askUserToolDefinition } from "./ask-user-tool.ts";
+import type { ParentUI, SingleResult, SubagentDetails, SwarmInfo } from "./types.ts";
 import {
 	MAX_PARALLEL_TASKS,
 	RESULT_RUNNING,
@@ -62,6 +63,21 @@ export { runSingleAgent } from "./single.ts";
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
+		name: askUserToolDefinition.name,
+		label: askUserToolDefinition.label,
+		description: askUserToolDefinition.description,
+		parameters: askUserToolDefinition.parameters,
+		outputSchema: (askUserToolDefinition as any).outputSchema,
+		defaultActive: (askUserToolDefinition as any).defaultActive,
+		exposure: (askUserToolDefinition as any).exposure,
+		promptSnippet: (askUserToolDefinition as any).promptSnippet,
+		promptGuidelines: (askUserToolDefinition as any).promptGuidelines,
+		async execute(toolCallId, params: any, signal, onUpdate, ctx: any) {
+			return (askUserToolDefinition as any).execute(toolCallId, params, signal, onUpdate, ctx);
+		},
+	} as any);
+
+	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description: [
@@ -70,6 +86,8 @@ export default function (pi: ExtensionAPI) {
 			"swarm ({goal, workers[{id,agent,task}], merger?} hierarchical blackboard in .swarm/<runId>/).",
 			"Resilience: retry {attempts, backoffMs} (default retry once), totalTimeoutMs (whole-operation budget),",
 			"onError abort|continue (default abort for chain, continue for parallel/swarm).",
+			"Questions: child ask_user calls and permission prompts are forwarded to the user (serialized across workers);",
+			"set allowQuestions:false to auto-dismiss, questionTimeoutMs to bound each dialog.",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
@@ -80,6 +98,13 @@ export default function (pi: ExtensionAPI) {
 			const dispatchDefaults = {
 				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 				thinkingLevel: ctx.thinkingLevel,
+			};
+			const parentUI: ParentUI = {
+				hasUI: ctx.hasUI,
+				select: (title, options, opts) => ctx.ui.select(title, options, opts as any),
+				confirm: (title, message, opts) => ctx.ui.confirm(title, message, opts as any),
+				input: (title, placeholder, opts) => ctx.ui.input(title, placeholder, opts as any),
+				notify: (message, type) => ctx.ui.notify(message, type),
 			};
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
@@ -192,6 +217,8 @@ export default function (pi: ExtensionAPI) {
 						retryBackoffMs,
 						totalTimeoutMs: params.totalTimeoutMs,
 						cleanup: spec.cleanup,
+						allowQuestions: params.allowQuestions,
+						questionTimeoutMs: params.questionTimeoutMs,
 					}, {
 						defaultCwd: ctx.cwd,
 						dispatchDefaults,
@@ -200,6 +227,7 @@ export default function (pi: ExtensionAPI) {
 						onUpdate: onUpdate as any,
 						makeDetails: (results: SingleResult[]) => makeDetails("swarm", swarmInfo)(results),
 						workerDepth,
+						parentUI,
 					});
 					return {
 						content: [{ type: "text", text: out.text }],
@@ -223,6 +251,8 @@ export default function (pi: ExtensionAPI) {
 					retryBackoffMs,
 					totalTimeoutMs: params.totalTimeoutMs,
 					onError: params.onError ?? "abort",
+					allowQuestions: params.allowQuestions,
+					questionTimeoutMs: params.questionTimeoutMs,
 				}, {
 					defaultCwd: ctx.cwd,
 					dispatchDefaults,
@@ -230,6 +260,7 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate: onUpdate as any,
 					makeDetails: makeDetails("chain"),
+					parentUI,
 				});
 				return { content: [{ type: "text", text: out.text }], details: makeDetails("chain")(out.results), isError: out.isError };
 			}
@@ -246,6 +277,8 @@ export default function (pi: ExtensionAPI) {
 					retryBackoffMs,
 					totalTimeoutMs: params.totalTimeoutMs,
 					onError: params.onError ?? "continue",
+					allowQuestions: params.allowQuestions,
+					questionTimeoutMs: params.questionTimeoutMs,
 				}, {
 					defaultCwd: ctx.cwd,
 					dispatchDefaults,
@@ -253,6 +286,7 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate: onUpdate as any,
 					makeDetails: makeDetails("parallel"),
+					parentUI,
 				});
 				return { content: [{ type: "text", text: out.text }], details: makeDetails("parallel")(out.results), isError: out.allFailed };
 			}
@@ -270,7 +304,14 @@ export default function (pi: ExtensionAPI) {
 					() =>
 						runSingleAgent(
 							ctx.cwd, dispatchDefaults, agents, params.agent, params.task, params.cwd,
-							undefined, signal, onUpdate as any, makeDetails("single"), undefined, { timeoutMs: params.timeoutMs },
+							undefined, signal, onUpdate as any, makeDetails("single"), undefined,
+							{
+								timeoutMs: params.timeoutMs,
+								allowQuestions: params.allowQuestions,
+								questionTimeoutMs: params.questionTimeoutMs,
+								parentUI,
+								labelPrefix: `[${params.agent}]`,
+							},
 						),
 					{ attempts: retryAttempts, backoffMs: retryBackoffMs, signal },
 				);
@@ -652,6 +693,13 @@ export default function (pi: ExtensionAPI) {
 			const depthCheck = nextSwarmDepth(parentDepth);
 			if ("error" in depthCheck)
 				return { content: [{ type: "text", text: `Swarm resume rejected: ${depthCheck.error}.` }], details: {} as any, isError: true };
+			const resumeUI: ParentUI = {
+				hasUI: ctx.hasUI,
+				select: (title, options, opts) => ctx.ui.select(title, options, opts as any),
+				confirm: (title, message, opts) => ctx.ui.confirm(title, message, opts as any),
+				input: (title, placeholder, opts) => ctx.ui.input(title, placeholder, opts as any),
+				notify: (message, type) => ctx.ui.notify(message, type),
+			};
 			const out = await resumeMissingWorkers(ctx.cwd, params.runId, params.merger, {
 				fallbackTimeoutMs: params.timeoutMs,
 				retryAttempts: DEFAULT_RETRY_ATTEMPTS,
@@ -673,6 +721,7 @@ export default function (pi: ExtensionAPI) {
 					...(swarm ? { swarm } : {}),
 				}),
 				workerDepth: depthCheck.depth,
+				parentUI: resumeUI,
 			});
 			if ("error" in out)
 				return { content: [{ type: "text", text: `Swarm resume failed: ${out.error}` }], details: {} as any, isError: true };

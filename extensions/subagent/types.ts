@@ -63,7 +63,23 @@ export interface DispatchDefaults {
 	thinkingLevel?: ThinkingLevel;
 }
 
+export interface ParentUI {
+	hasUI: boolean;
+	select(title: string, options: string[], opts?: { signal?: AbortSignal }): Promise<string | undefined>;
+	confirm(title: string, message: string, opts?: { signal?: AbortSignal }): Promise<boolean>;
+	input(title: string, placeholder?: string, opts?: { signal?: AbortSignal }): Promise<string | undefined>;
+	notify(message: string, type?: "info" | "warning" | "error"): void;
+}
+
 export interface RunSingleAgentOptions {
 	/** Per-agent wall-clock budget in ms. Undefined → TIMEOUT_DEFAULT_MS (clamped to TIMEOUT_MAX_MS). */
 	timeoutMs?: number;
+	/** When false, child questions are auto-dismissed (no parent dialog). Default true. */
+	allowQuestions?: boolean;
+	/** Per-question dialog budget in ms. Undefined → inherit task timeout. */
+	questionTimeoutMs?: number;
+	/** Parent UI bridge for forwarding child extension_ui_request lines. */
+	parentUI?: ParentUI;
+	/** Prefix for parent dialog titles, e.g. "[swarm abc/worker-1]". */
+	labelPrefix?: string;
 }

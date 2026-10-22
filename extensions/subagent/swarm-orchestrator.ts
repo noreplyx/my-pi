@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { AgentConfig } from "./agents.ts";
 import { isBudgetExceeded, runWithRetry, totalDeadline } from "./resilience.ts";
 import { runSingleAgent } from "./single.ts";
-import type { DispatchDefaults, OnUpdateCallback, SingleResult, SwarmCtx, SwarmInfo } from "./types.ts";
+import type { DispatchDefaults, OnUpdateCallback, ParentUI, SingleResult, SwarmCtx, SwarmInfo } from "./types.ts";
 import {
 	MAX_CONCURRENCY,
 	MAX_SWARM_TOTAL,
@@ -38,6 +38,8 @@ export interface SwarmWorkerInput {
 	task: string;
 	cwd?: string;
 	timeoutMs?: number;
+	allowQuestions?: boolean;
+	questionTimeoutMs?: number;
 }
 
 export interface SwarmMergerInput {
@@ -45,6 +47,8 @@ export interface SwarmMergerInput {
 	task: string;
 	cwd?: string;
 	timeoutMs?: number;
+	allowQuestions?: boolean;
+	questionTimeoutMs?: number;
 }
 
 export interface SwarmOptions {
@@ -53,6 +57,8 @@ export interface SwarmOptions {
 	retryBackoffMs?: number;
 	totalTimeoutMs?: number;
 	cleanup?: boolean;
+	allowQuestions?: boolean;
+	questionTimeoutMs?: number;
 }
 
 export interface SwarmDeps {
@@ -63,6 +69,7 @@ export interface SwarmDeps {
 	onUpdate?: OnUpdateCallback;
 	makeDetails: (results: SingleResult[], swarm?: SwarmInfo) => any;
 	workerDepth: number;
+	parentUI?: ParentUI;
 }
 
 function failedWorker(
@@ -118,7 +125,7 @@ export async function runSwarm(
 	opts: SwarmOptions,
 	deps: SwarmDeps,
 ): Promise<{ results: SingleResult[]; text: string; isError: boolean; swarmInfo: SwarmInfo; aborted: boolean }> {
-	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, workerDepth } = deps;
+	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, workerDepth, parentUI } = deps;
 	const deadline = totalDeadline(opts.totalTimeoutMs);
 	const swarmInfo: SwarmInfo = { runId, swarmDir, depth: workerDepth };
 
@@ -196,7 +203,13 @@ export async function runSwarm(
 							},
 							(results: SingleResult[]) => makeDetails(results, swarmInfo),
 							swarmCtx,
-							{ timeoutMs: w.timeoutMs ?? opts.fallbackTimeoutMs },
+							{
+								timeoutMs: w.timeoutMs ?? opts.fallbackTimeoutMs,
+								allowQuestions: w.allowQuestions ?? opts.allowQuestions ?? true,
+								questionTimeoutMs: w.questionTimeoutMs ?? opts.questionTimeoutMs,
+								parentUI,
+								labelPrefix: `[swarm ${runId}/${w.id}]`,
+							},
 						),
 					{ attempts: opts.retryAttempts, backoffMs: opts.retryBackoffMs, signal },
 				);
@@ -278,7 +291,13 @@ export async function runSwarm(
 					onUpdate,
 					(results: SingleResult[]) => makeDetails(results, swarmInfo),
 					{ depth: workerDepth, swarmDir, runId, agentId: "merger" },
-					{ timeoutMs: merger.timeoutMs ?? opts.fallbackTimeoutMs },
+					{
+						timeoutMs: merger.timeoutMs ?? opts.fallbackTimeoutMs,
+						allowQuestions: merger.allowQuestions ?? opts.allowQuestions ?? true,
+						questionTimeoutMs: merger.questionTimeoutMs ?? opts.questionTimeoutMs,
+						parentUI,
+						labelPrefix: `[swarm ${runId}/merger]`,
+					},
 				),
 			{ attempts: opts.retryAttempts, backoffMs: opts.retryBackoffMs, signal },
 		);
