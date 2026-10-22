@@ -8,7 +8,7 @@
  * instead of mid-run.
  */
 
-import { globToRegExp, hasGlobChars, isRegexPattern, matchToolName } from "./matcher.ts";
+import { globToRegExp, hasGlobChars, isRegexPattern } from "./matcher.ts";
 import type { ValidatedConfig } from "./schema.ts";
 
 export type DiagnosticSeverity = "error" | "warning" | "info";
@@ -103,8 +103,7 @@ function validateRules(
 
 		// R3: unreachable — an earlier rule already covers everything this one can match.
 		// Cheap, exact cases only: earlier match-all with same-or-wider tool, or identical match.
-		// In the global file, deny rules run in the floor scan before any allow/ask,
-		// so an earlier allow/ask can never shadow a later deny — only an earlier deny can.
+		// Plain first-match order applies within each file (agent-first globally).
 		for (let k = 0; k < i; k++) {
 			const prev = rules[k];
 			const sameTool = prev.tool === r.tool || prev.tool === "*";
@@ -112,7 +111,6 @@ function validateRules(
 			const prevAll = prev.match === undefined;
 			const sameMatch = JSON.stringify(prev.match ?? null) === JSON.stringify(r.match ?? null);
 			if (!prevAll && !sameMatch) continue;
-			if (!isAgent && r.action === "deny" && prev.action !== "deny") continue;
 			diags.push({
 				severity: "warning",
 				location: loc,
@@ -175,12 +173,12 @@ function validateRules(
 				hint: `add rules or remove the block`,
 			});
 		}
-		// A3: default-allow with no rules (allows everything except the global deny floor).
+		// A3: default-allow with no rules (allows everything).
 		if (rules.length === 0 && validated.hasDefault && validated.config.defaultAction === "allow") {
 			diags.push({
 				severity: "warning",
 				location: label,
-				message: `defaultAction "allow" with no rules allows everything (except global deny rules)`,
+				message: `defaultAction "allow" with no rules allows everything`,
 				hint: `use "ask" or add scoping rules`,
 			});
 		}
@@ -189,25 +187,8 @@ function validateRules(
 	return diags;
 }
 
-/** An agent allow/ask rule is dead on arrival when a global deny floor rule
- *  matches everything it can match. Conservative, exact cases only:
- *  same tool string (or global `*`, or a global glob covering an exact agent
- *  tool) plus global match-all or byte-identical match. */
-function killedByFloor(agentRule: { tool: string; match?: string | string[] }, globalDenies: { tool: string; match?: string | string[] }[]): string | null {
-	for (const g of globalDenies) {
-		const toolCovered =
-			g.tool === "*" ||
-			g.tool === agentRule.tool ||
-			(!hasGlobChars(agentRule.tool) && hasGlobChars(g.tool) && matchToolName(g.tool, agentRule.tool));
-		if (!toolCovered) continue;
-		const matchCovered = g.match === undefined || JSON.stringify(g.match ?? null) === JSON.stringify(agentRule.match ?? null);
-		if (!matchCovered) continue;
-		return `tool="${g.tool}" match=${JSON.stringify(g.match ?? "(any)")}`;
-	}
-	return null;
-}
-
-/** Validate the global file + all agent files. Never throws. */
+/** Validate the global file + all agent files. Never throws. Agent rules beat
+ *  global rules (including global deny), so no cross-file shadowing applies. */
 export function collectDiagnostics(files: FileReport[], knownTools: string[]): Diagnostic[] {
 	const diags: Diagnostic[] = [];
 	try {
@@ -225,27 +206,6 @@ export function collectDiagnostics(files: FileReport[], knownTools: string[]): D
 				continue;
 			}
 			diags.push(...validateRules(f.label, f.validated, knownTools, f.isAgent));
-		}
-		// R5: agent allow/ask rules the global deny floor always overrides.
-		const globalDenies = files
-			.filter((f) => !f.isAgent && f.exists)
-			.flatMap((f) => f.validated.config.rules.filter((r) => r.action === "deny"));
-		if (globalDenies.length > 0) {
-			for (const f of files) {
-				if (!f.isAgent || !f.exists) continue;
-			f.validated.config.rules.forEach((r, i) => {
-					if (r.action === "deny") return; // deny-vs-deny is redundant, not misleading
-					const killer = killedByFloor(r, globalDenies);
-					if (killer) {
-						diags.push({
-							severity: "warning",
-							location: `${f.label} rules[${i}]`,
-							message: `never takes effect — global deny floor (${killer}) always matches first`,
-							hint: `a global deny cannot be loosened; narrow this rule to calls outside the floor or remove it`,
-						});
-					}
-				});
-			}
 		}
 	} catch (e: any) {
 		diags.push({ severity: "error", location: "permissions", message: `validator failed: ${e?.message ?? e}` });

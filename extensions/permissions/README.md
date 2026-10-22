@@ -54,14 +54,13 @@ Targets: `bash`/`powershell` → `command`; `read`/`write`/`edit`/`ls` → path
 everything else (incl. `subagent`, MCP tools) → JSON args.
 
 Evaluation (first applicable wins):
-1. global `deny` rules — safety floor, nothing overrides them
-2. agent rules in order
-3. agent `defaultAction` (only when the file sets one; otherwise inherit)
-4. remaining global rules in order
-5. global `defaultAction` (fallback `ask`)
+1. agent rules in order (beat everything global, including global `deny`)
+2. agent `defaultAction` (only when the file sets one; otherwise inherit)
+3. global rules in order
+4. global `defaultAction` (fallback `ask`)
 
-So the agent beats global (can tighten, and loosen `ask`→`allow`)
-except it can never loosen a global `deny`. Broken regexes fail closed at
+So the agent has more power than global (can tighten, and loosen
+`deny`→`allow` / `ask`→`allow`). Broken regexes fail closed at
 runtime (deny blocks, allow/ask never matches) and are reported at startup
 (R1) — they never crash.
 
@@ -110,11 +109,9 @@ and warns once if anything is off. Clean configs stay silent.
 | Severity | Meaning |
 |---|---|
 | error | rule is broken: bad JSON, bad action, uncompilable `re:`/`/.../` (deny fails closed/blocking, allow/ask never matches), unreadable ref file |
-| warning | suspicious but functional: unknown tool name (may just connect later), unreachable shadowed rule, agent allow/ask the deny floor always overrides (dead rule), allow-all (`tool: "*"` or bare `bash`), prefix-anchored shell allow without a chaining guard, empty/no-effect agent block, default-allow with no rules |
+| warning | suspicious but functional: unknown tool name (may just connect later), unreachable shadowed rule, allow-all (`tool: "*"` or bare `bash`), prefix-anchored shell allow without a chaining guard, empty/no-effect agent block, default-allow with no rules |
 
-Shadowing accounts for evaluation order: in the global file an earlier
-`allow`/`ask` never shadows a later `deny` (the deny floor scans first),
-while in agent files plain first-match order applies.
+Shadowing is plain first-match order within each file; agent files beat the global file.
 | info | no global policy file (everything defaults to `ask`) |
 
 Display: `ctx.ui.notify` in TUI/RPC, `console.warn` (stderr only) when

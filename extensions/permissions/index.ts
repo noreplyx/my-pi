@@ -2,8 +2,8 @@
  * Permission enforcement extension.
  *
  * Global config:  ~/.pi/agent/permissions.json
- * Per-agent:      `permissions:` in agents/*.md frontmatter (wins over global,
- *                 except it can never loosen a global deny)
+ * Per-agent:      `permissions:` in agents/*.md frontmatter (beats global,
+ *                 including global deny)
  *
  * Rule shape: { tool, match?, action } — `match` is a single string (or
  * string[] = OR): glob, `re:<regex>`, `/regex/flags`, or plain substring.

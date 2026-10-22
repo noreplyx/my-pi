@@ -466,15 +466,14 @@ export function resolveGrantDir(toolName: string, input: Record<string, unknown>
 
 /**
  * Precedence (first applicable wins):
- *   1. Global DENY rules — safety floor, nothing overrides them (so a rogue
- *      agent config can never re-allow `rm -rf` / `sudo` / secrets).
- *   2. Agent rules (explicit per-agent decisions beat global allow/ask).
- *   3. Agent defaultAction (only when the agent file sets one).
- *   4. Remaining global rules (allow/ask).
- *   5. Global defaultAction (fallback: ask).
+ *   1. Agent rules (explicit per-agent decisions beat everything global).
+ *   2. Agent defaultAction (only when the agent file sets one).
+ *   3. Global rules in file order (including deny).
+ *   4. Global defaultAction (fallback: ask).
  *
- * Net effect: the agent is more powerful than global — it can tighten deny
- * and loosen ask→allow — except it can never loosen a global deny.
+ * Net effect: the agent has more power than global — it can tighten
+ * (allow→deny) and loosen (deny→allow, ask→allow). When the agent file
+ * declares no permissions block, evaluation is identical to global-only.
  */
 /** True for tools whose match targets are file paths (segment-aware globs). */
 function isPathTool(toolName: string): boolean {
@@ -512,38 +511,26 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 		return null;
 	};
 
-	/** Evaluate one target string through the 5-layer precedence. */
+	/** Evaluate one target string through the agent-first precedence. */
 	const evalOne = (cands: string[], displayTarget: string): EvalResult => {
-		// 1. Global deny floor.
-		for (let i = 0; i < globalRules.length; i++) {
-			const r = globalRules[i];
-			if (r.action !== "deny") continue;
-			if (!matchToolName(r.tool, toolName)) continue;
-			if (hasInvalidRegex(r.match)) {
-				return { action: "deny", source: "global", ruleIndex: i, rule: r, target: displayTarget };
-			}
-			if (!matchTargets(r.match, cands, pathMode)) continue;
-			return { action: "deny", source: "global", ruleIndex: i, rule: r, target: displayTarget };
-		}
-
-		// 2. Agent rules.
+		// 1. Agent rules (beat everything global, including global deny).
 		const agentHit = firstMatch(agentRules, cands);
 		if (agentHit) {
 			return { action: agentHit.rule.action, source: "agent", ruleIndex: agentHit.index, rule: agentHit.rule, target: displayTarget };
 		}
 
-		// 3. Agent default (explicit only — otherwise inherit global).
+		// 2. Agent default (explicit only — otherwise inherit global).
 		if (agentEntry?.exists && agentEntry.validated.hasDefault) {
 			return { action: agentEntry.validated.config.defaultAction, source: "agent", ruleIndex: -1, target: displayTarget };
 		}
 
-		// 4. Remaining global rules.
+		// 3. Global rules in file order (deny included).
 		const globalHit = firstMatch(globalRules, cands);
 		if (globalHit) {
 			return { action: globalHit.rule.action, source: "global", ruleIndex: globalHit.index, rule: globalHit.rule, target: displayTarget };
 		}
 
-		// 5. Global default.
+		// 4. Global default.
 		return { action: g.validated.config.defaultAction, source: "default", ruleIndex: -1, target: displayTarget };
 	};
 

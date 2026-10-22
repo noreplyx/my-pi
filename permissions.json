@@ -1,6 +1,6 @@
 {
-  // Global permission policy. Per-agent `permissions:` in agents/*.md is evaluated first,
-  // but global `deny` rules form a safety floor nothing can override (see extensions/permissions/README.md).
+  // Global permission policy. Per-agent `permissions:` in agents/*.md is evaluated first
+  // and beats global, including global `deny` (see extensions/permissions/README.md).
   // Rule: { "tool": "<name|glob>", "match": "<glob|re:regex|/regex/flags|substring>", "action": "allow|ask|deny" }
   // Omit "match" to match all calls of that tool.
   "defaultAction": "allow",

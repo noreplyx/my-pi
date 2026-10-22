@@ -9,7 +9,7 @@ Tracked in git; secrets and machine-local state are gitignored.
 |---|---|
 | `settings.json` | Default provider/model, changelog version |
 | `permissions.json` | Global permission policy (`allow\|ask\|deny` per tool — see `extensions/permissions/README.md`) |
-| `agents/` | Per-agent frontmatter (`permissions:` overrides global, except global `deny` always wins) |
+| `agents/` | Per-agent frontmatter (`permissions:` beats global, including global `deny`) |
 | `extensions/permissions/` | Permission enforcement extension + tests |
 | `extensions/subagent/` | Subagent delegation extension (spawns isolated `pi` processes) |
 | `permissions/audit.log` | Append-only permission decision log (gitignored) |

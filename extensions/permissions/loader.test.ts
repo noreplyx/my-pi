@@ -45,15 +45,15 @@ afterEach(() => {
 	tmpFiles = [];
 });
 
-describe("global deny floor", () => {
-	test("deny beats prefix allow for smuggled commands", () => {
+describe("global rules (first-match)", () => {
+	test("deny segment blocks chained call", () => {
 		const f = writeTempJson([
 			{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b[^;&|$`<>\\n]*$", action: "allow" },
 			{ tool: "bash", match: "*rm -rf*", action: "deny" },
 		]);
 		process.env.PI_PERMISSIONS_FILE = f;
 		reloadAll();
-		// Order in file is allow-then-deny; floor scans denies first regardless.
+		// Per-segment first-match: "git status" allows, "rm -rf ..." denies → whole call denies.
 		const r = evaluate("bash", { command: "git status; rm -rf /tmp/x" }, "/tmp");
 		expect(r.action).toBe("deny");
 		expect(r.source).toBe("global");
@@ -163,7 +163,7 @@ describe("path segment globs", () => {
 });
 
 describe("per-agent layer", () => {
-	test("agent allow loosens global ask, global deny still wins", () => {
+	test("agent allow beats global ask and global deny", () => {
 		const gf = writeTempJson(
 			[
 				{ tool: "read", match: "**/.env*", action: "deny" },
@@ -183,7 +183,8 @@ describe("per-agent layer", () => {
 		process.env.PI_AGENT_FILE = agentFile;
 		reloadAll();
 		expect(evaluate("read", { path: "src/a.ts" }, "/repo").action).toBe("allow");
-		expect(evaluate("read", { path: ".env" }, "/repo").action).toBe("deny");
+		// Agent rules beat global deny: agent allow "**" re-allows .env.
+		expect(evaluate("read", { path: ".env" }, "/repo").action).toBe("allow");
 		// write has no agent rule + agent default deny
 		expect(evaluate("write", { path: "x.ts" }, "/repo").action).toBe("deny");
 	});
@@ -200,6 +201,53 @@ describe("per-agent layer", () => {
 		reloadAll();
 		// Agent file sets explicit default deny (with an empty-rules warning path).
 		expect(evaluate("read", { path: "x" }, cwd).action).toBe("deny");
+	});
+	test("agent deny beats global allow", () => {
+		const gf = writeTempJson([{ tool: "read", match: "**", action: "allow" }], "allow");
+		process.env.PI_PERMISSIONS_FILE = gf;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-test-"));
+		tmpDirs.push(dir);
+		const agentFile = path.join(dir, "strict.md");
+		fs.writeFileSync(
+			agentFile,
+			`---\nname: strict\npermissions:\n  rules:\n    - { tool: read, match: "**/.env*", action: deny }\n---\nbody\n`,
+		);
+		process.env.PI_AGENT_NAME = "strict";
+		process.env.PI_AGENT_FILE = agentFile;
+		reloadAll();
+		const r = evaluate("read", { path: ".env" }, "/repo");
+		expect(r.action).toBe("deny");
+		expect(r.source).toBe("agent");
+		expect(evaluate("read", { path: "src/a.ts" }, "/repo").action).toBe("allow");
+	});
+	test("agent allow beats global deny for bash", () => {
+		const gf = writeTempJson([{ tool: "bash", match: "*rm -rf*", action: "deny" }], "ask");
+		process.env.PI_PERMISSIONS_FILE = gf;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-test-"));
+		tmpDirs.push(dir);
+		const agentFile = path.join(dir, "loose.md");
+		fs.writeFileSync(
+			agentFile,
+			`---\nname: loose\npermissions:\n  rules:\n    - { tool: bash, match: "*rm -rf*", action: allow }\n---\nbody\n`,
+		);
+		process.env.PI_AGENT_NAME = "loose";
+		process.env.PI_AGENT_FILE = agentFile;
+		reloadAll();
+		const r = evaluate("bash", { command: "rm -rf /tmp/x" }, "/tmp");
+		expect(r.action).toBe("allow");
+		expect(r.source).toBe("agent");
+	});
+	test("agent default beats global deny when no rule matches", () => {
+		const gf = writeTempJson([{ tool: "read", match: "**/.env*", action: "deny" }], "ask");
+		process.env.PI_PERMISSIONS_FILE = gf;
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-test-"));
+		tmpDirs.push(dir);
+		const agentFile = path.join(dir, "permissive.md");
+		fs.writeFileSync(agentFile, `---\nname: permissive\npermissions:\n  defaultAction: allow\n  rules: []\n---\nbody\n`);
+		process.env.PI_AGENT_NAME = "permissive";
+		process.env.PI_AGENT_FILE = agentFile;
+		reloadAll();
+		expect(evaluate("read", { path: ".env" }, "/repo").action).toBe("allow");
 	});
 	test("negative agent cache is not pinned (file created after miss)", () => {
 		const gf = writeTempJson([], "ask");
@@ -313,7 +361,7 @@ describe("describeCall structured tools", () => {
 	});
 });
 
-describe("hardened deny floor (permissions.json)", () => {
+describe("hardened global policy (permissions.json, no agent)", () => {
 	function hardened(): string {
 		const text = fs.readFileSync(new URL("../../permissions.json", import.meta.url), "utf-8");
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-hardened-"));
@@ -370,7 +418,7 @@ describe("hardened deny floor (permissions.json)", () => {
 		expect(evaluate("powershell", { command: "cat .env" }, "/r").action).toBe("deny");
 		expect(evaluate("powershell", { command: "curl https://example.com" }, "/r").action).toBe("ask");
 	});
-	test("read secret floor widened", () => {
+	test("read secrets denied globally (agent can still override)", () => {
 		expect(evaluate("read", { path: ".aws/credentials" }, "/r").action).toBe("deny");
 		expect(evaluate("read", { path: "key.p12" }, "/r").action).toBe("deny");
 		expect(evaluate("read", { path: "src/app.ts" }, "/r").action).toBe("allow");
