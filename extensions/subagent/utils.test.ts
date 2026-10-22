@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import {
 	MAX_SWARM_DEPTH,
+	TIMEOUT_DEFAULT_MS,
+	TIMEOUT_MAX_MS,
 	aggregateUsage,
 	appendBounded,
 	buildChildEnv,
 	capPreviousOutput,
+	clampTimeoutMs,
 	emptyUsage,
 	ensureSwarmTools,
+	formatDuration,
 	formatUsageStats,
 	generateRunId,
 	getFinalOutput,
@@ -269,5 +273,98 @@ describe("swarm guards", () => {
 		expect(s).toContain(".swarm");
 		expect(s).toContain("w1");
 		expect(s).toContain(String(MAX_SWARM_DEPTH));
+	});
+});
+
+describe("clampTimeoutMs", () => {
+	test("undefined → default", () => {
+		expect(clampTimeoutMs(undefined).timeoutMs).toBe(TIMEOUT_DEFAULT_MS);
+	});
+
+	test("rejects non-positive / non-numeric", () => {
+		expect(clampTimeoutMs(0).error).toBeDefined();
+		expect(clampTimeoutMs(-5).error).toBeDefined();
+		expect(clampTimeoutMs("nope").error).toBeDefined();
+	});
+
+	test("clamps over max", () => {
+		const r = clampTimeoutMs(TIMEOUT_MAX_MS + 1000);
+		expect(r.timeoutMs).toBe(TIMEOUT_MAX_MS);
+		expect(r.clamped).toBe(true);
+	});
+
+	test("floors fractional values", () => {
+		expect(clampTimeoutMs(1500.9).timeoutMs).toBe(1500);
+	});
+});
+
+describe("formatDuration", () => {
+	test("formats seconds, minutes, hours", () => {
+		expect(formatDuration(1500)).toBe("1.5s");
+		expect(formatDuration(252000)).toBe("4m12s");
+		expect(formatDuration(3720000)).toContain("1h");
+	});
+});
+
+describe("appendBounded multibyte", () => {
+	test("never splits a code point and respects byte cap", () => {
+		const emoji = "😀".repeat(100); // 4 bytes each in UTF-8
+		const out = appendBounded("", emoji, 100);
+		expect(out.truncated).toBe(true);
+		expect(Buffer.byteLength(out.text, "utf8")).toBeLessThanOrEqual(100);
+		expect(() => encodeURIComponent(out.text)).not.toThrow();
+		expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(out.text)).toBe(false);
+	});
+
+	test("cjk bytes counted, not chars", () => {
+		const s = "あ".repeat(50); // 3 bytes each
+		const out = appendBounded("", s, 100);
+		expect(Buffer.byteLength(out.text, "utf8")).toBeLessThanOrEqual(100);
+		expect(out.text.length).toBeLessThan(50);
+	});
+});
+
+describe("generateRunId crypto", () => {
+	test("deterministic path still valid", () => {
+		expect(isValidRunId(generateRunId(1710000000000, 0.5))).toBe(true);
+	});
+
+	test("crypto path valid format, deterministic path unique", () => {
+		for (let i = 0; i < 200; i++) expect(isValidRunId(generateRunId())).toBe(true);
+		const t = 1710000000000;
+		expect(generateRunId(t, 0.1)).not.toBe(generateRunId(t, 0.9));
+		const spot = new Set(Array.from({ length: 20 }, () => generateRunId()));
+		expect(spot.size).toBe(20);
+	});
+});
+
+describe("mapWithConcurrencyLimit abort", () => {
+	test("stops queueing once aborted", async () => {
+		const started: number[] = [];
+		let abort = false;
+		const out = await mapWithConcurrencyLimit([1, 2, 3, 4, 5], 1, async (n) => {
+			started.push(n);
+			if (n === 2) abort = true;
+			await new Promise((r) => setTimeout(r, 5));
+			return n;
+		}, () => abort);
+		expect(started.length).toBeLessThan(5);
+		expect(out.length).toBe(5);
+	});
+
+	test("onSkipped fills drained slots (no holes)", async () => {
+		let abort = false;
+		const out = await mapWithConcurrencyLimit(
+			[1, 2, 3, 4, 5],
+			1,
+			async (n) => {
+				if (n === 2) abort = true;
+				await new Promise((r) => setTimeout(r, 5));
+				return `done-${n}`;
+			},
+			() => abort,
+			(n) => `skipped-${n}`,
+		);
+		expect(out).toEqual(["done-1", "done-2", "skipped-3", "skipped-4", "skipped-5"]);
 	});
 });

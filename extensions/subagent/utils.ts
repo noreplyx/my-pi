@@ -12,6 +12,16 @@ export const MAX_CONCURRENCY = 4;
 /** Hierarchical swarm caps (user-confirmed defaults). */
 export const MAX_SWARM_DEPTH = 3;
 export const MAX_SWARM_TOTAL = 8;
+/** Default per-subagent wall-clock budget (5 min); hard ceiling (30 min). */
+export const TIMEOUT_DEFAULT_MS = 5 * 60 * 1000;
+export const TIMEOUT_MAX_MS = 30 * 60 * 1000;
+/** Grace between SIGTERM and SIGKILL for child process groups. */
+export const KILL_GRACE_MS = 5000;
+/** Max un-newlined stdout retained before oldest bytes are dropped (giant-line guard). */
+export const STDOUT_LINE_CAP = 256 * 1024;
+/** Swarm GC defaults: delete runs older than 7d, keep newest 10. */
+export const SWARM_GC_DEFAULT_DAYS = 7;
+export const SWARM_GC_KEEP_LAST = 10;
 /** Blackboard dir name inside repo cwd: <cwd>/.swarm/<runId>/ */
 export const SWARM_DIR_NAME = ".swarm";
 /** Env keys threaded into child `pi` processes for swarm identity. */
@@ -45,6 +55,30 @@ export const MAX_DESCRIPTION_CHARS = 2000;
 
 /** Sentinel for "task still running" in parallel placeholder results. */
 export const RESULT_RUNNING = -1;
+
+/** Machine-readable cause for a subagent result. */
+export type SubagentErrorCode = "ok" | "spawn-failed" | "timeout" | "aborted" | "non-zero" | "setup-error";
+
+/** Clamp a caller-supplied timeoutMs to [1, TIMEOUT_MAX_MS]; undefined → default. */
+export function clampTimeoutMs(raw: unknown): { timeoutMs: number; clamped: boolean; error?: string } {
+	if (raw === undefined) return { timeoutMs: TIMEOUT_DEFAULT_MS, clamped: false };
+	const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : raw;
+	if (typeof n !== "number" || !Number.isFinite(n)) return { timeoutMs: TIMEOUT_DEFAULT_MS, clamped: false, error: "timeoutMs must be a finite number of milliseconds" };
+	if (n <= 0) return { timeoutMs: TIMEOUT_DEFAULT_MS, clamped: false, error: "timeoutMs must be positive" };
+	if (n > TIMEOUT_MAX_MS) return { timeoutMs: TIMEOUT_MAX_MS, clamped: true };
+	return { timeoutMs: Math.floor(n), clamped: false };
+}
+
+/** Humanize durationMs for TUI (12.3s, 4m12s, 1h02m). */
+export function formatDuration(ms: number): string {
+	if (!Number.isFinite(ms) || ms < 0) return "0s";
+	const s = Math.round(ms / 100) / 10;
+	if (s < 60) return `${s}s`;
+	const m = Math.floor(s / 60);
+	const rem = Math.round(s % 60);
+	if (m < 60) return `${m}m${String(rem).padStart(2, "0")}s`;
+	return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
 
 /** Agent names are normalized to lowercase keys; valid names match this. */
 export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -292,16 +326,21 @@ export function buildChildEnv(
 /**
  * Append bounded stdout/stderr chunks. Returns the updated accumulator plus
  * whether the cap was hit (callers surface a `[truncated]` marker).
+ *
+ * Byte-correct: works on the UTF-8 encoding and never splits a code point.
+ * Oldest bytes are kept as a prefix (stream head); callers tracking a line
+ * buffer should separately bound un-newlined tails (see STDOUT_LINE_CAP).
  */
 export function appendBounded(current: string, chunk: string, capBytes: number): { text: string; truncated: boolean } {
-	if (Buffer.byteLength(current, "utf8") >= capBytes) return { text: current, truncated: true };
-	const next = current + chunk;
-	if (Buffer.byteLength(next, "utf8") <= capBytes) return { text: next, truncated: false };
-	// Keep a prefix that fits, cut on a char boundary.
-	let end = current.length + (chunk.length - (Buffer.byteLength(next, "utf8") - capBytes)) - 64;
-	if (end < current.length) end = current.length;
-	let text = (current + chunk.slice(0, Math.max(0, end - current.length))).slice(0, end);
-	while (Buffer.byteLength(text, "utf8") > capBytes) text = text.slice(0, -1);
+	const curBytes = Buffer.byteLength(current, "utf8");
+	if (curBytes >= capBytes) return { text: current, truncated: true };
+	const chunkBytes = Buffer.byteLength(chunk, "utf8");
+	if (curBytes + chunkBytes <= capBytes) return { text: current + chunk, truncated: false };
+	// Take the largest UTF-8-char-boundary prefix of `chunk` that fits.
+	const buf = Buffer.from(chunk, "utf8");
+	let end = capBytes - curBytes;
+	while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+	const text = current + buf.subarray(0, end).toString("utf8");
 	return { text, truncated: true };
 }
 
@@ -326,18 +365,37 @@ export function isValidWorkerId(id: string): boolean {
 	return SWARM_WORKER_ID_RE.test(id);
 }
 
-export function generateRunId(now = Date.now(), rand = Math.random()): string {
+export function generateRunId(now = Date.now(), rand?: number): string {
 	const d = new Date(now);
 	const pad = (n: number) => String(n).padStart(2, "0");
 	const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-	const suffix = Math.floor(rand * 46656)
+	if (rand !== undefined) {
+		// Deterministic path for tests: rand in [0, 1).
+		const suffix = Math.floor(rand * 46656)
+			.toString(36)
+			.padStart(3, "0");
+		// 4th char from fractional time to avoid collisions within same second.
+		const extra = Math.floor((now % 1000) / 28)
+			.toString(36)
+			.padStart(1, "0");
+		return `swarm-${stamp}-${suffix}${extra}`;
+	}
+	// Crypto path: 4 fully random base36 chars (~20.7 bits, 1.6M space) via
+	// getRandomValues — no Math.random, no time-derived char (the timestamp
+	// prefix already carries second precision).
+	try {
+		const g = globalThis.crypto?.getRandomValues?.bind(globalThis.crypto);
+		if (g) {
+			const bytes = g(new Uint8Array(3));
+			const n = (bytes[0] << 16) | (bytes[1] << 8) | bytes[2];
+			return `swarm-${stamp}-${(n % 1679616).toString(36).padStart(4, "0")}`;
+		}
+	} catch {
+		/* fall through to Math.random */
+	}
+	return `swarm-${stamp}-${Math.floor(Math.random() * 1679616)
 		.toString(36)
-		.padStart(3, "0");
-	// 4th char from fractional time to avoid collisions within same second.
-	const extra = Math.floor((now % 1000) / 28)
-		.toString(36)
-		.padStart(1, "0");
-	return `swarm-${stamp}-${suffix}${extra}`;
+		.padStart(4, "0")}`;
 }
 
 /** Merge required swarm tools into a validated tool list (dedup, preserve order). */
@@ -394,6 +452,8 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
 	items: TIn[],
 	concurrency: number,
 	fn: (item: TIn, index: number) => Promise<TOut>,
+	isAborted?: () => boolean,
+	onSkipped?: (item: TIn, index: number) => TOut,
 ): Promise<TOut[]> {
 	if (items.length === 0) return [];
 	const limit = Math.max(1, Math.min(concurrency, items.length));
@@ -401,11 +461,21 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
 	let nextIndex = 0;
 	const workers = new Array(limit).fill(null).map(async () => {
 		while (true) {
+			// Drain the queue on abort: never start a new item once aborted.
+			// Unstarted slots are left holes and filled via onSkipped below.
+			if (isAborted?.()) return;
 			const current = nextIndex++;
 			if (current >= items.length) return;
+			if (isAborted?.()) return;
 			results[current] = await fn(items[current], current);
 		}
 	});
 	await Promise.all(workers);
+	if (onSkipped) {
+		for (let i = 0; i < items.length; i++) {
+			// NOTE: reading a hole yields undefined; assignment fills it.
+			if (results[i] === undefined) results[i] = onSkipped(items[i], i);
+		}
+	}
 	return results;
 }

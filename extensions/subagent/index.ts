@@ -33,8 +33,9 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents, formatAgentList } from "./agents.ts";
-import { appendOutbox, appendTaskLedger, createSwarmRun, readDoneFiles } from "./swarm.ts";
+import { appendOutbox, appendTaskLedger, createSwarmRun, listSwarmRuns, pruneSwarmRuns, readDoneFiles } from "./swarm.ts";
 import {
+	KILL_GRACE_MS,
 	MAX_CONCURRENCY,
 	MAX_MESSAGES,
 	MAX_PARALLEL_TASKS,
@@ -43,6 +44,7 @@ import {
 	RESULT_RUNNING,
 	STDERR_CAP,
 	STDOUT_CAP,
+	STDOUT_LINE_CAP,
 	SWARM_ENV_DEPTH,
 	SWARM_ENV_DIR,
 	SWARM_ENV_ID,
@@ -51,8 +53,10 @@ import {
 	appendBounded,
 	buildChildEnv,
 	capPreviousOutput,
+	clampTimeoutMs,
 	emptyUsage,
 	ensureSwarmTools,
+	formatDuration,
 	formatUsageStats,
 	generateRunId,
 	getFinalOutput,
@@ -67,6 +71,7 @@ import {
 	truncateSingleOutput,
 	validateModelString,
 	validateToolList,
+	type SubagentErrorCode,
 	type UsageStats,
 } from "./utils.ts";
 
@@ -151,6 +156,12 @@ export interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
+	/** Machine-readable cause. "ok" when the process exited 0 without error/abort. */
+	errorCode: SubagentErrorCode;
+	/** True when the result was produced by the timeout killer (not a user abort). */
+	timedOut: boolean;
+	/** Wall-clock time for this agent process, ms. */
+	durationMs: number;
 }
 
 export interface SwarmInfo {
@@ -231,6 +242,11 @@ export interface DispatchDefaults {
 	thinkingLevel?: ThinkingLevel;
 }
 
+export interface RunSingleAgentOptions {
+	/** Per-agent wall-clock budget in ms. Undefined → TIMEOUT_DEFAULT_MS (clamped to TIMEOUT_MAX_MS). */
+	timeoutMs?: number;
+}
+
 export async function runSingleAgent(
 	defaultCwd: string,
 	dispatchDefaults: DispatchDefaults,
@@ -243,18 +259,29 @@ export async function runSingleAgent(
 	onUpdate: ((partial: AgentToolResult<any>) => void) | undefined,
 	makeDetails: (results: SingleResult[]) => any,
 	swarmCtx?: SwarmCtx,
+	opts?: RunSingleAgentOptions,
 ): Promise<SingleResult> {
+	const startTime = Date.now();
+	const timeoutClamp = clampTimeoutMs(opts?.timeoutMs);
+	const effectiveTimeoutMs = timeoutClamp.timeoutMs;
+	const setupFailed = (stderr: string): SingleResult => ({
+		agent: agentName,
+		agentSource: "unknown",
+		task,
+		cwd: defaultCwd,
+		exitCode: 1,
+		messages: [],
+		stderr: timeoutClamp.error ? `${stderr} (invalid timeoutMs: ${timeoutClamp.error})` : stderr,
+		usage: emptyUsage(),
+		step,
+		errorCode: "setup-error",
+		timedOut: false,
+		durationMs: Date.now() - startTime,
+	});
+	if (timeoutClamp.error) return setupFailed("Invalid timeoutMs.");
 	if (swarmCtx && swarmCtx.depth > MAX_SWARM_DEPTH) {
 		return {
-			agent: agentName,
-			agentSource: "unknown",
-			task,
-			cwd: defaultCwd,
-			exitCode: 1,
-			messages: [],
-			stderr: `Max swarm depth ${MAX_SWARM_DEPTH} exceeded.`,
-			usage: emptyUsage(),
-			step,
+			...setupFailed(`Max swarm depth ${MAX_SWARM_DEPTH} exceeded.`),
 			stopReason: "error",
 			errorMessage: `Max swarm depth ${MAX_SWARM_DEPTH} exceeded.`,
 		};
@@ -271,6 +298,9 @@ export async function runSingleAgent(
 		stderr,
 		usage: emptyUsage(),
 		step,
+		errorCode: "setup-error",
+		timedOut: false,
+		durationMs: Date.now() - startTime,
 	});
 
 	if (!agent) {
@@ -349,6 +379,9 @@ export async function runSingleAgent(
 		usage: emptyUsage(),
 		model,
 		step,
+		errorCode: "ok",
+		timedOut: false,
+		durationMs: 0,
 	};
 
 	const emitUpdate = () => {
@@ -374,6 +407,8 @@ export async function runSingleAgent(
 			: `Task: ${task}`;
 		args.push("--", fullTask);
 		let abortRequested = false;
+		let timedOut = false;
+		let spawnFailed = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
@@ -456,10 +491,16 @@ export async function runSingleAgent(
 				stdoutTruncated = stdoutTruncated || appended.truncated;
 				const lines = stdoutBuffer.split("\n");
 				stdoutBuffer = lines.pop() || "";
-				// If capped, the retained tail may hold a partial line;
-				// keep only a bounded remainder to avoid unbounded growth.
-				if (stdoutTruncated && stdoutBuffer.length > 64 * 1024) {
-					stdoutBuffer = stdoutBuffer.slice(-64 * 1024);
+				// Bound an un-newlined tail: one giant JSON line must not
+				// grow stdoutBuffer without bound. Drop oldest bytes (UTF-8
+				// safe) and mark truncated.
+				if (Buffer.byteLength(stdoutBuffer, "utf8") > STDOUT_LINE_CAP) {
+					const buf = Buffer.from(stdoutBuffer, "utf8");
+					const cut = buf.subarray(buf.length - STDOUT_LINE_CAP);
+					let start = 0;
+					while (start < cut.length && (cut[start] & 0xc0) === 0x80) start++;
+					stdoutBuffer = cut.subarray(start).toString("utf8");
+					stdoutTruncated = true;
 				}
 				for (const line of lines) processLine(line);
 			});
@@ -472,12 +513,39 @@ export async function runSingleAgent(
 
 			let exited = false;
 			let killTimer: ReturnType<typeof setTimeout> | null = null;
+			let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+			const killGroup = (sig: NodeJS.Signals) => {
+				try {
+					if (proc.pid !== undefined && process.platform !== "win32") process.kill(-proc.pid, sig);
+					else if (proc.pid !== undefined) process.kill(proc.pid, sig);
+					else proc.kill(sig);
+				} catch {
+					try {
+						proc.kill(sig);
+					} catch {
+						/* already gone */
+					}
+				}
+			};
 			const cleanupListeners = () => {
-				if (signal) signal.removeEventListener("abort", killProc);
+				if (signal) signal.removeEventListener("abort", onAbort);
 				if (killTimer) {
 					clearTimeout(killTimer);
 					killTimer = null;
 				}
+				if (timeoutTimer) {
+					clearTimeout(timeoutTimer);
+					timeoutTimer = null;
+				}
+			};
+
+			const escalateKill = () => {
+				killTimer = setTimeout(() => {
+					// `proc.killed` is true immediately after SIGTERM, so
+					// escalation must be gated on actual exit, not on it.
+					if (!exited) killGroup("SIGKILL");
+				}, KILL_GRACE_MS);
+				killTimer.unref?.();
 			};
 
 			const killProc = () => {
@@ -485,30 +553,20 @@ export async function runSingleAgent(
 				if (exited) return;
 				// Process-group kill: children spawned with detached:true form
 				// their own pgid, so SIGTERM cascades to recursive grandchildren.
-				try {
-					if (proc.pid !== undefined) process.kill(-proc.pid, "SIGTERM");
-					else proc.kill("SIGTERM");
-				} catch {
-					try {
-						proc.kill("SIGTERM");
-					} catch {
-						/* already gone */
-					}
-				}
-				killTimer = setTimeout(() => {
-					// `proc.killed` is true immediately after SIGTERM, so
-					// escalation must be gated on actual exit, not on it.
-					if (!exited) {
-						try {
-							if (proc.pid !== undefined) process.kill(-proc.pid, "SIGKILL");
-							else proc.kill("SIGKILL");
-						} catch {
-							/* already gone */
-						}
-					}
-				}, 5000);
-				killTimer.unref?.();
+				killGroup("SIGTERM");
+				escalateKill();
 			};
+
+			const onTimeout = () => {
+				if (exited) return;
+				timedOut = true;
+				abortRequested = true;
+				currentResult.stderr += `\n[timeout after ${formatDuration(effectiveTimeoutMs)} (limit ${effectiveTimeoutMs}ms)]`;
+				killGroup("SIGTERM");
+				escalateKill();
+			};
+
+			const onAbort = () => killProc();
 
 			proc.on("close", (code) => {
 				exited = true;
@@ -528,6 +586,7 @@ export async function runSingleAgent(
 
 			proc.on("error", (err) => {
 				exited = true;
+				spawnFailed = true;
 				cleanupListeners();
 				// Surface spawn failures (e.g. `pi` missing from PATH)
 				// instead of a generic silent exit 1.
@@ -537,12 +596,32 @@ export async function runSingleAgent(
 
 			if (signal) {
 				if (signal.aborted) killProc();
-				else signal.addEventListener("abort", killProc, { once: true });
+				else signal.addEventListener("abort", onAbort, { once: true });
 			}
+			timeoutTimer = setTimeout(onTimeout, effectiveTimeoutMs);
+			timeoutTimer.unref?.();
 		});
 
 		currentResult.exitCode = exitCode;
-		if (abortRequested) throw new Error("Subagent was aborted");
+		currentResult.durationMs = Date.now() - startTime;
+		currentResult.timedOut = timedOut;
+		if (timedOut) {
+			currentResult.errorCode = "timeout";
+			currentResult.stopReason = currentResult.stopReason ?? "error";
+			currentResult.errorMessage = currentResult.errorMessage ?? `Subagent timed out after ${formatDuration(effectiveTimeoutMs)}.`;
+			return currentResult;
+		}
+		if (abortRequested) {
+			currentResult.errorCode = "aborted";
+			throw new Error("Subagent was aborted");
+		}
+		if (spawnFailed) {
+			currentResult.errorCode = "spawn-failed";
+		} else if (isFailedResult(currentResult)) {
+			currentResult.errorCode = currentResult.stopReason === "aborted" ? "aborted" : "non-zero";
+		} else {
+			currentResult.errorCode = "ok";
+		}
 		return currentResult;
 	} finally {
 		// Best-effort recursive cleanup (a child may have written extra
@@ -557,16 +636,22 @@ export async function runSingleAgent(
 	}
 }
 
+const TimeoutMsSchema = Type.Optional(
+	Type.Number({ description: "Wall-clock budget in ms (default 300000, max 1800000)" }),
+);
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	timeoutMs: TimeoutMsSchema,
 });
 
 const ChainItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	timeoutMs: TimeoutMsSchema,
 });
 
 const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
@@ -579,6 +664,7 @@ const SwarmWorker = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the worker" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the worker process" })),
+	timeoutMs: TimeoutMsSchema,
 });
 
 const SwarmSpec = Type.Object({
@@ -588,7 +674,12 @@ const SwarmSpec = Type.Object({
 		Type.Object({
 			agent: Type.String({ description: "Agent to synthesize worker outputs" }),
 			task: Type.String({ description: "Merger task; {previous} = concatenated done/*.md" }),
+			cwd: Type.Optional(Type.String({ description: "Working directory for the merger process" })),
+			timeoutMs: TimeoutMsSchema,
 		}),
+	),
+	cleanup: Type.Optional(
+		Type.Boolean({ description: "Delete .swarm/<runId>/ when all workers + merger succeed (default false)" }),
 	),
 });
 
@@ -600,6 +691,7 @@ const SubagentParams = Type.Object({
 	swarm: Type.Optional(SwarmSpec),
 	agentScope: Type.Optional(AgentScopeSchema),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+	timeoutMs: TimeoutMsSchema,
 });
 
 export default function (pi: ExtensionAPI) {
@@ -762,6 +854,9 @@ export default function (pi: ExtensionAPI) {
 						messages: [],
 						stderr: "",
 						usage: emptyUsage(),
+						errorCode: "ok",
+						timedOut: false,
+						durationMs: 0,
 					};
 				}
 				const emitSwarmUpdate = () => {
@@ -775,58 +870,69 @@ export default function (pi: ExtensionAPI) {
 					}
 				};
 				let aborted = false;
-				const workerResults = await mapWithConcurrencyLimit(spec.workers, MAX_CONCURRENCY, async (w, index) => {
-					let result: SingleResult;
-					try {
-						if (signal?.aborted) throw new Error("Subagent was aborted");
-						result = await runSingleAgent(
-							ctx.cwd,
-							dispatchDefaults,
-							agents,
-							w.agent,
-							w.task,
-							w.cwd,
-							undefined,
-							signal,
-							(partial) => {
-								if (partial.details?.results[0]) {
-									allResults[index] = partial.details.results[0];
-									emitSwarmUpdate();
-								}
-							},
-							makeDetails("swarm", swarmInfo),
-							{ depth: workerDepth, swarmDir: run.swarmDir, runId, agentId: w.id },
-						);
-					} catch (e) {
-						if (signal?.aborted) {
-							aborted = true;
-							result = {
-								agent: w.agent,
-								agentSource: "unknown",
-								task: w.task,
-								cwd: ctx.cwd,
-								exitCode: 1,
-								messages: [],
-								stderr: `Worker ${w.id} aborted.`,
-								usage: emptyUsage(),
-								stopReason: "aborted",
-								errorMessage: "Subagent was aborted",
-							};
-						} else {
-							result = {
-								agent: w.agent,
-								agentSource: "unknown",
-								task: w.task,
-								cwd: ctx.cwd,
-								exitCode: 1,
-								messages: [],
-								stderr: `Worker ${w.id} failed before completion: ${(e as Error)?.message ?? e}`,
-								usage: emptyUsage(),
-								stopReason: "error",
-								errorMessage: (e as Error)?.message ?? String(e),
-							};
+				const workerResults = await mapWithConcurrencyLimit(
+					spec.workers,
+					MAX_CONCURRENCY,
+					async (w, index) => {
+						let result: SingleResult;
+						const workerStartedAt = Date.now();
+						try {
+							if (signal?.aborted) throw new Error("Subagent was aborted");
+							result = await runSingleAgent(
+								ctx.cwd,
+								dispatchDefaults,
+								agents,
+								w.agent,
+								w.task,
+								w.cwd,
+								undefined,
+								signal,
+								(partial) => {
+									if (partial.details?.results[0]) {
+										allResults[index] = partial.details.results[0];
+										emitSwarmUpdate();
+									}
+								},
+								makeDetails("swarm", swarmInfo),
+								{ depth: workerDepth, swarmDir: run.swarmDir, runId, agentId: w.id },
+								{ timeoutMs: w.timeoutMs ?? params.timeoutMs },
+							);
+						} catch (e) {
+							if (signal?.aborted || (e as Error)?.message === "Subagent was aborted") {
+								aborted = true;
+								result = {
+									agent: w.agent,
+									agentSource: "unknown",
+									task: w.task,
+									cwd: ctx.cwd,
+									exitCode: 1,
+									messages: [],
+									stderr: `Worker ${w.id} aborted.`,
+									usage: emptyUsage(),
+									stopReason: "aborted",
+									errorMessage: "Subagent was aborted",
+									errorCode: "aborted",
+									timedOut: false,
+									durationMs: Date.now() - workerStartedAt,
+								};
+							} else {
+								result = {
+									agent: w.agent,
+									agentSource: "unknown",
+									task: w.task,
+									cwd: ctx.cwd,
+									exitCode: 1,
+									messages: [],
+									stderr: `Worker ${w.id} failed before completion: ${(e as Error)?.message ?? e}`,
+									usage: emptyUsage(),
+									stopReason: "error",
+									errorMessage: (e as Error)?.message ?? String(e),
+									errorCode: "non-zero",
+									timedOut: false,
+									durationMs: Date.now() - workerStartedAt,
+								};
+							}
 						}
-					}
 					allResults[index] = result;
 					// Best-effort: persist worker summary to blackboard even on failure.
 					try {
@@ -839,7 +945,31 @@ export default function (pi: ExtensionAPI) {
 					}
 					emitSwarmUpdate();
 					return result;
-				});
+					},
+					() => signal?.aborted ?? false,
+					(w, index) => {
+						// Queue drained by abort: synthesize a result so the
+						// batch has no holes (holes would crash the summary).
+						aborted = true;
+						const skipped: SingleResult = {
+							agent: w.agent,
+							agentSource: "unknown",
+							task: w.task,
+							cwd: ctx.cwd,
+							exitCode: 1,
+							messages: [],
+							stderr: `Worker ${w.id} skipped: swarm aborted before start.`,
+							usage: emptyUsage(),
+							stopReason: "aborted",
+							errorMessage: "Subagent was aborted",
+							errorCode: "aborted",
+							timedOut: false,
+							durationMs: 0,
+						};
+						allResults[index] = skipped;
+						return skipped;
+					},
+				);
 				if (aborted) {
 					return {
 						content: [{ type: "text", text: `Swarm ${runId} aborted. Partial: ${workerResults.filter((r) => !isFailedResult(r)).length}/${workerResults.length} succeeded. Blackboard kept at ${run.swarmDir}.` }],
@@ -865,17 +995,26 @@ export default function (pi: ExtensionAPI) {
 						agents,
 						spec.merger.agent,
 						substitutePrevious(spec.merger.task, capPreviousOutput(doneSection)),
-						undefined,
+						spec.merger.cwd,
 						workerResults.length + 1,
 						signal,
 						onUpdate,
 						makeDetails("swarm", swarmInfo),
 						{ depth: workerDepth, swarmDir: run.swarmDir, runId, agentId: "merger" },
+						{ timeoutMs: spec.merger.timeoutMs ?? params.timeoutMs },
 					);
 					mergerOutput = getFinalOutput(mergerResult.messages) || "";
 				}
 				const allForDetails = mergerResult ? [...workerResults, mergerResult] : workerResults;
-				const header = `Swarm ${runId}: ${successCount}/${workerResults.length} workers succeeded. Blackboard: ${run.swarmDir}`;
+				const mergerFailed = mergerResult ? isFailedResult(mergerResult) : false;
+				if (spec.cleanup && successCount === workerResults.length && !mergerFailed && !signal?.aborted) {
+					try {
+						await fs.promises.rm(run.swarmDir, { recursive: true, force: true });
+					} catch {
+						/* best-effort: blackboard kept on cleanup failure */
+					}
+				}
+				const header = `Swarm ${runId}: ${successCount}/${workerResults.length} workers succeeded. Blackboard: ${run.swarmDir}${spec.cleanup && successCount === workerResults.length && !mergerFailed ? " (cleanup requested)" : ""}`;
 				const body = mergerResult
 					? `${header}\n\n## Merger (${spec.merger?.agent})\n\n${truncateSingleOutput(mergerOutput || "(no output)")}`
 					: `${header}\n\n${doneSection.slice(0, 8000)}`;
@@ -922,6 +1061,8 @@ export default function (pi: ExtensionAPI) {
 						signal,
 						chainUpdate,
 						makeDetails("chain"),
+						undefined,
+						{ timeoutMs: step.timeoutMs ?? params.timeoutMs },
 					);
 					results.push(result);
 
@@ -969,6 +1110,9 @@ export default function (pi: ExtensionAPI) {
 						messages: [],
 						stderr: "",
 						usage: emptyUsage(),
+						errorCode: "ok",
+						timedOut: false,
+						durationMs: 0,
 					};
 				}
 
@@ -985,55 +1129,88 @@ export default function (pi: ExtensionAPI) {
 					}
 				};
 
-				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
-					// Isolate per-task failures: one task throwing (abort,
-					// spawn error) must not discard the whole batch.
-					let result: SingleResult;
-					try {
-						result = await runSingleAgent(
-							ctx.cwd,
-							dispatchDefaults,
-							agents,
-							t.agent,
-							t.task,
-							t.cwd,
-							undefined,
-							signal,
-							// Per-task update callback
-							(partial) => {
-								if (partial.details?.results[0]) {
-									allResults[index] = partial.details.results[0];
-									emitParallelUpdate();
-								}
-							},
-							makeDetails("parallel"),
-						);
-					} catch (e) {
-						if (signal?.aborted) throw e;
-						result = {
+				const results = await mapWithConcurrencyLimit(
+					params.tasks,
+					MAX_CONCURRENCY,
+					async (t, index) => {
+						// Isolate per-task failures: one task throwing (abort,
+						// spawn error) must not discard the whole batch.
+						let result: SingleResult;
+						const taskStartedAt = Date.now();
+						try {
+							if (signal?.aborted) throw new Error("Subagent was aborted");
+							result = await runSingleAgent(
+								ctx.cwd,
+								dispatchDefaults,
+								agents,
+								t.agent,
+								t.task,
+								t.cwd,
+								undefined,
+								signal,
+								// Per-task update callback
+								(partial) => {
+									if (partial.details?.results[0]) {
+										allResults[index] = partial.details.results[0];
+										emitParallelUpdate();
+									}
+								},
+								makeDetails("parallel"),
+								undefined,
+								{ timeoutMs: t.timeoutMs ?? params.timeoutMs },
+							);
+						} catch (e) {
+							if (signal?.aborted || (e as Error)?.message === "Subagent was aborted") throw e;
+							result = {
+								agent: t.agent,
+								agentSource: "unknown",
+								task: t.task,
+								cwd: ctx.cwd,
+								exitCode: 1,
+								messages: [],
+								stderr: `Task failed before completion: ${(e as Error)?.message ?? e}`,
+								usage: emptyUsage(),
+								stopReason: "error",
+								errorMessage: (e as Error)?.message ?? String(e),
+								errorCode: "non-zero",
+								timedOut: false,
+								durationMs: Date.now() - taskStartedAt,
+							};
+						}
+						allResults[index] = result;
+						emitParallelUpdate();
+						return result;
+					},
+					() => signal?.aborted ?? false,
+					(t, index) => {
+						// Queue drained by abort: synthesize a result so the
+						// batch has no holes (holes would crash the summary).
+						const skipped: SingleResult = {
 							agent: t.agent,
 							agentSource: "unknown",
 							task: t.task,
 							cwd: ctx.cwd,
 							exitCode: 1,
 							messages: [],
-							stderr: `Task failed before completion: ${(e as Error)?.message ?? e}`,
+							stderr: "Task skipped: aborted before start.",
 							usage: emptyUsage(),
-							stopReason: "error",
-							errorMessage: (e as Error)?.message ?? String(e),
+							stopReason: "aborted",
+							errorMessage: "Subagent was aborted",
+							errorCode: "aborted",
+							timedOut: false,
+							durationMs: 0,
 						};
-					}
-					allResults[index] = result;
-					emitParallelUpdate();
-					return result;
-				});
+						allResults[index] = skipped;
+						return skipped;
+					},
+				);
 
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
 				const summaries = results.map((r) => {
 					const output = truncateParallelOutput(getResultOutput(r));
 					const status = isFailedResult(r)
-						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
-						: "completed";
+						? `failed [${r.errorCode}]${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}${r.timedOut ? " timed out" : ""} ⏱ ${formatDuration(r.durationMs)}`
+						: `completed ⏱ ${formatDuration(r.durationMs)}`;
 					return `### [${r.agent}] ${status}\n\n${output}`;
 				});
 				// isError only when nothing succeeded: partial success still
@@ -1052,6 +1229,14 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.agent && params.task) {
+				const timeoutCheck = clampTimeoutMs(params.timeoutMs);
+				if (timeoutCheck.error) {
+					return {
+						content: [{ type: "text", text: `Invalid timeoutMs: ${timeoutCheck.error}.` }],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
+				}
 				const result = await runSingleAgent(
 					ctx.cwd,
 					dispatchDefaults,
@@ -1063,6 +1248,8 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate,
 					makeDetails("single"),
+					undefined,
+					{ timeoutMs: params.timeoutMs },
 				);
 				const isError = isFailedResult(result);
 				if (isError) {
@@ -1176,11 +1363,20 @@ export default function (pi: ExtensionAPI) {
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
+				const errorBadge =
+					isError && (r as SingleResult).errorCode && (r as SingleResult).errorCode !== "ok"
+						? ` [${(r as SingleResult).errorCode}]`
+						: "";
+				const durationBadge =
+					(r as SingleResult).durationMs > 0 ? ` ⏱ ${formatDuration((r as SingleResult).durationMs)}` : "";
 
 				if (expanded) {
 					const container = new Container();
-					let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+					let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}${theme.fg("dim", durationBadge)}`;
+					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]${errorBadge}`)}`;
+					else if (errorBadge) header += theme.fg("dim", errorBadge);
+					if ((r as SingleResult).timedOut)
+						header += ` ${theme.fg("error", "[timed out]")}`;
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
 						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
@@ -1215,8 +1411,10 @@ export default function (pi: ExtensionAPI) {
 					return container;
 				}
 
-				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+				let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}${theme.fg("dim", durationBadge)}`;
+				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]${errorBadge}`)}`;
+				else if (errorBadge) text += theme.fg("dim", errorBadge);
+				if ((r as SingleResult).timedOut) text += ` ${theme.fg("error", "[timed out]")}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 				else {
@@ -1284,9 +1482,10 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) {
+					const wallMs = details.results.reduce((a, r) => a + ((r as SingleResult).durationMs || 0), 0);
+					if (usageStr || wallMs > 0) {
 						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
+						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}${wallMs > 0 ? ` | wall ${formatDuration(wallMs)}` : ""}`), 0, 0));
 					}
 					return container;
 				}
@@ -1300,12 +1499,14 @@ export default function (pi: ExtensionAPI) {
 				for (const r of details.results) {
 					const rIcon = !isFailedResult(r) ? theme.fg("success", "✓") : theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
-					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
+					const dur = (r as SingleResult).durationMs > 0 ? ` ⏱ ${formatDuration((r as SingleResult).durationMs)}` : "";
+					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}${theme.fg("dim", dur)}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
 				const usageStr = formatUsageStats(aggregateUsage(details.results));
-				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
+				const wallMs = details.results.reduce((a, r) => a + ((r as SingleResult).durationMs || 0), 0);
+				if (usageStr || wallMs > 0) text += `\n\n${theme.fg("dim", `Total: ${usageStr}${wallMs > 0 ? ` | wall ${formatDuration(wallMs)}` : ""}`)}`;
 				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				return new Text(text, 0, 0);
 			}
@@ -1369,9 +1570,10 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) {
+					const wallMs = Math.max(0, ...details.results.map((r) => (r as SingleResult).durationMs || 0));
+					if (usageStr || wallMs > 0) {
 						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
+						container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}${wallMs > 0 ? ` | wall ${formatDuration(wallMs)}` : ""}`), 0, 0));
 					}
 					return container;
 				}
@@ -1393,7 +1595,8 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (!isRunning) {
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
+					const wallMs = Math.max(0, ...details.results.map((r) => (r as SingleResult).durationMs || 0));
+					if (usageStr || wallMs > 0) text += `\n\n${theme.fg("dim", `Total: ${usageStr}${wallMs > 0 ? ` | wall ${formatDuration(wallMs)}` : ""}`)}`;
 				}
 				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				return new Text(text, 0, 0);
@@ -1421,7 +1624,8 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (!isRunning) {
 					const usageStr = formatUsageStats(aggregateUsage(details.results));
-					if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
+					const wallMs = Math.max(0, ...details.results.map((r) => (r as SingleResult).durationMs || 0));
+					if (usageStr || wallMs > 0) text += `\n\n${theme.fg("dim", `Total: ${usageStr}${wallMs > 0 ? ` | wall ${formatDuration(wallMs)}` : ""}`)}`;
 				}
 				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				return new Text(text, 0, 0);
@@ -1429,6 +1633,84 @@ export default function (pi: ExtensionAPI) {
 
 			const text = result.content[0];
 			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+		},
+	});
+
+	pi.registerTool({
+		name: "swarm_gc",
+		label: "Swarm GC",
+		description:
+			"List/prune stale .swarm/<runId>/ blackboard dirs. Dry-run by default; pass apply:true to delete. A run is deleted only when older than olderThanDays AND outside the newest keepLastN.",
+		parameters: Type.Object({
+			olderThanDays: Type.Optional(Type.Number({ description: "Delete runs older than N days (default 7)" })),
+			keepLastN: Type.Optional(Type.Number({ description: "Always keep newest N runs (default 10)" })),
+			apply: Type.Optional(Type.Boolean({ description: "Actually delete (default false = dry-run)" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!params.apply) {
+				const runs = await listSwarmRuns(ctx.cwd);
+				const preview = await pruneSwarmRuns(ctx.cwd, {
+					olderThanDays: params.olderThanDays,
+					keepLastN: params.keepLastN,
+					dryRun: true,
+				});
+				const lines = runs.slice(0, 20).map((r) => {
+					const age = `${Math.round((Date.now() - r.mtimeMs) / 86400000)}d`;
+					const mark = preview.deleted.includes(r.runId) ? " [would delete]" : "";
+					return `${r.runId} age=${age} ${(r.sizeBytes / 1024).toFixed(1)}KB${mark}`;
+				});
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Swarm runs: ${runs.length}. Would delete ${preview.deleted.length} (${(preview.freedBytes / 1024).toFixed(1)}KB). Pass apply:true to delete.\n${lines.join("\n") || "(no runs)"}`,
+						},
+					],
+					details: { preview } as any,
+				};
+			}
+			const res = await pruneSwarmRuns(ctx.cwd, {
+				olderThanDays: params.olderThanDays,
+				keepLastN: params.keepLastN,
+				dryRun: false,
+			});
+			return {
+				content: [
+					{
+						type: "text",
+						text: res.deleted.length === 0
+							? `Swarm GC: nothing to delete (kept ${res.kept.length}).`
+							: `Swarm GC: deleted ${res.deleted.length} run(s), freed ${(res.freedBytes / 1024).toFixed(1)}KB. Kept ${res.kept.length}.\n${res.deleted.join("\n")}`,
+					},
+				],
+				details: res as any,
+			};
+		},
+	});
+
+	pi.registerCommand("swarm-gc", {
+		description: "Prune stale .swarm/<runId>/ dirs: /swarm-gc [--older-than N] [--keep-last N] [--apply]",
+		handler: async (args, ctx) => {
+			const text = args ?? "";
+			const num = (re: RegExp): number | undefined => {
+				const m = text.match(re);
+				if (!m) return undefined;
+				const n = Number(m[1]);
+				return Number.isFinite(n) && n >= 0 ? n : undefined;
+			};
+			const olderThan = num(/--older-than\s+(\d+(?:\.\d+)?)/) ?? 7;
+			const keepLast = num(/--keep-last\s+(\d+)/) ?? 10;
+			const apply = text.includes("--apply");
+			const res = await pruneSwarmRuns(ctx.cwd, {
+				olderThanDays: olderThan,
+				keepLastN: keepLast,
+				dryRun: !apply,
+			});
+			const verb = apply ? "Deleted" : "Would delete";
+			ctx.ui.notify(
+				`Swarm GC (${apply ? "applied" : "dry-run"}): ${verb.toLowerCase()} ${res.deleted.length} run(s)${res.deleted.length > 0 ? `, freed ${(res.freedBytes / 1024).toFixed(1)}KB` : ""}. Kept ${res.kept.length}.\n${res.deleted.slice(0, 20).join("\n")}${res.deleted.length > 20 ? `\n... +${res.deleted.length - 20} more` : ""}${apply ? "" : "\nPass --apply to delete."}`,
+				"info",
+			);
 		},
 	});
 }
