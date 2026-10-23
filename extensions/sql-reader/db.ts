@@ -414,6 +414,83 @@ export async function listColumns(conn: ConnParams, schema: string, table?: stri
   );
 }
 
+/** One-line `IDX …` rendering shared by the `schema` text view (exported for tests). */
+export function formatIndexRow(r: Record<string, unknown>): string {
+  const uniqueFlag = r.isPrimary
+    ? null
+    : r.isUniqueConstraint
+      ? "unique-constraint"
+      : r.isUnique
+        ? "unique"
+        : null;
+  const flags = [r.isPrimary ? "primary" : null, uniqueFlag, r.type ? String(r.type) : null].filter(Boolean).join(", ");
+  const colsStr = r.columns ? `(${(r.columns as string) || "?"})` : "";
+  const pred = r.predicate ? ` WHERE ${r.predicate}` : "";
+  return `  IDX ${r.name}${flags ? ` (${flags})` : ""} ${colsStr}${pred}`.trimEnd();
+}
+
+/** Pure builders (no I/O) so unit tests can pin catalog SQL without a live DB. */
+export function buildPgIndexesQuery(schema: string, table?: string): { text: string; values: unknown[] } {
+  const values: unknown[] = [schema];
+  let extra = "";
+  if (table) { values.push(table); extra = ` AND t.relname = $${values.length}`; }
+  const text = `SELECT s.nspname AS "schema", t.relname AS "table", c.relname AS "name",
+              ix.indisunique AS "isUnique", ix.indisprimary AS "isPrimary",
+              CASE WHEN con.contype = 'u' THEN true ELSE false END AS "isUniqueConstraint",
+              am.amname AS "type",
+              (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
+               FROM unnest(ix.indkey::smallint[]) WITH ORDINALITY AS k(attnum, ord)
+               JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum) AS "columns",
+              pg_get_indexdef(c.oid) AS "definition",
+              pg_get_expr(ix.indpred, ix.indrelid) AS "predicate"
+       FROM pg_index ix
+       JOIN pg_class t ON t.oid = ix.indrelid
+       JOIN pg_class c ON c.oid = ix.indexrelid
+       JOIN pg_namespace s ON s.oid = t.relnamespace
+       JOIN pg_am am ON am.oid = c.relam
+       LEFT JOIN pg_constraint con ON con.conindid = c.oid AND con.contype IN ('p', 'u')
+       WHERE s.nspname = $1${extra} ORDER BY 2, 3`;
+  return { text, values };
+}
+
+export function buildMssqlIndexesQuery(schema: string, table?: string): { text: string; params: { name: string; value: unknown }[] } {
+  const params: { name: string; value: unknown }[] = [{ name: "schema", value: schema }];
+  let extra = "";
+  if (table) { params.push({ name: "table", value: table }); extra = " AND t.name = @table"; }
+  const text = `SELECT s.name AS "schema", t.name AS "table", i.name AS "name",
+            i.is_unique AS "isUnique", i.is_primary_key AS "isPrimary",
+            i.is_unique_constraint AS "isUniqueConstraint",
+            i.type_desc AS "type",
+            (SELECT STRING_AGG(c2.name, ', ') WITHIN GROUP (ORDER BY ic2.key_ordinal)
+             FROM sys.index_columns ic2
+             JOIN sys.columns c2 ON c2.object_id = ic2.object_id AND c2.column_id = ic2.column_id
+             WHERE ic2.object_id = i.object_id AND ic2.index_id = i.index_id AND ic2.is_included_column = 0) AS "columns",
+            (SELECT STRING_AGG(c3.name, ', ') WITHIN GROUP (ORDER BY ic3.index_column_id)
+             FROM sys.index_columns ic3
+             JOIN sys.columns c3 ON c3.object_id = ic3.object_id AND c3.column_id = ic3.column_id
+             WHERE ic3.object_id = i.object_id AND ic3.index_id = i.index_id AND ic3.is_included_column = 1) AS "includedColumns",
+            i.filter_definition AS "predicate"
+     FROM sys.indexes i
+     JOIN sys.tables t ON t.object_id = i.object_id
+     JOIN sys.schemas s ON s.schema_id = t.schema_id
+     WHERE s.name = @schema AND i.index_id > 0 AND i.name IS NOT NULL${extra} ORDER BY 2, 3`;
+  return { text, params };
+}
+
+export async function listIndexes(conn: ConnParams, schema: string, table?: string, signal?: AbortSignal): Promise<Tabular> {
+  if (conn.dialect === "postgres") {
+    const q = buildPgIndexesQuery(schema, table);
+    return pgRun(conn, q.text, q.values, signal);
+  }
+  const q = buildMssqlIndexesQuery(schema, table);
+  return tediousRun(
+    conn,
+    q.text,
+    q.params.map((p) => ({ ...p, type: TYPES.NVarChar })),
+    signal,
+  );
+}
+
 export async function listDataTypes(conn: ConnParams, signal?: AbortSignal): Promise<Tabular> {
   if (conn.dialect === "postgres") {
     return pgRun(

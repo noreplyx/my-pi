@@ -11,7 +11,8 @@ Read-only SQL Server + Postgres reader for Pi. Single tool `sql_reader` with `ac
 | `plan` | conn + `sql` + planner opts | query plan: estimated by default, actual when `analyze:true` (executes). Returns `planText` (+ `planJson` for pg `FORMAT JSON`), `executed`, `truncated` |
 | `tables` | conn + optional `schema` | schema/name/type |
 | `columns` | conn + `schema?` + `table?` | name/dataType/nullable/default/maxLength/precision/scale |
-| `schema` | conn + `schema?` | tables + columns bundled (capped at 200 tables, truncated flag) |
+| `indexes` | conn + `schema?` + `table?` | schema/table/name/isUnique/isPrimary/isUniqueConstraint/type/columns/includedColumns/predicate/definition |
+| `schema` | conn + `schema?` | tables + columns + indexes bundled (capped at 200 tables, truncated flag; `indexCount`) |
 | `datatypes` | conn | distinct types + column/table counts |
 
 ## Connection (per call, never persisted)

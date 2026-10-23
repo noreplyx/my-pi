@@ -2,7 +2,7 @@
  * sql-reader — read-only SQL Server + Postgres reader for Pi.
  *
  * Single tool `sql_reader` with `action` dispatch:
- *   query | plan | tables | columns | schema | datatypes | ping
+ *   query | plan | tables | columns | indexes | schema | datatypes | ping
  * TLS and plaintext both supported per call; credentials are per-call only
  * and never persisted. Connections are opened lazily inside execute() and
  * always closed (no long-lived sockets from the factory).
@@ -11,7 +11,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { getMssqlPlan, getPgPlan, listColumns, listDataTypes, listTables, ping, runQuery, type Tabular } from "./db.ts";
+import { formatIndexRow, getMssqlPlan, getPgPlan, listColumns, listDataTypes, listIndexes, listTables, ping, runQuery, type Tabular } from "./db.ts";
 import { connLabel, tlsSummary, type ConnParams } from "./tls.ts";
 import { appendLimit, clampRows, truncateCell, validateReadOnlySql } from "./validate.ts";
 
@@ -40,11 +40,12 @@ const SqlReaderParams = Type.Object({
       Type.Literal("plan"),
       Type.Literal("tables"),
       Type.Literal("columns"),
+      Type.Literal("indexes"),
       Type.Literal("schema"),
       Type.Literal("datatypes"),
       Type.Literal("ping"),
     ],
-    { description: "query=run read-only SELECT (EXPLAIN… allowed); plan=query planner (estimated by default, executed when analyze=true); tables=list tables/views; columns=column types; schema=tables+columns; datatypes=distinct types; ping=connectivity+version." },
+    { description: "query=run read-only SELECT (EXPLAIN… allowed); plan=query planner (estimated by default, executed when analyze=true); tables=list tables/views; columns=column types; indexes=indexes with key columns/uniqueness/primary/type; schema=tables+columns+indexes; datatypes=distinct types; ping=connectivity+version." },
   ),
   dialect: Dialect,
   host: Type.String({ description: "DB hostname or IP." }),
@@ -57,7 +58,7 @@ const SqlReaderParams = Type.Object({
   queryTimeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 300000, default: 30000 })),
   sql: Type.Optional(Type.String({ description: "Single read-only SELECT/WITH statement (query + plan actions). For query, a leading EXPLAIN… is allowed (incl. EXPLAIN ANALYZE / EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)). For plan, pass the plain SELECT/WITH to explain." })),
   schema: Type.Optional(Type.String({ description: "Schema filter (default public for pg, dbo for mssql)." })),
-  table: Type.Optional(Type.String({ description: "Table filter (columns action)." })),
+  table: Type.Optional(Type.String({ description: "Table filter (columns + indexes actions)." })),
   limit: Type.Optional(Type.Integer({ description: "Row cap for query, enforced server-side (default 100, max 1000).", minimum: 1, maximum: 1000 })),
   maxRows: Type.Optional(Type.Integer({ description: "Alias for limit (default 100, max 1000).", minimum: 1, maximum: 1000 })),
   analyze: Type.Optional(Type.Boolean({ description: "Plan only: true = actual plan (executes the query: pg EXPLAIN ANALYZE / mssql STATISTICS XML). False (default) = estimated plan, no execution. Can be slow on large tables; bound with queryTimeoutMs." })),
@@ -78,8 +79,10 @@ const SqlReaderOutputSchema = Type.Object(
     columns: Type.Optional(Type.Array(Type.String())),
     rows: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
     tables: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
+    indexes: Type.Optional(Type.Array(Type.Record(Type.String(), Type.Any()))),
     rowCount: Type.Optional(Type.Integer()),
     tableCount: Type.Optional(Type.Integer()),
+    indexCount: Type.Optional(Type.Integer()),
     truncated: Type.Optional(Type.Boolean()),
     version: Type.Optional(Type.String()),
     latencyMs: Type.Optional(Type.Integer()),
@@ -96,7 +99,7 @@ const MAX_PLAN_CHARS = 100_000;
 const PLAN_DISPLAY_CHARS = 12_000;
 
 type Params = {
-  action: "query" | "plan" | "tables" | "columns" | "schema" | "datatypes" | "ping";
+  action: "query" | "plan" | "tables" | "columns" | "indexes" | "schema" | "datatypes" | "ping";
   dialect: "postgres" | "sqlserver";
   host: string;
   port?: number;
@@ -159,7 +162,7 @@ export default function (pi: ExtensionAPI) {
     label: "SQL Reader",
     description: [
       "Read-only reader for Postgres and SQL Server (TLS or plaintext).",
-      "Actions: query (single SELECT/WITH only, blocked otherwise; limit enforced server-side; EXPLAIN… allowed), plan (query planner: estimated by default, actual when analyze=true executes the query), tables, columns,",
+      "Actions: query (single SELECT/WITH only, blocked otherwise; limit enforced server-side; EXPLAIN… allowed), plan (query planner: estimated by default, actual when analyze=true executes the query), tables, columns, indexes,",
       "schema, datatypes, ping. Credentials are per-call and never stored.",
       "Set tls.mode=tls for encrypted connections; use rejectUnauthorized=false only",
       "for self-signed dev certs, caPem for private CAs.",
@@ -216,6 +219,17 @@ export default function (pi: ExtensionAPI) {
           };
         }
 
+        if (params.action === "indexes") {
+          const schema = params.schema ?? defaultSchema(params.dialect);
+          const t = await listIndexes(conn, schema, params.table, signal);
+          const text = `Indexes in ${label} ${schema}${params.table ? "." + params.table : ""} (${t.rows.length}):\n${mdTable(t, 100)}`;
+          return {
+            content: [{ type: "text" as const, text }],
+            details: { action: "indexes", target: label, tls, indexes: t.rows, indexCount: t.rows.length, elapsedMs: elapsed() },
+            structuredContent: { indexes: t.rows, indexCount: t.rows.length },
+          };
+        }
+
         if (params.action === "datatypes") {
           const t = await listDataTypes(conn, signal);
           const text = `Data types in ${label} (${t.rows.length}):\n${mdTable(t, 50)}`;
@@ -230,27 +244,38 @@ export default function (pi: ExtensionAPI) {
           const schema = params.schema ?? defaultSchema(params.dialect);
           const tables = await listTables(conn, schema, signal);
           const cols = await listColumns(conn, schema, undefined, signal);
+          const idx = await listIndexes(conn, schema, undefined, signal);
           const truncated = tables.rows.length > SCHEMA_TABLE_CAP;
           const shownTables = tables.rows.slice(0, SCHEMA_TABLE_CAP);
           const shownNames = new Set(shownTables.map((tb) => String(tb.name)));
           const shownCols = cols.rows.filter((c) => shownNames.has(String(c.table ?? c.TABLE ?? "?")));
+          const shownIdx = idx.rows.filter((r) => shownNames.has(String(r.table ?? r.TABLE ?? "?")));
           const byTable = new Map<string, Record<string, unknown>[]>();
           for (const c of shownCols) {
             const k = String(c.table ?? c.TABLE ?? "?");
             if (!byTable.has(k)) byTable.set(k, []);
             byTable.get(k)!.push(c);
           }
+          const idxByTable = new Map<string, Record<string, unknown>[]>();
+          for (const r of shownIdx) {
+            const k = String(r.table ?? r.TABLE ?? "?");
+            if (!idxByTable.has(k)) idxByTable.set(k, []);
+            idxByTable.get(k)!.push(r);
+          }
           const lines = shownTables.map((tb) => {
             const name = String(tb.name ?? "?");
             const members = byTable.get(name) ?? [];
             const colList = members.map((c) => `  ${c.name} ${c.dataType}(nullable=${c.nullable})`).join("\n");
-            return `${tb.schema}.${name} (${tb.type}):\n${colList || "  (no columns found)"}`;
+            const indexes = idxByTable.get(name) ?? [];
+            const idxList = indexes.map(formatIndexRow).join("\n");
+            const idxSection = idxList ? `\n${idxList}` : "";
+            return `${tb.schema}.${name} (${tb.type}):\n${colList || "  (no columns found)"}${idxSection}`;
           });
-          const text = `Schema ${schema} in ${label}: ${shownTables.length} tables${truncated ? ` (showing first ${SCHEMA_TABLE_CAP} of ${tables.rows.length})` : ""}\n\n${lines.join("\n\n")}`;
+          const text = `Schema ${schema} in ${label}: ${shownTables.length} tables, ${shownIdx.length} indexes${truncated ? ` (showing first ${SCHEMA_TABLE_CAP} of ${tables.rows.length})` : ""}\n\n${lines.join("\n\n")}`;
           return {
             content: [{ type: "text" as const, text: text.slice(0, 12000) }],
-            details: { action: "schema", target: label, tls, tables: shownTables, columns: shownCols, tableCount: tables.rows.length, truncated, elapsedMs: elapsed() },
-            structuredContent: { tables: shownTables, tableCount: tables.rows.length, truncated },
+            details: { action: "schema", target: label, tls, tables: shownTables, columns: shownCols, indexes: shownIdx, tableCount: tables.rows.length, indexCount: idx.rows.length, truncated, elapsedMs: elapsed() },
+            structuredContent: { tables: shownTables, indexes: shownIdx, tableCount: tables.rows.length, indexCount: idx.rows.length, truncated },
           };
         }
 
