@@ -2,7 +2,7 @@
  * sql-reader — read-only SQL Server + Postgres reader for Pi.
  *
  * Single tool `sql_reader` with `action` dispatch:
- *   query | tables | columns | schema | datatypes | ping
+ *   query | plan | tables | columns | schema | datatypes | ping
  * TLS and plaintext both supported per call; credentials are per-call only
  * and never persisted. Connections are opened lazily inside execute() and
  * always closed (no long-lived sockets from the factory).
@@ -11,7 +11,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { listColumns, listDataTypes, listTables, ping, runQuery, type Tabular } from "./db.ts";
+import { getMssqlPlan, getPgPlan, listColumns, listDataTypes, listTables, ping, runQuery, type Tabular } from "./db.ts";
 import { connLabel, tlsSummary, type ConnParams } from "./tls.ts";
 import { appendLimit, clampRows, truncateCell, validateReadOnlySql } from "./validate.ts";
 
@@ -37,13 +37,14 @@ const SqlReaderParams = Type.Object({
   action: Type.Union(
     [
       Type.Literal("query"),
+      Type.Literal("plan"),
       Type.Literal("tables"),
       Type.Literal("columns"),
       Type.Literal("schema"),
       Type.Literal("datatypes"),
       Type.Literal("ping"),
     ],
-    { description: "query=run read-only SELECT; tables=list tables/views; columns=column types; schema=tables+columns; datatypes=distinct types; ping=connectivity+version." },
+    { description: "query=run read-only SELECT (EXPLAIN… allowed); plan=query planner (estimated by default, executed when analyze=true); tables=list tables/views; columns=column types; schema=tables+columns; datatypes=distinct types; ping=connectivity+version." },
   ),
   dialect: Dialect,
   host: Type.String({ description: "DB hostname or IP." }),
@@ -54,11 +55,21 @@ const SqlReaderParams = Type.Object({
   tls: Tls,
   connectionTimeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 120000, default: 15000 })),
   queryTimeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 300000, default: 30000 })),
-  sql: Type.Optional(Type.String({ description: "Single read-only SELECT/WITH statement (query action only)." })),
+  sql: Type.Optional(Type.String({ description: "Single read-only SELECT/WITH statement (query + plan actions). For query, a leading EXPLAIN… is allowed (incl. EXPLAIN ANALYZE / EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)). For plan, pass the plain SELECT/WITH to explain." })),
   schema: Type.Optional(Type.String({ description: "Schema filter (default public for pg, dbo for mssql)." })),
   table: Type.Optional(Type.String({ description: "Table filter (columns action)." })),
   limit: Type.Optional(Type.Integer({ description: "Row cap for query, enforced server-side (default 100, max 1000).", minimum: 1, maximum: 1000 })),
   maxRows: Type.Optional(Type.Integer({ description: "Alias for limit (default 100, max 1000).", minimum: 1, maximum: 1000 })),
+  analyze: Type.Optional(Type.Boolean({ description: "Plan only: true = actual plan (executes the query: pg EXPLAIN ANALYZE / mssql STATISTICS XML). False (default) = estimated plan, no execution. Can be slow on large tables; bound with queryTimeoutMs." })),
+  format: Type.Optional(Type.Union([Type.Literal("text"), Type.Literal("json"), Type.Literal("xml"), Type.Literal("yaml")], { description: "Plan only, postgres EXPLAIN FORMAT (default text). json returns parsed planJson." })),
+  verbose: Type.Optional(Type.Boolean({ description: "Plan only, postgres EXPLAIN VERBOSE." })),
+  costs: Type.Optional(Type.Boolean({ description: "Plan only, postgres EXPLAIN COSTS (default on; pass false for COSTS FALSE)." })),
+  buffers: Type.Optional(Type.Boolean({ description: "Plan only, postgres EXPLAIN BUFFERS." })),
+  timing: Type.Optional(Type.Boolean({ description: "Plan only, postgres EXPLAIN TIMING." })),
+  summary: Type.Optional(Type.Boolean({ description: "Plan only, postgres EXPLAIN SUMMARY." })),
+  settings: Type.Optional(Type.Boolean({ description: "Plan only, postgres EXPLAIN SETTINGS." })),
+  wal: Type.Optional(Type.Boolean({ description: "Plan only, postgres EXPLAIN WAL." })),
+  planFormat: Type.Optional(Type.Union([Type.Literal("xml"), Type.Literal("all"), Type.Literal("text")], { description: "Plan only, sqlserver estimated shape (default xml SHOWPLAN_XML; all=SHOWPLAN_ALL table; text=SHOWPLAN_TEXT). Ignored for postgres and for actual (analyze=true) plans." })),
 });
 
 // Machine-readable result shapes for codemode scripts (see outputSchema below).
@@ -72,14 +83,20 @@ const SqlReaderOutputSchema = Type.Object(
     truncated: Type.Optional(Type.Boolean()),
     version: Type.Optional(Type.String()),
     latencyMs: Type.Optional(Type.Integer()),
+    planText: Type.Optional(Type.String()),
+    planJson: Type.Optional(Type.Any()),
+    executed: Type.Optional(Type.Boolean()),
   },
   { additionalProperties: true },
 );
 
 const SCHEMA_TABLE_CAP = 200;
+// Plans (esp. XML) can be large; cap what we return to keep tool output sane.
+const MAX_PLAN_CHARS = 100_000;
+const PLAN_DISPLAY_CHARS = 12_000;
 
 type Params = {
-  action: "query" | "tables" | "columns" | "schema" | "datatypes" | "ping";
+  action: "query" | "plan" | "tables" | "columns" | "schema" | "datatypes" | "ping";
   dialect: "postgres" | "sqlserver";
   host: string;
   port?: number;
@@ -94,6 +111,16 @@ type Params = {
   table?: string;
   limit?: number;
   maxRows?: number;
+  analyze?: boolean;
+  format?: "text" | "json" | "xml" | "yaml";
+  verbose?: boolean;
+  costs?: boolean;
+  buffers?: boolean;
+  timing?: boolean;
+  summary?: boolean;
+  settings?: boolean;
+  wal?: boolean;
+  planFormat?: "xml" | "all" | "text";
 };
 
 function toConn(p: Params): ConnParams {
@@ -132,7 +159,7 @@ export default function (pi: ExtensionAPI) {
     label: "SQL Reader",
     description: [
       "Read-only reader for Postgres and SQL Server (TLS or plaintext).",
-      "Actions: query (single SELECT/WITH only, blocked otherwise; limit enforced server-side), tables, columns,",
+      "Actions: query (single SELECT/WITH only, blocked otherwise; limit enforced server-side; EXPLAIN… allowed), plan (query planner: estimated by default, actual when analyze=true executes the query), tables, columns,",
       "schema, datatypes, ping. Credentials are per-call and never stored.",
       "Set tls.mode=tls for encrypted connections; use rejectUnauthorized=false only",
       "for self-signed dev certs, caPem for private CAs.",
@@ -227,6 +254,73 @@ export default function (pi: ExtensionAPI) {
           };
         }
 
+        if (params.action === "plan") {
+          if (!params.sql) return fail("plan action requires `sql` (a single read-only SELECT/WITH statement to explain).");
+          const check = validateReadOnlySql(params.sql);
+          if (!check.ok) return fail(`Blocked: ${check.error}`);
+          const isPgExplainPassthrough = /^\s*EXPLAIN\b/i.test(params.sql);
+          if (conn.dialect === "sqlserver" && isPgExplainPassthrough) {
+            return fail("EXPLAIN syntax is postgres-only. For sqlserver plan, pass the plain SELECT/WITH in `sql` and use analyze/planFormat options.");
+          }
+          const fmt = params.format ?? "text";
+          if (conn.dialect === "postgres" && !["text", "json", "xml", "yaml"].includes(fmt)) {
+            return fail(`Unsupported format "${fmt}" (expected text/json/xml/yaml).`);
+          }
+          if (conn.dialect === "sqlserver" && params.planFormat && !["xml", "all", "text"].includes(params.planFormat)) {
+            return fail(`Unsupported planFormat "${params.planFormat}" (expected xml/all/text).`);
+          }
+          if (isPgExplainPassthrough && conn.dialect === "postgres") {
+            // Full-option passthrough: user already wrote EXPLAIN (ANALYZE, …).
+            // Run verbatim (no LIMIT wrap, no rebuild) so any option set works.
+            const t = await runQuery(conn, params.sql, signal);
+            const col = t.columns[0] ?? Object.keys(t.rows[0] ?? {})[0];
+            let planJson: unknown;
+            let planText: string;
+            if (col && t.rows.length > 0 && typeof (t.rows[0] as Record<string, unknown>)[col] === "object") {
+              planJson = (t.rows[0] as Record<string, unknown>)[col];
+              planText = JSON.stringify(planJson, null, 2);
+            } else if (col) {
+              planText = t.rows.map((r) => String((r as Record<string, unknown>)[col] ?? "")).join("\n");
+              if (/^\s*[\[{]/.test(planText.trim())) {
+                try { planJson = JSON.parse(planText); } catch { /* keep text */ }
+              }
+            } else {
+              planText = "";
+            }
+            const truncated = planText.length > MAX_PLAN_CHARS;
+            const sliced = truncated ? planText.slice(0, MAX_PLAN_CHARS) : planText;
+            const text = `Plan OK ${label} (${t.rows.length} plan rows, ${elapsed()}ms):\n${sliced.slice(0, PLAN_DISPLAY_CHARS)}${sliced.length > PLAN_DISPLAY_CHARS ? `\n… truncated to ${PLAN_DISPLAY_CHARS} chars in display (see structuredContent)` : ""}`;
+            return {
+              content: [{ type: "text" as const, text }],
+              details: { action: "plan", target: label, tls, columns: t.columns, rowCount: t.rows.length, truncated, elapsedMs: elapsed() },
+              structuredContent: { columns: t.columns, rows: t.rows, rowCount: t.rows.length, planText: sliced, ...(planJson !== undefined ? { planJson } : {}), truncated },
+            };
+          }
+          const plan = conn.dialect === "postgres"
+            ? await getPgPlan(conn, params.sql, {
+              analyze: params.analyze,
+              verbose: params.verbose,
+              costs: params.costs,
+              buffers: params.buffers,
+              timing: params.timing,
+              summary: params.summary,
+              settings: params.settings,
+              wal: params.wal,
+              format: fmt as "text" | "json" | "xml" | "yaml",
+            }, signal)
+            : await getMssqlPlan(conn, params.sql, { analyze: params.analyze, planFormat: params.planFormat ?? "xml" }, signal);
+          const truncated = plan.planText.length > MAX_PLAN_CHARS;
+          const sliced = truncated ? plan.planText.slice(0, MAX_PLAN_CHARS) : plan.planText;
+          const display = sliced.length > PLAN_DISPLAY_CHARS ? `${sliced.slice(0, PLAN_DISPLAY_CHARS)}\n… truncated to ${PLAN_DISPLAY_CHARS} chars in display (see structuredContent)` : sliced;
+          const note = plan.executed ? " (actual plan — query was executed; can be slow, bounded by queryTimeoutMs)" : " (estimated plan — query was not executed)";
+          const text = `Plan OK ${label}${note} (${elapsed()}ms):\n${display || "(empty plan)"}`;
+          return {
+            content: [{ type: "text" as const, text }],
+            details: { action: "plan", target: label, tls, columns: plan.tabular.columns, rowCount: plan.tabular.rows.length, truncated, executed: plan.executed, elapsedMs: elapsed() },
+            structuredContent: { columns: plan.tabular.columns, rows: plan.tabular.rows, rowCount: plan.tabular.rows.length, planText: sliced, ...(plan.planJson !== undefined ? { planJson: plan.planJson } : {}), executed: plan.executed, truncated },
+          };
+        }
+
         // action === "query"
         if (!params.sql) return fail("query action requires `sql` (a single read-only SELECT/WITH statement).");
         const check = validateReadOnlySql(params.sql);
@@ -254,6 +348,7 @@ export default function (pi: ExtensionAPI) {
       let text = theme.fg("toolTitle", theme.bold("sql_reader ")) +
         theme.fg("accent", `${a.dialect ?? "?"}:${a.action ?? "?"}`);
       if (a.host && a.database) text += theme.fg("muted", ` @${a.host}/${a.database}`);
+      if (a.action === "plan" && (a as Partial<Params>).analyze) text += theme.fg("accent", " [analyze]");
       if (typeof a.sql === "string" && a.sql) {
         const oneLine = a.sql.replace(/\s+/g, " ").trim();
         const preview = oneLine.length > 80 ? `${oneLine.slice(0, 80)}…` : oneLine;

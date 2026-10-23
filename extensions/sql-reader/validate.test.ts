@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { buildPgExplain } from "./db.ts";
 import {
   appendLimit,
   clampRows,
   findTopLevelOrderBy,
   splitStatements,
+  stripExplainPrefix,
   truncateCell,
   validateReadOnlySql,
 } from "./validate.ts";
@@ -16,6 +18,12 @@ describe("validateReadOnlySql", () => {
     "VALUES (1), (2)",
     "TABLE users",
     "EXPLAIN SELECT * FROM users",
+    "EXPLAIN ANALYZE SELECT * FROM users",
+    "EXPLAIN VERBOSE SELECT 1",
+    "EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM users",
+    "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM users",
+    "EXPLAIN (COSTS OFF) SELECT 1",
+    "explain analyze select * from users",
     "SELECT ';' -- semicolon in a string literal",
     'SELECT ";"', // semicolon in a quoted identifier
     "SELECT 'it''s a -- trick /* here */'",
@@ -46,6 +54,16 @@ describe("validateReadOnlySql", () => {
     ["SELECT * FROM t; -- trailing comment hides nothing", "multi-statement"],
     ["CREATE VIEW v AS SELECT 1", "DDL"],
     ["COPY users TO '/tmp/x.csv'", "COPY"],
+    ["ANALYZE users", "bare analyze (maintenance)"],
+    ["VACUUM ANALYZE users", "vacuum analyze"],
+    ["SELECT * FROM t WHERE x = 1 ANALYZE", "analyze outside explain"],
+    ["EXPLAIN DELETE FROM t", "explain write"],
+    ["EXPLAIN INSERT INTO t VALUES (1)", "explain write"],
+    ["EXPLAIN SELECT * INTO backup FROM users", "explain select-into"],
+    ["EXPLAIN SELECT * FROM t FOR UPDATE", "explain locking read"],
+    ["EXPLAIN (FOOBAR) SELECT 1", "bad explain option"],
+    ["EXPLAIN (ANALYZE SELECT 1", "unbalanced explain parens"],
+    ["EXPLAIN", "explain with no statement"],
     ["", "empty"],
   ];
   for (const [sql, why] of blocked) {
@@ -121,6 +139,26 @@ describe("findTopLevelOrderBy", () => {
     expect(findTopLevelOrderBy("SELECT 'ORDER BY' FROM t")).toBe(-1);
     expect(findTopLevelOrderBy("SELECT * FROM t -- ORDER BY\n")).toBe(-1);
     expect(findTopLevelOrderBy("select a from t order\n  by a")).toBeGreaterThan(-1);
+  });
+});
+
+describe("stripExplainPrefix", () => {
+  test("parses bare and parenthesized ANALYZE", () => {
+    expect(stripExplainPrefix("EXPLAIN ANALYZE SELECT 1")).toMatchObject({ inner: "SELECT 1", hasAnalyze: true });
+    expect(stripExplainPrefix("EXPLAIN SELECT 1")).toMatchObject({ inner: "SELECT 1", hasAnalyze: false });
+    expect(stripExplainPrefix("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT 1")).toMatchObject({ hasAnalyze: true });
+    expect(stripExplainPrefix("EXPLAIN (COSTS OFF) SELECT 1")).toMatchObject({ hasAnalyze: false });
+  });
+});
+
+describe("buildPgExplain", () => {
+  test("builds option lists without user-text injection", () => {
+    expect(buildPgExplain("SELECT 1", {})).toBe("EXPLAIN SELECT 1");
+    expect(buildPgExplain("SELECT * FROM t;", { analyze: true })).toBe("EXPLAIN (ANALYZE) SELECT * FROM t");
+    expect(buildPgExplain("SELECT 1", { analyze: true, buffers: true, format: "json" })).toBe(
+      "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT 1",
+    );
+    expect(buildPgExplain("SELECT 1", { costs: false })).toContain("COSTS FALSE");
   });
 });
 

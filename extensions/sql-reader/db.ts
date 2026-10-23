@@ -143,6 +143,213 @@ export function runQuery(conn: ConnParams, sqlText: string, signal?: AbortSignal
   return tediousRun(conn, sqlText, [], signal);
 }
 
+// ---------- query plans ----------
+
+export interface PgPlanOptions {
+  analyze?: boolean;
+  verbose?: boolean;
+  costs?: boolean;
+  buffers?: boolean;
+  timing?: boolean;
+  summary?: boolean;
+  settings?: boolean;
+  wal?: boolean;
+  format?: "text" | "xml" | "json" | "yaml";
+}
+
+export interface PlanResult {
+  tabular: Tabular;
+  planText: string;
+  planJson?: unknown;
+  executed: boolean;
+}
+
+/**
+ * Build a Postgres `EXPLAIN [(options)] <inner>` statement. All options are
+ * booleans/enums from our own schema (never user SQL text), so there is no
+ * injection surface. `innerSql` must already have passed validateReadOnlySql.
+ */
+export function buildPgExplain(innerSql: string, opts: PgPlanOptions = {}): string {
+  const inner = innerSql.trim().replace(/;+\s*$/, "");
+  const parts: string[] = [];
+  const flag = (name: string, v: boolean | undefined, bareWhenTrue = true) => {
+    if (v === true) parts.push(bareWhenTrue ? name : `${name} TRUE`);
+    else if (v === false) parts.push(`${name} FALSE`);
+  };
+  if (opts.analyze) parts.push("ANALYZE");
+  flag("VERBOSE", opts.verbose);
+  flag("COSTS", opts.costs);
+  flag("SETTINGS", opts.settings);
+  flag("BUFFERS", opts.buffers);
+  flag("WAL", opts.wal);
+  flag("TIMING", opts.timing);
+  flag("SUMMARY", opts.summary);
+  if (opts.format && opts.format !== "text") parts.push(`FORMAT ${opts.format.toUpperCase()}`);
+  if (parts.length === 0) return `EXPLAIN ${inner}`;
+  return `EXPLAIN (${parts.join(", ")}) ${inner}`;
+}
+
+function pgPlanText(t: Tabular, format?: string): { planText: string; planJson?: unknown } {
+  if (t.rows.length === 0) return { planText: "" };
+  const col = t.columns[0] ?? Object.keys(t.rows[0])[0];
+  if ((format ?? "text").toLowerCase() === "json") {
+    const raw = (t.rows[0] as Record<string, unknown>)[col];
+    let parsed: unknown = raw;
+    if (typeof raw === "string") {
+      try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+    }
+    const text = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
+    return { planText: String(text ?? ""), planJson: parsed };
+  }
+  const lines = t.rows.map((r) => {
+    const v = (r as Record<string, unknown>)[col];
+    if (v === null || v === undefined) return "NULL";
+    if (typeof v === "object") { try { return JSON.stringify(v); } catch { return String(v); } }
+    return String(v);
+  });
+  return { planText: lines.join("\n") };
+}
+
+export async function getPgPlan(
+  conn: ConnParams,
+  innerSql: string,
+  opts: PgPlanOptions = {},
+  signal?: AbortSignal,
+): Promise<PlanResult> {
+  const stmt = buildPgExplain(innerSql, opts);
+  const tabular = await pgRun(conn, stmt, [], signal);
+  const { planText, planJson } = pgPlanText(tabular, opts.format ?? "text");
+  return { tabular, planText, planJson, executed: Boolean(opts.analyze) };
+}
+
+export interface MssqlPlanOptions {
+  /** false = estimated (SHOWPLAN_XML, does not execute); true = actual (STATISTICS XML, executes). */
+  analyze?: boolean;
+  /** Estimated-plan output shape. `xml` (default) returns the Showplan XML; `all`/`text` return tabular SHOWPLAN_ALL / SHOWPLAN_TEXT rows. */
+  planFormat?: "xml" | "all" | "text";
+}
+
+function tediousExecOnConnection(
+  connection: InstanceType<typeof Connection>,
+  sqlText: string,
+  signal?: AbortSignal,
+): Promise<Tabular> {
+  return new Promise((resolve, reject) => {
+    const columns: string[] = [];
+    const rows: Record<string, unknown>[] = [];
+    let settled = false;
+    const done = (err: Error | null, result?: Tabular) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      if (err) reject(err);
+      else resolve(result!);
+    };
+    const onAbort = () => done(signal?.reason instanceof Error ? signal.reason : new Error("Aborted"));
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const request = new Request(sqlText, (reqErr: Error | null) => {
+      if (reqErr) done(reqErr);
+      else done(null, { columns, rows });
+    });
+    request.on("row", (cols: { metadata: { colName: string }; value: unknown }[]) => {
+      if (columns.length === 0) {
+        for (const c of cols) columns.push(c.metadata.colName);
+      }
+      const row: Record<string, unknown> = {};
+      for (const c of cols) row[c.metadata.colName] = c.value;
+      rows.push(row);
+    });
+    try {
+      connection.execSql(request);
+    } catch (e) {
+      done(e instanceof Error ? e : new Error(String(e)));
+    }
+  });
+}
+
+function extractMssqlPlanText(t: Tabular): string {
+  for (const row of t.rows) {
+    for (const v of Object.values(row)) {
+      if (typeof v === "string" && v.includes("<ShowPlanXML")) return v;
+      if (typeof v === "string" && v.includes("<ShowPlan")) return v;
+    }
+  }
+  // SHOWPLAN_ALL / SHOWPLAN_TEXT come back as tabular rows; stringify them.
+  if (t.rows.length > 0) {
+    return t.rows.map((r) => Object.values(r).map((v) => String(v ?? "")).join(" | ")).join("\n");
+  }
+  return "";
+}
+
+/**
+ * SQL Server plans via session SET options on a single dedicated connection
+ * (per-call, always closed). The inner SQL is never concatenated with user
+ * SET text: only server-generated `SET ... ON/OFF` wrappers are used, and
+ * the inner statement must already have passed validateReadOnlySql.
+ */
+export async function getMssqlPlan(
+  conn: ConnParams,
+  innerSql: string,
+  opts: MssqlPlanOptions = {},
+  signal?: AbortSignal,
+): Promise<PlanResult> {
+  const inner = innerSql.trim().replace(/;+\s*$/, "");
+  const analyze = Boolean(opts.analyze);
+  const planFormat = opts.planFormat ?? "xml";
+  const onStmt = analyze
+    ? "SET STATISTICS XML ON"
+    : planFormat === "all"
+      ? "SET SHOWPLAN_ALL ON"
+      : planFormat === "text"
+        ? "SET SHOWPLAN_TEXT ON"
+        : "SET SHOWPLAN_XML ON";
+  const offStmt = analyze
+    ? "SET STATISTICS XML OFF"
+    : planFormat === "all"
+      ? "SET SHOWPLAN_ALL OFF"
+      : planFormat === "text"
+        ? "SET SHOWPLAN_TEXT OFF"
+        : "SET SHOWPLAN_XML OFF";
+
+  const config = tediousConfig(conn) as ConstructorParameters<typeof Connection>[0];
+  const connection = new Connection(config);
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(signal?.reason instanceof Error ? signal.reason : new Error("Aborted"));
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    connection.on("connect", (err: Error | undefined) => {
+      signal?.removeEventListener("abort", onAbort);
+      if (err) reject(err);
+      else resolve();
+    });
+    connection.on("error", (err: Error) => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(err);
+    });
+    connection.connect();
+  }).catch((e) => {
+    try { connection.close(); } catch { /* ignore */ }
+    throw e;
+  });
+
+  try {
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+    await tediousExecOnConnection(connection, onStmt, signal);
+    let tabular: Tabular;
+    try {
+      tabular = await tediousExecOnConnection(connection, inner, signal);
+    } finally {
+      // Always attempt to reset session state before closing.
+      await tediousExecOnConnection(connection, offStmt, signal).catch(() => {});
+    }
+    const planText = extractMssqlPlanText(tabular);
+    return { tabular, planText, executed: analyze };
+  } finally {
+    try { connection.close(); } catch { /* ignore */ }
+  }
+}
+
 // ---------- introspection ----------
 
 export async function listTables(conn: ConnParams, schema?: string, signal?: AbortSignal): Promise<Tabular> {

@@ -8,6 +8,10 @@ const READ_ONLY_LEADERS = ["SELECT", "WITH", "VALUES", "TABLE", "EXPLAIN"];
 
 // Word-boundary patterns checked AFTER stripping string literals,
 // quoted identifiers, line comments and block comments.
+//
+// NOTE: ANALYZE is handled separately (see ANALYZE_RE + stripExplainPrefix):
+// it is only allowed as an EXPLAIN option (EXPLAIN ANALYZE / EXPLAIN
+// (ANALYZE, ...)). Bare ANALYZE (maintenance) stays blocked.
 const FORBIDDEN = [
   /\bINSERT\b/i,
   /\bUPDATE\b/i,
@@ -25,7 +29,6 @@ const FORBIDDEN = [
   /\bEXEC(UTE)?\b/i,
   /\bDECLARE\b/i,
   /\bVACUUM\b/i,
-  /\bANALYZE\b/i,
   /\bCLUSTER\b/i,
   /\bREINDEX\b/i,
   /\bCOMMENT\b/i,
@@ -148,6 +151,63 @@ export function splitStatements(sql: string): string[] {
   return stmts;
 }
 
+const ANALYZE_RE = /\bANALYZE\b/i;
+
+/**
+ * Parse an EXPLAIN prefix off an already-stripped (literals/comments removed)
+ * statement. Caller must have verified the leader is EXPLAIN.
+ *
+ * Supports both modern `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) <stmt>` and
+ * legacy `EXPLAIN ANALYZE VERBOSE <stmt>` forms.
+ *
+ * Returns the inner statement plus the raw option text and whether ANALYZE
+ * was requested (i.e. the plan executes the query and can be heavy).
+ */
+export function stripExplainPrefix(stripped: string): { inner: string; optionsText: string; hasAnalyze: boolean } | { error: string } {
+  let rest = stripped.trim().replace(/^EXPLAIN\b/i, "").trim();
+  if (!rest) return { error: "EXPLAIN requires a statement to explain." };
+  let optionsText = "";
+  let hasAnalyze = false;
+  if (rest.startsWith("(")) {
+    let depth = 0;
+    let idx = -1;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "(") depth++;
+      else if (rest[i] === ")") {
+        depth--;
+        if (depth === 0) { idx = i; break; }
+      }
+    }
+    if (idx === -1) return { error: "Unbalanced parentheses in EXPLAIN options." };
+    optionsText = rest.slice(1, idx);
+    hasAnalyze = ANALYZE_RE.test(optionsText);
+    const allowed = new Set([
+      "ANALYZE", "VERBOSE", "COSTS", "SETTINGS", "BUFFERS", "WAL",
+      "TIMING", "SUMMARY", "FORMAT", "TRUE", "FALSE", "ON", "OFF",
+      "TEXT", "XML", "JSON", "YAML",
+    ]);
+    const words = optionsText.split(/[\s,]+/).filter(Boolean);
+    if (words.length === 0) return { error: "Empty EXPLAIN option list." };
+    for (const w of words) {
+      if (/^\d+$/.test(w)) continue;
+      if (!allowed.has(w.toUpperCase())) return { error: `Unsupported EXPLAIN option "${w}".` };
+    }
+    rest = rest.slice(idx + 1).trim();
+  } else {
+    // Legacy bare form: EXPLAIN [ANALYZE] [VERBOSE] [COSTS ...] <stmt>
+    const bareAllowed = new Set(["ANALYZE", "VERBOSE", "COSTS", "SETTINGS", "BUFFERS", "WAL", "TIMING", "SUMMARY"]);
+    for (;;) {
+      const m = /^(ANALYZE|VERBOSE|COSTS|SETTINGS|BUFFERS|WAL|TIMING|SUMMARY)\b/i.exec(rest);
+      if (!m) break;
+      if (m[1].toUpperCase() === "ANALYZE") hasAnalyze = true;
+      rest = rest.slice(m[0].length).trim();
+      const b = /^(TRUE|FALSE|ON|OFF)\b/i.exec(rest);
+      if (b) rest = rest.slice(b[0].length).trim();
+    }
+  }
+  return { inner: rest, optionsText, hasAnalyze };
+}
+
 export function validateReadOnlySql(sql: string): { ok: true } | { ok: false; error: string } {
   if (!sql || !sql.trim()) return { ok: false, error: "sql must be a non-empty SELECT statement." };
   if (Buffer.byteLength(sql, "utf8") > MAX_SQL_BYTES) {
@@ -165,10 +225,39 @@ export function validateReadOnlySql(sql: string): { ok: true } | { ok: false; er
       error: `Only read-only queries are allowed (must start with ${READ_ONLY_LEADERS.join("/")}, got "${firstWord || "?"}").`,
     };
   }
+  // EXPLAIN: ANALYZE is allowed only as an EXPLAIN option. The inner
+  // statement must itself be read-only (SELECT/WITH/VALUES/TABLE/EXPLAIN).
+  // NOTE: EXPLAIN ANALYZE executes the query (can be heavy); callers should
+  // surface queryTimeoutMs for it.
+  if (firstWord === "EXPLAIN") {
+    const parsed = stripExplainPrefix(stripped);
+    if ("error" in parsed) return { ok: false, error: parsed.error };
+    if (!parsed.inner) return { ok: false, error: "EXPLAIN requires a statement to explain." };
+    const innerFirst = parsed.inner.split(/[\s(]+/, 1)[0]?.toUpperCase() ?? "";
+    if (!READ_ONLY_LEADERS.includes(innerFirst)) {
+      return {
+        ok: false,
+        error: `EXPLAIN only supports read-only statements (got "${innerFirst || "?"}").`,
+      };
+    }
+    for (const re of FORBIDDEN) {
+      if (re.test(parsed.inner)) {
+        return { ok: false, error: `Blocked: query contains forbidden keyword matching ${re.source}. Read-only SELECT/WITH only.` };
+      }
+    }
+    // ANALYZE may appear in the consumed prefix, but nowhere else.
+    if (ANALYZE_RE.test(parsed.inner)) {
+      return { ok: false, error: "Blocked: query contains forbidden keyword matching \\bANALYZE\\b. ANALYZE is only allowed as an EXPLAIN option." };
+    }
+    return { ok: true };
+  }
   for (const re of FORBIDDEN) {
     if (re.test(stripped)) {
       return { ok: false, error: `Blocked: query contains forbidden keyword matching ${re.source}. Read-only SELECT/WITH only.` };
     }
+  }
+  if (ANALYZE_RE.test(stripped)) {
+    return { ok: false, error: "Blocked: query contains forbidden keyword matching \\bANALYZE\\b. Read-only SELECT/WITH only." };
   }
   return { ok: true };
 }
