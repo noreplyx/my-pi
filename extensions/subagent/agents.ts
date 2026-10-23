@@ -33,6 +33,11 @@ export interface AgentConfig {
 	systemPrompt: string;
 	source: "user" | "project";
 	filePath: string;
+	/** True when the agent file declares a `permissions:` block (inline or file ref).
+	 *  Permissions are enforced in the child `pi` process via PI_AGENT_NAME/FILE
+	 *  (see permissions/loader.ts) — this flag is discovery-time metadata only
+	 *  for warnings/previews. Agent permissions beat global, including global deny. */
+	hasPermissionsBlock: boolean;
 }
 
 export interface AgentDiscoveryResult {
@@ -55,6 +60,7 @@ type AgentFrontmatter = {
 	description?: unknown;
 	tools?: unknown;
 	model?: unknown;
+	permissions?: unknown;
 };
 
 /**
@@ -173,6 +179,7 @@ function loadAgentsFromDir(
 			systemPrompt,
 			source,
 			filePath,
+			hasPermissionsBlock: frontmatter.permissions !== undefined,
 		});
 	}
 

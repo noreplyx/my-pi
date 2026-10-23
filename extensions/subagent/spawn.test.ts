@@ -13,8 +13,10 @@ interface FakeProc extends EventEmitter {
 }
 
 let behavior: ((proc: FakeProc) => void) | null = null;
+let lastSpawnOpts: { env?: Record<string, string> } | null = null;
 
 const spawnMock = mock((_cmd: string, _args: string[], _opts: unknown) => {
+	lastSpawnOpts = _opts as { env?: Record<string, string> };
 	const proc = new EventEmitter() as FakeProc;
 	proc.stdout = new EventEmitter();
 	proc.stderr = new EventEmitter();
@@ -46,6 +48,7 @@ const agents: any[] = [
 		systemPrompt: "",
 		source: "user",
 		filePath: "/tmp/coder.md",
+		hasPermissionsBlock: false,
 	},
 ];
 
@@ -118,5 +121,18 @@ describe("runSingleAgent process lifecycle (mocked spawn)", () => {
 				timeoutMs: 10000,
 			}),
 		).rejects.toThrow("Subagent was aborted");
+	});
+
+	test("child inherits target agent identity (PI_AGENT_NAME/FILE) for in-child permission evaluation", async () => {
+		behavior = (proc) => {
+			proc.stdout.emit("data", msgLine("hi"));
+			setTimeout(() => proc.emit("close", 0), 5);
+		};
+		lastSpawnOpts = null;
+		await runSingleAgent(os.tmpdir(), {}, agents, "coder", "x", undefined, undefined, undefined, undefined, makeDetails);
+		expect(lastSpawnOpts?.env?.PI_AGENT_NAME).toBe("coder");
+		expect(lastSpawnOpts?.env?.PI_AGENT_FILE).toBe("/tmp/coder.md");
+		// Session grants are in-memory only (never forwarded); secrets never propagate.
+		expect(lastSpawnOpts?.env?.ANTHROPIC_API_KEY).toBeUndefined();
 	});
 });

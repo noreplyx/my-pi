@@ -53,7 +53,7 @@ Targets: `bash`/`powershell` → `command`; `read`/`write`/`edit`/`ls` → path
 (abs + cwd-relative both tried); `find`/`grep` → `path:pattern` + each part;
 everything else (incl. `subagent`, MCP tools) → JSON args.
 
-Evaluation (first applicable wins):
+Evaluation (first applicable wins — AGENT_BEATS_GLOBAL, Option A intentional):
 1. agent rules in order (beat everything global, including global `deny`)
 2. agent `defaultAction` (only when the file sets one; otherwise inherit)
 3. global rules in order
@@ -63,6 +63,15 @@ So the agent has more power than global (can tighten, and loosen
 `deny`→`allow` / `ask`→`allow`). Broken regexes fail closed at
 runtime (deny blocks, allow/ask never matches) and are reported at startup
 (R1) — they never crash.
+
+Parent vs child (subagent): the parent's `subagent {agent,task,…}` call is
+gated by parent-agent + global only. Inner tool calls in the child `pi`
+process are gated by target-agent + global (target wins in-child). Use
+`/permissions-check --as-agent <name> <tool> [args]` to dry-run as that
+subagent would see it. Loosening a global deny is reported as info
+(`loosens global deny — agent … wins in-child`); it is not blocked.
+`tools:` (frontmatter `--tools` allowlist) and `permissions:` both apply —
+most restrictive wins.
 
 ## Per-agent config
 
@@ -89,7 +98,7 @@ Agent identity reaches child `pi` processes via `PI_AGENT_NAME`/`PI_AGENT_FILE`
 ## Commands
 
 - `/permissions-status` — layers, rule counts, validation diagnostics, config errors, active session grants
-- `/permissions-check <tool> [json-args|key=value]` — dry-run one call
+- `/permissions-check <tool> [json-args|key=value]` — dry-run one call (add `--as-agent <name>` to evaluate as that subagent in-child)
 - `/permissions-clear-session` — revoke all "Allow for this session" grants (prompts will ask again)
 - `/permissions-reload` — re-read configs (also auto-reloads on mtime change)
 

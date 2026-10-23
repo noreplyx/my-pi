@@ -257,43 +257,106 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("permissions-check", {
-		description: 'Dry-run: /permissions-check <tool> [json-args] — e.g. /permissions-check bash {"command":"rm -rf /"}',
+		description:
+			'Dry-run: /permissions-check [--as-agent <name>] <tool> [json-args] — e.g. /permissions-check --as-agent reviewer bash {"command":"rm -rf /"}',
 		handler: async (args, ctx) => {
-			const text = (args ?? "").trim();
+			let text = (args ?? "").trim();
 			if (!text) {
-				ctx.ui.notify('Usage: /permissions-check <tool> [json-args]\nTargets: bash→command, fs tools→path, other→JSON args.', "warning");
+				ctx.ui.notify(
+					'Usage: /permissions-check [--as-agent <name>] <tool> [json-args]\nTargets: bash→command, fs tools→path, other→JSON args.\n--as-agent evaluates as that subagent would in-child (target-agent + global, agent wins).',
+					"warning",
+				);
 				return;
 			}
-			const space = text.search(/\s/);
-			const tool = space === -1 ? text : text.slice(0, space);
-			const rest = space === -1 ? "" : text.slice(space + 1).trim();
-			let input: Record<string, unknown> = {};
-			if (rest) {
-				// Accept raw `key=value` shorthand for the common cases plus JSON.
-				if (rest.startsWith("{")) {
-					try {
-						input = JSON.parse(rest) as Record<string, unknown>;
-					} catch (e: any) {
-						ctx.ui.notify(`Invalid JSON args: ${e?.message ?? e}`, "error");
-						return;
-					}
-				} else {
-					const m = rest.match(/^(command|path|pattern|file_path)=([\s\S]*)$/);
-					if (m) input = { [m[1]]: m[2] };
-					else input = { command: rest, path: rest };
+			// Extract optional --as-agent flag (both `--as-agent name` and `--as-agent=name`).
+			let asAgent: string | null = null;
+			const eq = text.match(/(?:^|\s)--as-agent=([^\s]+)\s*/);
+			if (eq) {
+				asAgent = eq[1];
+				text = text.replace(eq[0], " ").trim();
+			} else {
+				const sp = text.match(/(?:^|\s)--as-agent\s+([^\s]+)\s*/);
+				if (sp) {
+					asAgent = sp[1];
+					text = text.replace(sp[0], " ").trim();
 				}
 			}
-			const r = evaluate(tool, input, ctx.cwd);
-			const targets = buildTargets(tool, input, ctx.cwd);
-			ctx.ui.notify(
-				[
-					`tool=${tool} action=${r.action} source=${r.source}${r.ruleIndex >= 0 ? ` rule#${r.ruleIndex + 1}` : ""}${r.segmentCount && r.segmentCount > 1 ? ` segment=${(r.segmentIndex ?? 0) + 1}/${r.segmentCount}` : ""}`,
-					...(r.rule ? [`rule: tool="${r.rule.tool}" match=${JSON.stringify(r.rule.match ?? "(any)")}`] : []),
-					...(r.segmentCount && r.segmentCount > 1 && r.segment ? [`segment: ${preview(r.segment, 200)}`] : []),
-					`target: ${preview(targets[0] ?? "", 500)}`,
-				].join("\n"),
-				"info",
-			);
+			if (!text) {
+				ctx.ui.notify("Usage: /permissions-check [--as-agent <name>] <tool> [json-args]", "warning");
+				return;
+			}
+			// Temporarily assume the target agent identity so evaluate() loads its
+			// frontmatter exactly as the child `pi` process would (PI_AGENT_NAME/FILE).
+			const savedName = process.env.PI_AGENT_NAME;
+			const savedFile = process.env.PI_AGENT_FILE;
+			let asAgentFile: string | null = null;
+			if (asAgent) {
+				if (asAgent.endsWith(".md")) {
+					try {
+						const { statSync } = await import("node:fs");
+						statSync(asAgent);
+						asAgentFile = asAgent;
+					} catch {
+						asAgentFile = null;
+					}
+				}
+				try {
+					if (asAgentFile) process.env.PI_AGENT_FILE = asAgentFile;
+					else {
+						process.env.PI_AGENT_NAME = asAgent;
+						delete process.env.PI_AGENT_FILE;
+					}
+					reloadAll();
+				} catch {
+					// fall through with whatever identity we have; evaluate still works
+				}
+			}
+			try {
+				const space = text.search(/\s/);
+				const tool = space === -1 ? text : text.slice(0, space);
+				const rest = space === -1 ? "" : text.slice(space + 1).trim();
+				let input: Record<string, unknown> = {};
+				if (rest) {
+					// Accept raw `key=value` shorthand for the common cases plus JSON.
+					if (rest.startsWith("{")) {
+						try {
+							input = JSON.parse(rest) as Record<string, unknown>;
+						} catch (e: any) {
+							ctx.ui.notify(`Invalid JSON args: ${e?.message ?? e}`, "error");
+							return;
+						}
+					} else {
+						const m = rest.match(/^(command|path|pattern|file_path)=([\s\S]*)$/);
+						if (m) input = { [m[1]]: m[2] };
+						else input = { command: rest, path: rest };
+					}
+				}
+				const r = evaluate(tool, input, ctx.cwd);
+				const targets = buildTargets(tool, input, ctx.cwd);
+				const status = describeStatus(ctx.cwd);
+				ctx.ui.notify(
+					[
+						`tool=${tool} action=${r.action} source=${r.source}${r.ruleIndex >= 0 ? ` rule#${r.ruleIndex + 1}` : ""}${r.segmentCount && r.segmentCount > 1 ? ` segment=${(r.segmentIndex ?? 0) + 1}/${r.segmentCount}` : ""}${asAgent ? ` as-agent=${asAgent}` : ""}`,
+						...(asAgent ? [`agent: ${status.agentName ?? "(unknown)"}${status.agentFile ? ` @ ${status.agentFile}` : ""}`] : []),
+						...(r.rule ? [`rule: tool="${r.rule.tool}" match=${JSON.stringify(r.rule.match ?? "(any)")}`] : []),
+						...(r.segmentCount && r.segmentCount > 1 && r.segment ? [`segment: ${preview(r.segment, 200)}`] : []),
+						`target: ${preview(targets[0] ?? "", 500)}`,
+					].join("\n"),
+					"info",
+				);
+			} finally {
+				if (asAgent) {
+					try {
+						if (savedName === undefined) delete process.env.PI_AGENT_NAME;
+						else process.env.PI_AGENT_NAME = savedName;
+						if (savedFile === undefined) delete process.env.PI_AGENT_FILE;
+						else process.env.PI_AGENT_FILE = savedFile;
+						reloadAll();
+					} catch {
+						// never break the session on env restore
+					}
+				}
+			}
 		},
 	});
 

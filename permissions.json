@@ -1,6 +1,8 @@
 {
   // Global permission policy. Per-agent `permissions:` in agents/*.md is evaluated first
-  // and beats global, including global `deny` (see extensions/permissions/README.md).
+  // and beats global, including global `deny` (AGENT_BEATS_GLOBAL, Option A — intentional).
+  // Parent `subagent` calls are gated by parent-agent + global; inner child calls are gated
+  // by target-agent + global (target wins in-child). See extensions/permissions/README.md.
   // Rule: { "tool": "<name|glob>", "match": "<glob|re:regex|/regex/flags|substring>", "action": "allow|ask|deny" }
   // Omit "match" to match all calls of that tool.
   "defaultAction": "allow",

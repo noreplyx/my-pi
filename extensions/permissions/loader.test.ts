@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describeCall, evaluate, normalizeDir, reloadAll, resolveGrantDir, resolveGrantPath, shortenHome } from "./loader.ts";
+import { describeCall, evaluate, normalizeDir, reloadAll, resolveGrantDir, resolveGrantPath, shortenHome, AGENT_BEATS_GLOBAL } from "./loader.ts";
 
 let tmpFiles: string[] = [];
 let tmpDirs: string[] = [];
@@ -163,6 +163,18 @@ describe("path segment globs", () => {
 });
 
 describe("per-agent layer", () => {
+	test("precedence lock is intentional (agent beats global)", () => {
+		expect(AGENT_BEATS_GLOBAL).toBe(true);
+	});
+	test("subagent invocations target JSON args (parent gate, not inner action)", () => {
+		const f = writeTempJson([{ tool: "subagent", action: "allow" }], "ask");
+		process.env.PI_PERMISSIONS_FILE = f;
+		reloadAll();
+		// Parent gate: subagent tool itself is allowlisted; inner write/bash
+		// permissions are enforced separately in-child via PI_AGENT_NAME/FILE.
+		expect(evaluate("subagent", { agent: "coder", task: "write x" }, "/repo").action).toBe("allow");
+		expect(evaluate("subagent", { agent: "coder", task: "write x" }, "/repo").source).toBe("global");
+	});
 	test("agent allow beats global ask and global deny", () => {
 		const gf = writeTempJson(
 			[

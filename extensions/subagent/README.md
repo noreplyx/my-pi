@@ -42,6 +42,11 @@ prompts arrive as `extension_ui_request` on stdout; the parent forwards
   agent's `tools:` lists `ask_user` (via the `--tools` allowlist).
 * `allowQuestions:false` (per-task or top-level) auto-dismisses;
   `questionTimeoutMs` bounds each dialog.
+* Permission model: parent `subagent` invocation is gated by parent-agent +
+  global; inner child tool calls are gated by target-agent + global with
+  AGENT_BEATS_GLOBAL (frontmatter beats global, including global deny).
+  `tools:` allowlist and `permissions:` both apply — most restrictive wins.
+  Dry-run with `/permissions-check --as-agent <name> …`.
 * `editor` / `custom` are rejected visibly (`[question skipped]` in stderr);
   `notify` / `setStatus` / `setWidget` are mirrored one-way.
 * No-UI parents (`!ctx.hasUI`, e.g. headless) auto-dismiss with a stderr note,

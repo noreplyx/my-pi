@@ -1,15 +1,24 @@
 /**
  * Config loading + evaluation.
  *
- * Layers (first match wins):
+ * Precedence (first match wins) — AGENT_BEATS_GLOBAL is intentional (Option A):
  *   1. per-agent rules (from PI_AGENT_NAME / PI_AGENT_FILE, set by the subagent
  *      spawner for child `pi` processes; absent in the main session)
- *   2. global rules (~/.pi/agent/permissions.json)
- *   3. agent.defaultAction ?? global.defaultAction (fallback: ask)
+ *   2. agent defaultAction (only when the agent file sets one)
+ *   3. global rules (~/.pi/agent/permissions.json)
+ *   4. agent.defaultAction ?? global.defaultAction (fallback: ask)
+ *
+ * Net effect: the agent has more power than global — it can tighten
+ * (allow→deny) and loosen (deny→allow, ask→allow). The parent's `subagent`
+ * tool call is gated by parent-agent + global only; inner child tool calls
+ * are gated by target-agent + global (target wins in-child).
  *
  * Files are re-read when their mtime changes — no long-lived watchers
  * (per extension lifecycle guidance).
  */
+
+/** Precedence lock: per-agent frontmatter beats global, including global deny. */
+export const AGENT_BEATS_GLOBAL = true as const;
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -465,15 +474,18 @@ export function resolveGrantDir(toolName: string, input: Record<string, unknown>
 // ---------------------------------------------------------------------------
 
 /**
- * Precedence (first applicable wins):
- *   1. Agent rules (explicit per-agent decisions beat everything global).
+ * Precedence (first applicable wins) — AGENT_BEATS_GLOBAL (Option A):
+ *   1. Agent rules (explicit per-agent decisions beat everything global,
+ *      including global deny).
  *   2. Agent defaultAction (only when the agent file sets one).
- *   3. Global rules in file order (including deny).
+ *   3. Global rules in file order (deny included).
  *   4. Global defaultAction (fallback: ask).
  *
  * Net effect: the agent has more power than global — it can tighten
  * (allow→deny) and loosen (deny→allow, ask→allow). When the agent file
  * declares no permissions block, evaluation is identical to global-only.
+ * Parent `subagent` invocations are gated by parent-agent + global;
+ * inner child calls are gated by target-agent + global.
  */
 /** True for tools whose match targets are file paths (segment-aware globs). */
 function isPathTool(toolName: string): boolean {
