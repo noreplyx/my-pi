@@ -1,13 +1,16 @@
 # Permissions extension
 
 Enforces granular `allow | ask | deny` on every tool call via `tool_call`.
+Agent-only: there is no global policy file. Each agent's policy lives in
+its own `agents/<name>.md` frontmatter; the main session (no agent) is
+governed by `agents/main.md`.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `~/.pi/agent/permissions.json` | Global policy (this extension reads it; JSONC comments allowed) |
-| `agents/<name>.md` frontmatter `permissions:` | Per-agent override — evaluated **first**, wins over global |
+| `agents/<name>.md` frontmatter `permissions:` | The agent's entire policy (no global fallback) |
+| `agents/main.md` | Policy for the main session |
 | `~/.pi/agent/permissions/audit.log` | Append-only decision log |
 
 ## Rule shape
@@ -45,37 +48,35 @@ Enforces granular `allow | ask | deny` on every tool call via `tool_call`.
   (`read`/`write`/`edit`/`ls`/`find`/`grep`) one session approval covers
   the whole directory — sibling files and subdirectories (recursive down,
   never up: a grant on a child never covers its parent). `bash` and other
-  tools remember the exact call only. Session grants are in-memory only —
-  never written to `permissions.json` — and are cleared on session
-  shutdown/reload.
+  tools remember the exact call only. Session grants are in-memory only and
+  are cleared on session shutdown/reload.
 
 Targets: `bash`/`powershell` → `command`; `read`/`write`/`edit`/`ls` → path
 (abs + cwd-relative both tried); `find`/`grep` → `path:pattern` + each part;
 everything else (incl. `subagent`, MCP tools) → JSON args.
 
-Evaluation (first applicable wins — AGENT_BEATS_GLOBAL, Option A intentional):
-1. agent rules in order (beat everything global, including global `deny`)
-2. agent `defaultAction` (only when the file sets one; otherwise inherit)
-3. global rules in order
-4. global `defaultAction` (fallback `ask`)
+Evaluation (first applicable wins, agent-only):
 
-So the agent has more power than global (can tighten, and loosen
-`deny`→`allow` / `ask`→`allow`). Broken regexes fail closed at
-runtime (deny blocks, allow/ask never matches) and are reported at startup
+1. agent rules in order
+2. agent `defaultAction` (only when the file sets one)
+3. hardcoded fallback `ask`
+
+There is no global layer, so nothing outside the agent's own file can
+loosen or tighten its policy. Broken regexes fail closed at runtime
+(deny blocks, allow/ask never matches) and are reported at startup
 (R1) — they never crash.
 
 Parent vs child (subagent): the parent's `subagent {agent,task,…}` call is
-gated by parent-agent + global only. Inner tool calls in the child `pi`
-process are gated by target-agent + global (target wins in-child). Use
+gated by the parent agent's layer only. Inner tool calls in the child `pi`
+process are gated by the target agent's layer. Use
 `/permissions-check --as-agent <name> <tool> [args]` to dry-run as that
-subagent would see it. Loosening a global deny is reported as info
-(`loosens global deny — agent … wins in-child`); it is not blocked.
+agent would see it.
 `tools:` (frontmatter `--tools` allowlist) and `permissions:` both apply —
 most restrictive wins.
 
 ## Per-agent config
 
-Inline frontmatter (wins over global):
+Inline frontmatter (the entire policy for that agent):
 
 ```md
 ---
@@ -93,14 +94,18 @@ permissions:
 
 Or external file: `permissions: ./reviewer.permissions.json`.
 Agent identity reaches child `pi` processes via `PI_AGENT_NAME`/`PI_AGENT_FILE`
-(injected by the `subagent` extension patch); the main session uses global-only.
+(injected by the `subagent` extension patch); the main session with neither
+set falls back to `agents/main.md`. The `agent-switch` extension never wipes
+an externally injected identity on startup/shutdown — only an in-process
+`/agent` switch is reset — so children keep their target agent's layer
+instead of degrading to `main.md`.
 
 ## Commands
 
-- `/permissions-status` — layers, rule counts, validation diagnostics, config errors, active session grants
-- `/permissions-check <tool> [json-args|key=value]` — dry-run one call (add `--as-agent <name>` to evaluate as that subagent in-child)
+- `/permissions-status` — agent layer, validation diagnostics, config errors, active session grants
+- `/permissions-check <tool> [json-args|key=value]` — dry-run one call (add `--as-agent <name>` to evaluate as that agent)
 - `/permissions-clear-session` — revoke all "Allow for this session" grants (prompts will ask again)
-- `/permissions-reload` — re-read configs (also auto-reloads on mtime change)
+- `/permissions-reload` — re-read agent configs (also auto-reloads on mtime change)
 
 > Tip: chained commands (`;`, `&&`, `||`, pipes, `&`, newlines) are split
 > into quote-aware segments and evaluated independently (strict): any
@@ -111,18 +116,17 @@ Agent identity reaches child `pi` processes via `PI_AGENT_NAME`/`PI_AGENT_FILE`
 
 ## Startup validation
 
-On session `startup`/`reload`, the extension validates `permissions.json`
-plus every agent file declaring `permissions:` (user dir and project-local),
-and warns once if anything is off. Clean configs stay silent.
+On session `startup`/`reload`, the extension validates every agent file
+declaring `permissions:` (user dir and project-local, including
+`agents/main.md`), and warns once if anything is off. Clean configs stay
+silent.
 
 | Severity | Meaning |
 |---|---|
 | error | rule is broken: bad JSON, bad action, uncompilable `re:`/`/.../` (deny fails closed/blocking, allow/ask never matches), unreadable ref file |
-| warning | suspicious but functional: unknown tool name (may just connect later), unreachable shadowed rule, allow-all (`tool: "*"` or bare `bash`), prefix-anchored shell allow without a chaining guard, empty/no-effect agent block, default-allow with no rules |
+| warning | suspicious but functional: unknown tool name (may just connect later), unreachable shadowed rule, allow-all (`tool: "*"` or bare `bash`), prefix-anchored shell allow without a chaining guard, empty/no-effect agent block, default-allow with no rules, missing agent file (e.g. no `main.md` — that agent falls back to `ask`) |
 
-Shadowing is plain first-match order within each file; agent files beat the global file.
-| info | no global policy file (everything defaults to `ask`) |
-
+Shadowing is plain first-match order within each agent file.
 Display: `ctx.ui.notify` in TUI/RPC, `console.warn` (stderr only) when
 headless — stdout is never touched so `--mode json` stays intact.
 Validation never blocks startup; broken rules are already fail-closed

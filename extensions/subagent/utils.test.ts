@@ -182,9 +182,9 @@ describe("buildChildEnv", () => {
 		expect(env.MY_EVIL).toBeUndefined();
 	});
 
-	test("passes through PI_PERMISSIONS_FILE and LC_*", () => {
+	test("passes through LC_* but not legacy PI_PERMISSIONS_FILE", () => {
 		const env = buildChildEnv({ PI_PERMISSIONS_FILE: "/p.json", LC_TIME: "C" }, {});
-		expect(env.PI_PERMISSIONS_FILE).toBe("/p.json");
+		expect(env.PI_PERMISSIONS_FILE).toBeUndefined();
 		expect(env.LC_TIME).toBe("C");
 	});
 });

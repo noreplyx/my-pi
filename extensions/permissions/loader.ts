@@ -1,24 +1,18 @@
 /**
- * Config loading + evaluation.
+ * Config loading + evaluation (agent-only — there is no global policy file).
  *
- * Precedence (first match wins) — AGENT_BEATS_GLOBAL is intentional (Option A):
- *   1. per-agent rules (from PI_AGENT_NAME / PI_AGENT_FILE, set by the subagent
- *      spawner for child `pi` processes; absent in the main session)
+ * Precedence (first match wins):
+ *   1. current agent's rules (from PI_AGENT_NAME / PI_AGENT_FILE; the main
+ *      session with neither set falls back to `agents/main.md`)
  *   2. agent defaultAction (only when the agent file sets one)
- *   3. global rules (~/.pi/agent/permissions.json)
- *   4. agent.defaultAction ?? global.defaultAction (fallback: ask)
+ *   3. hardcoded fallback: ask
  *
- * Net effect: the agent has more power than global — it can tighten
- * (allow→deny) and loosen (deny→allow, ask→allow). The parent's `subagent`
- * tool call is gated by parent-agent + global only; inner child tool calls
- * are gated by target-agent + global (target wins in-child).
+ * The parent's `subagent` tool call is gated by the parent agent's layer
+ * only; inner child tool calls are gated by the target agent's layer.
  *
  * Files are re-read when their mtime changes — no long-lived watchers
  * (per extension lifecycle guidance).
  */
-
-/** Precedence lock: per-agent frontmatter beats global, including global deny. */
-export const AGENT_BEATS_GLOBAL = true as const;
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -36,8 +30,8 @@ import {
 
 export interface EvalResult {
 	action: PermissionAction;
-	source: "agent" | "global" | "default";
-	ruleIndex: number; // index within its layer, -1 for default
+	source: "agent" | "default";
+	ruleIndex: number; // index within the agent's rules, -1 for default
 	rule?: PermissionRule;
 	target: string; // primary target string shown in prompts/logs
 	/** Chain context for bash/powershell: which segment decided the result. */
@@ -53,13 +47,22 @@ interface CacheEntry {
 	filePath: string;
 }
 
-const globalCache: { entry: CacheEntry | null } = { entry: null };
 const agentCache: { key: string; entry: CacheEntry | null } = { key: "", entry: null };
 
-export function getGlobalPermissionsPath(): string {
-	const fromEnv = process.env.PI_PERMISSIONS_FILE?.trim();
-	if (fromEnv) return fromEnv;
-	return path.join(getAgentDir(), "permissions.json");
+/** Hardcoded fallback when no agent layer applies. Fail closed: ask. */
+export const FALLBACK_DEFAULT_ACTION: PermissionAction = "ask";
+
+/** Agent file backing the main session (no PI_AGENT_NAME/PI_AGENT_FILE). */
+export const MAIN_AGENT_NAME = "main";
+
+/** Warned once per process when the removed PI_PERMISSIONS_FILE var is set. */
+let warnedPermissionsFileEnv = false;
+
+export function warnStalePermissionsFileEnv(): string | null {
+	const v = process.env.PI_PERMISSIONS_FILE?.trim();
+	if (!v || warnedPermissionsFileEnv) return null;
+	warnedPermissionsFileEnv = true;
+	return `PI_PERMISSIONS_FILE is set (${v}) but global permission files are no longer read — only per-agent frontmatter applies. Unset it to silence this warning.`;
 }
 
 function stripJsonComments(text: string): string {
@@ -134,21 +137,54 @@ function loadFileIntoCache(filePath: string, prev: CacheEntry | null): CacheEntr
 	return { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig(value), filePath };
 }
 
-export function loadGlobal(): CacheEntry {
-	const p = getGlobalPermissionsPath();
-	globalCache.entry = loadFileIntoCache(p, globalCache.entry);
-	return globalCache.entry;
-}
-
 /** Resolve the current agent's permissions file/content from the environment. */
 function currentAgentKey(): string {
 	return `${process.env.PI_AGENT_NAME ?? ""}\0${process.env.PI_AGENT_FILE ?? ""}`;
 }
 
+/** Candidate `main.md` files backing the main session (user + project-local). */
+function mainAgentCandidates(cwd?: string): string[] {
+	const candidates = [path.join(getAgentDir(), "agents", `${MAIN_AGENT_NAME}.md`)];
+	if (cwd) {
+		try {
+			let dir = cwd;
+			while (true) {
+				candidates.push(path.join(dir, CONFIG_DIR_NAME, "agents", `${MAIN_AGENT_NAME}.md`));
+				const parent = path.dirname(dir);
+				if (parent === dir) break;
+				dir = parent;
+			}
+		} catch {
+			// ignore — user-dir candidate still applies
+		}
+	}
+	return candidates;
+}
+
+/** Load the main-session agent file (`main.md`). Null = none found. */
+function loadMainEntry(cwd?: string): CacheEntry | null {
+	for (const c of mainAgentCandidates(cwd)) {
+		try {
+			const stat = fs.statSync(c);
+			const content = fs.readFileSync(c, "utf-8");
+			const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+			const ref = resolveAgentPermissionsRef(frontmatter.permissions);
+			if (ref.kind === "file") return loadFileIntoCache(path.resolve(path.dirname(c), ref.path), null);
+			if (ref.kind === "inline")
+				return { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig(ref.value), filePath: c };
+			return { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig({}), filePath: c };
+		} catch {
+			continue;
+		}
+	}
+	return null;
+}
+
 function loadAgentEntry(cwd?: string): CacheEntry | null {
 	const name = process.env.PI_AGENT_NAME?.trim();
 	const file = process.env.PI_AGENT_FILE?.trim();
-	if (!name && !file) return null;
+	// Main session (no agent env): policy comes from agents/main.md.
+	if (!name && !file) return loadMainEntry(cwd);
 	const key = `${currentAgentKey()}\0${cwd ?? ""}`;
 	if (agentCache.key === key && agentCache.entry) {
 		// Revalidate mtime if file-backed. Negative (unknown-agent) entries are
@@ -474,18 +510,13 @@ export function resolveGrantDir(toolName: string, input: Record<string, unknown>
 // ---------------------------------------------------------------------------
 
 /**
- * Precedence (first applicable wins) — AGENT_BEATS_GLOBAL (Option A):
- *   1. Agent rules (explicit per-agent decisions beat everything global,
- *      including global deny).
+ * Precedence (first applicable wins — agent-only, no global layer):
+ *   1. Agent rules in order.
  *   2. Agent defaultAction (only when the agent file sets one).
- *   3. Global rules in file order (deny included).
- *   4. Global defaultAction (fallback: ask).
+ *   3. Hardcoded fallback: ask.
  *
- * Net effect: the agent has more power than global — it can tighten
- * (allow→deny) and loosen (deny→allow, ask→allow). When the agent file
- * declares no permissions block, evaluation is identical to global-only.
- * Parent `subagent` invocations are gated by parent-agent + global;
- * inner child calls are gated by target-agent + global.
+ * Parent `subagent` invocations are gated by the parent agent's layer;
+ * inner child calls are gated by the target agent's layer.
  */
 /** True for tools whose match targets are file paths (segment-aware globs). */
 function isPathTool(toolName: string): boolean {
@@ -500,8 +531,6 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 
 	const agentEntry = loadAgentEntry(cwd);
 	const agentRules = agentEntry?.exists ? agentEntry.validated.config.rules : [];
-	const g = loadGlobal();
-	const globalRules = g.validated.config.rules;
 
 	// Fail-closed broken patterns: an uncompilable regex never matches via
 	// `matchOne` (returns false). For `deny` that would be fail-open, so a
@@ -523,27 +552,21 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 		return null;
 	};
 
-	/** Evaluate one target string through the agent-first precedence. */
+	/** Evaluate one target string through the agent-only precedence. */
 	const evalOne = (cands: string[], displayTarget: string): EvalResult => {
-		// 1. Agent rules (beat everything global, including global deny).
+		// 1. Agent rules in order.
 		const agentHit = firstMatch(agentRules, cands);
 		if (agentHit) {
 			return { action: agentHit.rule.action, source: "agent", ruleIndex: agentHit.index, rule: agentHit.rule, target: displayTarget };
 		}
 
-		// 2. Agent default (explicit only — otherwise inherit global).
+		// 2. Agent default (explicit only — otherwise fall through).
 		if (agentEntry?.exists && agentEntry.validated.hasDefault) {
 			return { action: agentEntry.validated.config.defaultAction, source: "agent", ruleIndex: -1, target: displayTarget };
 		}
 
-		// 3. Global rules in file order (deny included).
-		const globalHit = firstMatch(globalRules, cands);
-		if (globalHit) {
-			return { action: globalHit.rule.action, source: "global", ruleIndex: globalHit.index, rule: globalHit.rule, target: displayTarget };
-		}
-
-		// 4. Global default.
-		return { action: g.validated.config.defaultAction, source: "default", ruleIndex: -1, target: displayTarget };
+		// 3. Hardcoded fallback (fail closed: ask).
+		return { action: FALLBACK_DEFAULT_ACTION, source: "default", ruleIndex: -1, target: displayTarget };
 	};
 
 	// Chain-aware shell evaluation (strict): split `bash`/`powershell` on
@@ -583,11 +606,6 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 }
 
 export function describeStatus(cwd?: string): {
-	globalPath: string;
-	globalExists: boolean;
-	globalErrors: string[];
-	globalRuleCount: number;
-	globalDefault: string;
 	agentName: string | null;
 	agentFile: string | null;
 	agentExists: boolean;
@@ -595,16 +613,10 @@ export function describeStatus(cwd?: string): {
 	agentRuleCount: number;
 	agentDefault: string | null;
 } {
-	const g = loadGlobal();
 	const a = loadAgentEntry(cwd);
 	return {
-		globalPath: g.filePath,
-		globalExists: g.exists,
-		globalErrors: g.validated.errors,
-		globalRuleCount: g.validated.config.rules.length,
-		globalDefault: g.validated.config.defaultAction,
-		agentName: process.env.PI_AGENT_NAME?.trim() || null,
-		agentFile: process.env.PI_AGENT_FILE?.trim() || null,
+		agentName: process.env.PI_AGENT_NAME?.trim() || (a?.exists ? MAIN_AGENT_NAME : null),
+		agentFile: process.env.PI_AGENT_FILE?.trim() || a?.filePath || null,
 		agentExists: a?.exists ?? false,
 		agentErrors: a?.validated.errors ?? [],
 		agentRuleCount: a?.validated.config.rules.length ?? 0,
@@ -613,7 +625,6 @@ export function describeStatus(cwd?: string): {
 }
 
 export function reloadAll(): void {
-	globalCache.entry = null;
 	agentCache.key = "";
 	agentCache.entry = null;
 	agentScanCache.clear();

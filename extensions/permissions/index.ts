@@ -1,9 +1,9 @@
 /**
- * Permission enforcement extension.
+ * Permission enforcement extension (agent-only — no global policy file).
  *
- * Global config:  ~/.pi/agent/permissions.json
- * Per-agent:      `permissions:` in agents/*.md frontmatter (beats global,
- *                 including global deny)
+ * Each agent declares its policy in `permissions:` frontmatter in
+ * agents/*.md (inline or via external file). The main session (no agent)
+ * is governed by agents/main.md. Undeclared tools fall back to `ask`.
  *
  * Rule shape: { tool, match?, action } — `match` is a single string (or
  * string[] = OR): glob, `re:<regex>`, `/regex/flags`, or plain substring.
@@ -17,7 +17,7 @@
 
 import * as path from "node:path";
 import { getAgentDir, withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { buildTargets, describeCall, describeStatus, evaluate, getGlobalPermissionsPath, loadAllAgentFiles, loadGlobal, reloadAll, resolveGrantDir, resolveGrantPath } from "./loader.ts";
+import { buildTargets, describeCall, describeStatus, evaluate, loadAllAgentFiles, reloadAll, resolveGrantDir, resolveGrantPath, warnStalePermissionsFileEnv } from "./loader.ts";
 import { matchToolName } from "./matcher.ts";
 import { createSessionGrants, SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICES } from "./session-grants.ts";
 import { collectDiagnostics, formatStartupReport, type Diagnostic, type FileReport } from "./validate.ts";
@@ -44,23 +44,23 @@ function preview(s: string, max = 120): string {
 	return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
-/** Gather global + all agent configs for validation. Never throws. */
+/** Gather all agent configs for validation. Never throws. */
 function gatherFileReports(cwd: string): FileReport[] {
 	const reports: FileReport[] = [];
 	try {
-		const g = loadGlobal();
-		reports.push({ label: g.filePath, exists: g.exists, validated: g.validated, isAgent: false });
-	} catch (e: any) {
-		reports.push({
-			label: getGlobalPermissionsPath(),
-			exists: false,
-			validated: { config: { defaultAction: "ask", rules: [] }, errors: [`${e?.message ?? e}`], hasDefault: false },
-			isAgent: false,
-		});
-	}
-	try {
-		for (const a of loadAllAgentFiles(cwd)) {
+		const files = loadAllAgentFiles(cwd);
+		for (const a of files) {
 			reports.push({ label: a.label, exists: true, validated: a.validated, isAgent: true });
+		}
+		// Surface a missing main-session policy (agents/main.md) as a report.
+		const s = describeStatus(cwd);
+		if (!s.agentExists && !process.env.PI_AGENT_NAME?.trim() && !process.env.PI_AGENT_FILE?.trim()) {
+			reports.push({
+				label: s.agentFile ?? "agents/main.md",
+				exists: false,
+				validated: { config: { defaultAction: "ask", rules: [] }, errors: [], hasDefault: false },
+				isAgent: true,
+			});
 		}
 	} catch (e: any) {
 		reports.push({
@@ -90,8 +90,8 @@ export default function (pi: ExtensionAPI) {
 
 	// Session-scoped "Allow for this session" grants. File tools grant the
 	// whole directory (recursive down, never up); other tools grant the exact
-	// tool + target pair. In-memory only — never persisted to
-	// permissions.json, cleared on session shutdown (idempotent) so a new
+	// tool + target pair. In-memory only — never persisted anywhere,
+	// cleared on session shutdown (idempotent) so a new
 	// session starts clean. A new extension runtime (reload/replacement)
 	// also starts with an empty store by construction.
 	const sessionGrants = createSessionGrants();
@@ -117,7 +117,11 @@ export default function (pi: ExtensionAPI) {
 		if (event.reason !== "startup" && event.reason !== "reload") return;
 		try {
 			reloadAll();
+			const staleEnv = warnStalePermissionsFileEnv();
 			const diags = withoutRetracted(collectDiagnostics(gatherFileReports(ctx.cwd), knownToolNames()));
+			if (staleEnv) {
+				diags.push({ severity: "warning", location: "PI_PERMISSIONS_FILE", message: staleEnv });
+			}
 			if (diags.length === 0) return;
 			const text = formatStartupReport(diags);
 			const level = diags.some((d) => d.severity === "error") ? "error" : "warning";
@@ -143,10 +147,10 @@ export default function (pi: ExtensionAPI) {
 
 		const where =
 			result.source === "agent"
-				? `agent rule #${result.ruleIndex + 1}`
-				: result.source === "global"
-					? `global rule #${result.ruleIndex + 1}`
-					: `default (${result.source})`;
+				? result.ruleIndex >= 0
+					? `agent rule #${result.ruleIndex + 1}`
+					: `agent default`
+				: `default (ask)`;
 		const label = `${event.toolName} ${preview(result.target)}`.trim();
 		// Chain context: which segment decided a chained bash/powershell call.
 		const chainInfo =
@@ -177,8 +181,9 @@ export default function (pi: ExtensionAPI) {
 			void audit("deny", event.toolName, result.target, `via=${where} ask-without-ui`);
 			return { block: true, reason: `Blocked by permissions (${where}, no UI to confirm): ${label}` };
 		}
+		const st = describeStatus(ctx.cwd);
 		const message =
-			`${label}\n\nMatched ${where}${result.rule ? ` — tool="${result.rule.tool}" match=${JSON.stringify(result.rule.match ?? "(any)")}` : ""}${chainInfo}\nConfig: ${getGlobalPermissionsPath()}`;
+			`${label}\n\nMatched ${where}${result.rule ? ` — tool="${result.rule.tool}" match=${JSON.stringify(result.rule.match ?? "(any)")}` : ""}${chainInfo}\nAgent: ${st.agentName ?? "(none)"}${st.agentFile ? ` @ ${st.agentFile}` : ""}`;
 		// select() has no body slot — the summary (`write src/foo.txt`)
 		// goes into the dialog title so every choice carries context.
 		// The same title is used for the confirm fallback, so no dialog
@@ -226,13 +231,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("permissions-status", {
-		description: "Show loaded permission layers (agent + global), validation diagnostics, and config errors",
+		description: "Show loaded agent permission layer, validation diagnostics, and config errors",
 		handler: async (_args, ctx) => {
 			const s = describeStatus(ctx.cwd);
 			const lines = [
-				`Global: ${s.globalPath} ${s.globalExists ? `(${s.globalRuleCount} rules, default=${s.globalDefault})` : "(missing — all-default ask)"}`,
-				...s.globalErrors.map((e) => `  ! ${e}`),
-				`Agent: ${s.agentName ?? "(none — main session)"}${s.agentFile ? ` @ ${s.agentFile}` : ""}${s.agentExists ? ` (${s.agentRuleCount} rules${s.agentDefault ? `, default=${s.agentDefault}` : ", inherits global default"})` : ""}`,
+				`Agent: ${s.agentName ?? "(none)"}${s.agentFile ? ` @ ${s.agentFile}` : ""}${s.agentExists ? ` (${s.agentRuleCount} rules${s.agentDefault ? `, default=${s.agentDefault}` : ", no default — falls back to ask"})` : " (missing — all-default ask)"}`,
 				...s.agentErrors.map((e) => `  ! ${e}`),
 				`Targets: bash→command, read/write/edit/ls→path, find/grep→path:pattern, other→JSON args.`,
 			];
@@ -263,7 +266,7 @@ export default function (pi: ExtensionAPI) {
 			let text = (args ?? "").trim();
 			if (!text) {
 				ctx.ui.notify(
-					'Usage: /permissions-check [--as-agent <name>] <tool> [json-args]\nTargets: bash→command, fs tools→path, other→JSON args.\n--as-agent evaluates as that subagent would in-child (target-agent + global, agent wins).',
+					'Usage: /permissions-check [--as-agent <name>] <tool> [json-args]\nTargets: bash→command, fs tools→path, other→JSON args.\n--as-agent evaluates as that agent would (its own frontmatter layer + ask fallback).',
 					"warning",
 				);
 				return;
@@ -369,12 +372,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("permissions-reload", {
-		description: "Reload global + agent permission configs",
+		description: "Reload agent permission configs",
 		handler: async (_args, ctx) => {
 			reloadAll();
 			const s = describeStatus(ctx.cwd);
 			ctx.ui.notify(
-				`Reloaded. Global: ${s.globalExists ? `${s.globalRuleCount} rules` : "missing"}. Agent: ${s.agentName ?? "none"}.`,
+				`Reloaded. Agent: ${s.agentName ?? "none"}${s.agentExists ? ` (${s.agentRuleCount} rules)` : " (missing — all-default ask)"}.`,
 				"info",
 			);
 		},

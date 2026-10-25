@@ -15,7 +15,7 @@ describe("session grants", () => {
 	test("add/has/clear round-trip", () => {
 		const g = createSessionGrants();
 		expect(g.has("bash", "npm test")).toBeUndefined();
-		g.add("bash", "npm test", "global rule #1");
+		g.add("bash", "npm test", "agent rule #1");
 		expect(g.has("bash", "npm test")?.tool).toBe("bash");
 		// different target still misses
 		expect(g.has("bash", "npm run build")).toBeUndefined();
@@ -29,7 +29,7 @@ describe("session grants", () => {
 describe("directory grants", () => {
 	test("covers sibling, nested, and the dir itself — never the parent", () => {
 		const g = createSessionGrants();
-		g.addDirectory("write", "/a/b", "global rule #1");
+		g.addDirectory("write", "/a/b", "agent rule #1");
 		expect(g.hasDirectory("write", "/a/b/f1.txt")?.scope).toBe("directory");
 		expect(g.hasDirectory("write", "/a/b/sub/f2.txt")).toBeDefined();
 		expect(g.hasDirectory("write", "/a/b")).toBeDefined();

@@ -328,7 +328,8 @@ export function parseToolList(
  * intentionally does NOT propagate: API keys (`*_TOKEN`, `*_KEY`, `AWS_*`,
  * …) and machine-local state must never reach repo-controlled agent
  * contexts. Auth is file-based (`auth.json`), so children still work.
- * `PI_PERMISSIONS_FILE` passes through so a custom policy still applies.
+ * Agent identity (`PI_AGENT_NAME`/`PI_AGENT_FILE`) is set per child below so
+ * the permissions extension loads the target agent's frontmatter layer.
  */
 const PASSTHROUGH_EXACT = new Set([
 	"PATH",
@@ -349,7 +350,6 @@ const PASSTHROUGH_EXACT = new Set([
 	"CLICOLOR_FORCE",
 	"PAGER",
 	"EDITOR",
-	"PI_PERMISSIONS_FILE",
 ]);
 
 export function buildChildEnv(

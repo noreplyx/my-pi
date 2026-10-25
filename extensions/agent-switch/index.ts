@@ -9,15 +9,19 @@
  *   3. Model — when the agent pins `model: provider/id`, resolved through
  *      `ctx.modelRegistry.find()` and applied with `pi.setModel()`.
  *      Failures warn and keep the current model.
- *   4. Permissions — the permissions extension keys its per-agent layer off
- *      `PI_AGENT_NAME`/`PI_AGENT_FILE` (permissions/loader.ts), which are
- *      absent in the main session. Setting them here activates the picked
- *      agent's `permissions:` frontmatter. Agent rules beat global, including
- *      global `deny` (AGENT_BEATS_GLOBAL, Option A — same precedence as
- *      subagent children; fail-closed precedence is unchanged).
+ *  4. Permissions — the permissions extension keys its layer off
+ *      `PI_AGENT_NAME`/`PI_AGENT_FILE` (permissions/loader.ts). The main
+ *      session without a switch falls back to `agents/main.md`; setting
+ *      them here activates the picked agent's `permissions:` frontmatter
+ *      instead (fail-closed precedence is unchanged).
  *
- * State is session-only: cleared on `session_start` (any reason, so a
- * same-process `/reload` resets to default) and on `session_shutdown`.
+ * State is session-only: an in-process `/agent` switch is cleared on the
+ * next `session_start` (so a same-process `/reload` resets to default)
+ * and on `session_shutdown`. An externally injected identity (subagent
+ * child `PI_AGENT_NAME`/`PI_AGENT_FILE` from the spawner) is never wiped:
+ * with no in-process switch active, `session_start`/`session_shutdown`
+ * leave the environment untouched so the permissions layer keeps reading
+ * the injected agent.
  */
 
 import * as fs from "node:fs";
@@ -81,7 +85,7 @@ function statusText(ctx: ExtensionCommandContext): void {
 function permissionsLine(ctx: ExtensionCommandContext): string {
 	try {
 		const s = describeStatus(ctx.cwd);
-		if (!s.agentExists) return "permissions: none declared (global rules only)";
+		if (!s.agentExists) return "permissions: none declared (all-default ask)";
 		const errs = s.agentErrors.length > 0 ? ` (! ${truncate(s.agentErrors[0], 100)})` : "";
 		return `permissions: ${s.agentRuleCount} rule${s.agentRuleCount === 1 ? "" : "s"} from ${s.agentFile ?? s.agentName}${errs}`;
 	} catch {
@@ -183,8 +187,20 @@ export default function (pi: ExtensionAPI) {
 			priorFile = undefined;
 		}
 		priorsCaptured = true;
-		current = null;
-		clearAgentEnv();
+		if (current !== null) {
+			// Identity came from an in-process `/agent` switch in a previous
+			// session (e.g. same-process `/reload`): the new session starts
+			// clean, restoring whatever this process started with.
+			// When current is null the env is left untouched, so an
+			// externally injected identity (subagent child
+			// PI_AGENT_NAME/PI_AGENT_FILE, set before startup) survives —
+			// the permissions layer reads it lazily per tool call.
+			current = null;
+			if (priorName === undefined) delete process.env[ENV_NAME];
+			else process.env[ENV_NAME] = priorName;
+			if (priorFile === undefined) delete process.env[ENV_FILE];
+			else process.env[ENV_FILE] = priorFile;
+		}
 		try {
 			defaultTools = pi.getActiveTools();
 		} catch {
@@ -194,10 +210,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// Idempotent cleanup: a follow-on session in the same process must never
-	// inherit a stale agent identity.
+	// inherit a stale switched identity. Like session_start, this only acts
+	// on an in-process switch — an externally injected identity is left
+	// alone (the process is normally exiting anyway).
 	pi.on("session_shutdown", (_event, ctx) => {
-		current = null;
-		clearAgentEnv();
+		if (current !== null) {
+			current = null;
+			clearAgentEnv();
+		}
 		statusText(ctx);
 	});
 

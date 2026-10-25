@@ -23,9 +23,9 @@ export interface Diagnostic {
 	tag?: { kind: "unknown-tool"; pattern: string };
 }
 
-/** One config file to validate: the global file or a single agent file. */
+/** One config file to validate: a single agent file (incl. agents/main.md). */
 export interface FileReport {
-	/** Display path, e.g. `permissions.json` or `agents/deployer.md`. */
+	/** Display path, e.g. `agents/deployer.md`. */
 	label: string;
 	exists: boolean;
 	validated: ValidatedConfig;
@@ -103,7 +103,7 @@ function validateRules(
 
 		// R3: unreachable — an earlier rule already covers everything this one can match.
 		// Cheap, exact cases only: earlier match-all with same-or-wider tool, or identical match.
-		// Plain first-match order applies within each file (agent-first globally).
+		// Plain first-match order applies within each agent file.
 		for (let k = 0; k < i; k++) {
 			const prev = rules[k];
 			const sameTool = prev.tool === r.tool || prev.tool === "*";
@@ -149,7 +149,7 @@ function validateRules(
 				diags.push({
 					severity: "warning",
 					location: loc,
-					message: `allows every tool call — global allow-all`,
+					message: `allows every tool call — allow-all`,
 					hint: `scope it to specific tools`,
 				});
 			} else if ((r.tool === "bash" || r.tool === "powershell") && r.match === undefined) {
@@ -187,29 +187,25 @@ function validateRules(
 	return diags;
 }
 
-/** Validate the global file + all agent files. Never throws. Agent rules beat
- *  global rules (including global deny — AGENT_BEATS_GLOBAL, Option A),
- *  so no cross-file shadowing applies. Instead, agent rules that loosen a
- *  global deny are reported as info/warning for visibility (not blocked). */
+/** Validate all agent files (agent-only — no global layer, no cross-file
+ *  shadowing). Never throws. */
 export function collectDiagnostics(files: FileReport[], knownTools: string[]): Diagnostic[] {
 	const diags: Diagnostic[] = [];
 	try {
 		for (const f of files) {
 			if (!f.exists) {
-				if (!f.isAgent) {
-					// G1: no global policy file — enforcement falls back to ask-everything.
-					diags.push({
-						severity: "info",
-						location: f.label,
-						message: `no global policy file — default action "ask" applies to every tool call`,
-						hint: `create ${f.label} to set a policy`,
-					});
-				}
+				// Missing agent policy file (e.g. agents/main.md) —
+				// enforcement falls back to ask-everything for that agent.
+				diags.push({
+					severity: "warning",
+					location: f.label,
+					message: `no agent policy file — default action "ask" applies to every tool call`,
+					hint: `create ${f.label} with a permissions: block to set a policy`,
+				});
 				continue;
 			}
 			diags.push(...validateRules(f.label, f.validated, knownTools, f.isAgent));
 		}
-		diags.push(...collectLooseningInfos(files));
 	} catch (e: any) {
 		diags.push({ severity: "error", location: "permissions", message: `validator failed: ${e?.message ?? e}` });
 	}
@@ -218,74 +214,6 @@ export function collectDiagnostics(files: FileReport[], knownTools: string[]): D
 }
 
 const MAX_STARTUP_LINES = 8;
-
-/** Visibility for AGENT_BEATS_GLOBAL: agent allow/ask (or default allow) that
- *  overlaps a global deny. Conservative heuristic to avoid noise — warns only
- *  on clear overlaps (same tool + both match-all, broad "**" allow, identical
- *  match string, or agent default-allow vs any global deny). Severity is
- *  info (not blocking): loosening is intentional per Option A. */
-function toolOverlaps(a: string, b: string): boolean {
-	const al = a.toLowerCase();
-	const bl = b.toLowerCase();
-	if (al === "*" || bl === "*") return true;
-	return al === bl;
-}
-
-function matchOverlaps(agentMatch: unknown, globalMatch: unknown): boolean {
-	// Either side match-all → overlap.
-	if (agentMatch === undefined || globalMatch === undefined) return true;
-	const a = Array.isArray(agentMatch) ? agentMatch : [agentMatch];
-	const g = Array.isArray(globalMatch) ? globalMatch : [globalMatch];
-	for (const am of a) {
-		if (typeof am !== "string") continue;
-		// Broad agent allows ("**", "*", "**/**") overlap any global deny match.
-		if (am === "**" || am === "*" || am === "**/**") return true;
-		for (const gm of g) {
-			if (typeof gm !== "string") continue;
-			if (am === gm) return true;
-		}
-	}
-	return false;
-}
-
-function collectLooseningInfos(files: FileReport[]): Diagnostic[] {
-	const out: Diagnostic[] = [];
-	const global = files.find((f) => !f.isAgent && f.exists);
-	if (!global) return out;
-	const globalDenies = global.validated.config.rules.filter((r) => r.action === "deny");
-	if (globalDenies.length === 0) return out;
-	for (const f of files) {
-		if (!f.isAgent || !f.exists) continue;
-		const agentRules = f.validated.config.rules;
-		// Agent default-allow loosens every global deny.
-		if (f.validated.hasDefault && f.validated.config.defaultAction === "allow") {
-			out.push({
-				severity: "info",
-				location: f.label,
-				message: `agent default "allow" loosens ${globalDenies.length} global deny rule(s) (agent beats global)`,
-				hint: `intentional under Option A; scope rules or use "ask"/"deny" default to tighten`,
-			});
-			continue;
-		}
-		for (let i = 0; i < agentRules.length; i++) {
-			const ar = agentRules[i];
-			if (ar.action !== "allow" && ar.action !== "ask") continue;
-			for (let j = 0; j < globalDenies.length; j++) {
-				const gr = globalDenies[j];
-				if (!toolOverlaps(ar.tool, gr.tool)) continue;
-				if (!matchOverlaps(ar.match, gr.match)) continue;
-				out.push({
-					severity: "info",
-					location: `${f.label} rules[${i}]`,
-					message: `loosens global deny (global rules[${j}] tool="${gr.tool}" match=${JSON.stringify(gr.match ?? "(any)")}) — agent ${ar.action} wins in-child`,
-					hint: `intentional under Option A; remove or narrow this rule to stop loosening`,
-				});
-				break;
-			}
-		}
-	}
-	return out;
-}
 
 /** One compact block for notify/console. Empty string = clean, say nothing. */
 export function formatStartupReport(diags: Diagnostic[]): string {

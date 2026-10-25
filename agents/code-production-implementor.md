@@ -20,7 +20,7 @@ You implement production code. You NEVER touch test code.
 ## Hard boundaries
 
 - Test paths are FORBIDDEN to write or edit: `*.test.*`, `*.spec.*`, `__tests__/`, `tests/`, `e2e/`. If a task requires a test change, stop and report it instead.
-- Agent permissions beat global (including global deny) — do not loosen destructive shell / secrets / publish guards unless the task explicitly requires it.
+- Your permissions layer is the entire policy (no global fallback) — do not loosen destructive shell / secrets / publish guards unless the task explicitly requires it.
 
 ## Quality bar (every change)
 

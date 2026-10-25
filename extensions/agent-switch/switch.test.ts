@@ -64,20 +64,20 @@ function load() {
 }
 
 describe("agent-switch", () => {
-	test("startup captures defaults; /agent planner switches prompt+tools+env+status", async () => {
+	test("startup captures defaults; /agent code-planner switches prompt+tools+env+status", async () => {
 		const { handlers, commands, calls } = load();
 		const { ctx, notices, statusLog } = makeCtx();
 		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
 
-		await commands.get("agent").handler("planner", ctx);
-		expect(process.env.PI_AGENT_NAME).toBe("planner");
-		expect(process.env.PI_AGENT_FILE ?? "").toMatch(/planner\.md$/);
-		expect(calls.setActiveTools.at(-1)).toEqual(["read", "write", "bash", "subagent"]);
-		expect(statusLog.at(-1)).toEqual(["agent-switch", "agent: planner"]);
+		await commands.get("agent").handler("code-planner", ctx);
+		expect(process.env.PI_AGENT_NAME).toBe("code-planner");
+		expect(process.env.PI_AGENT_FILE ?? "").toMatch(/code-planner\.md$/);
+		expect(calls.setActiveTools.at(-1)).toEqual(["read", "grep", "bash"]);
+		expect(statusLog.at(-1)).toEqual(["agent-switch", "agent:code-planner"]);
 
 		const event: any = { systemPromptOptions: { sections: {} } };
 		await handlers.get("before_agent_start")(event, ctx);
-		expect(event.systemPromptOptions.sections["agent"]).toContain("planning agent");
+		expect(event.systemPromptOptions.sections["agent"]).toContain("You are a planner.");
 		expect(notices.at(-1)?.type).toBe("info");
 
 		// Cleanup for other tests.
@@ -103,13 +103,13 @@ describe("agent-switch", () => {
 		const { ctx } = makeCtx({
 			ui: undefined,
 		});
-		// Rebuild ctx with a select mock that picks coder.
+		// Rebuild ctx with a select mock that picks code-reviewer.
 		const { ctx: ctx2, notices } = makeCtx();
 		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx2);
 		(ctx2.ui as any).select = async (_title: string, options: string[]) =>
-			options.find((o) => o.startsWith("coder")) ?? options[0];
+			options.find((o) => o.startsWith("code-reviewer")) ?? options[0];
 		await commands.get("agent").handler("", ctx2);
-		expect(process.env.PI_AGENT_NAME).toBe("coder");
+		expect(process.env.PI_AGENT_NAME).toBe("code-reviewer");
 		expect(ctx).toBeDefined();
 		expect(notices.at(-1)?.type).toBe("info");
 		await commands.get("agent").handler("reset", ctx2);
@@ -119,8 +119,8 @@ describe("agent-switch", () => {
 		const { handlers, commands } = load();
 		const { ctx } = makeCtx();
 		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
-		await commands.get("agent").handler("reviewer", ctx);
-		expect(process.env.PI_AGENT_NAME).toBe("reviewer");
+		await commands.get("agent").handler("code-reviewer", ctx);
+		expect(process.env.PI_AGENT_NAME).toBe("code-reviewer");
 		await handlers.get("session_start")({ type: "session_start", reason: "reload" }, ctx);
 		expect(process.env.PI_AGENT_NAME).toBeUndefined();
 	});
@@ -129,9 +129,55 @@ describe("agent-switch", () => {
 		const { handlers, commands } = load();
 		const { ctx } = makeCtx();
 		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
-		await commands.get("agent").handler("tester", ctx);
-		expect(process.env.PI_AGENT_NAME).toBe("tester");
+		await commands.get("agent").handler("code-tester", ctx);
+		expect(process.env.PI_AGENT_NAME).toBe("code-tester");
 		await handlers.get("session_shutdown")({ type: "session_shutdown" }, ctx);
 		expect(process.env.PI_AGENT_NAME).toBeUndefined();
+	});
+
+	test("session_start preserves externally injected identity (subagent child)", async () => {
+		// The subagent spawner injects PI_AGENT_NAME/FILE before startup.
+		// With no in-process /agent switch active, startup (and a later
+		// same-process reload) must leave them alone so the permissions
+		// layer keeps reading the injected agent instead of main.md.
+		const savedName = process.env.PI_AGENT_NAME;
+		const savedFile = process.env.PI_AGENT_FILE;
+		process.env.PI_AGENT_NAME = "code-reviewer";
+		process.env.PI_AGENT_FILE = "/tmp/injected-agent.md";
+		try {
+			const { handlers } = load();
+			const { ctx } = makeCtx();
+			await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+			expect(process.env.PI_AGENT_NAME).toBe("code-reviewer");
+			expect(process.env.PI_AGENT_FILE).toBe("/tmp/injected-agent.md");
+			await handlers.get("session_start")({ type: "session_start", reason: "reload" }, ctx);
+			expect(process.env.PI_AGENT_NAME).toBe("code-reviewer");
+			expect(process.env.PI_AGENT_FILE).toBe("/tmp/injected-agent.md");
+		} finally {
+			if (savedName === undefined) delete process.env.PI_AGENT_NAME;
+			else process.env.PI_AGENT_NAME = savedName;
+			if (savedFile === undefined) delete process.env.PI_AGENT_FILE;
+			else process.env.PI_AGENT_FILE = savedFile;
+		}
+	});
+
+	test("session_shutdown preserves injected identity when no switch is active", async () => {
+		const savedName = process.env.PI_AGENT_NAME;
+		const savedFile = process.env.PI_AGENT_FILE;
+		process.env.PI_AGENT_NAME = "code-reviewer";
+		process.env.PI_AGENT_FILE = "/tmp/injected-agent.md";
+		try {
+			const { handlers } = load();
+			const { ctx } = makeCtx();
+			await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+			await handlers.get("session_shutdown")({ type: "session_shutdown" }, ctx);
+			expect(process.env.PI_AGENT_NAME).toBe("code-reviewer");
+			expect(process.env.PI_AGENT_FILE).toBe("/tmp/injected-agent.md");
+		} finally {
+			if (savedName === undefined) delete process.env.PI_AGENT_NAME;
+			else process.env.PI_AGENT_NAME = savedName;
+			if (savedFile === undefined) delete process.env.PI_AGENT_FILE;
+			else process.env.PI_AGENT_FILE = savedFile;
+		}
 	});
 });
