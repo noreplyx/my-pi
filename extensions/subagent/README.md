@@ -45,6 +45,8 @@ prompts arrive as `extension_ui_request` on stdout; the parent forwards
 * Permission model: parent `subagent` invocation is gated by parent-agent +
   global; inner child tool calls are gated by target-agent + global with
   AGENT_BEATS_GLOBAL (frontmatter beats global, including global deny).
+  When the target agent's layer resolves to `allow`, the child never emits
+  a permission prompt, so nothing is forwarded to the parent user.
   `tools:` allowlist and `permissions:` both apply — most restrictive wins.
   Dry-run with `/permissions-check --as-agent <name> …`.
 * `editor` / `custom` are rejected visibly (`[question skipped]` in stderr);

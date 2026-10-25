@@ -12,8 +12,9 @@
  *   4. Permissions — the permissions extension keys its per-agent layer off
  *      `PI_AGENT_NAME`/`PI_AGENT_FILE` (permissions/loader.ts), which are
  *      absent in the main session. Setting them here activates the picked
- *      agent's `permissions:` frontmatter. Global `deny` rules still win
- *      over everything (fail-closed precedence is unchanged).
+ *      agent's `permissions:` frontmatter. Agent rules beat global, including
+ *      global `deny` (AGENT_BEATS_GLOBAL, Option A — same precedence as
+ *      subagent children; fail-closed precedence is unchanged).
  *
  * State is session-only: cleared on `session_start` (any reason, so a
  * same-process `/reload` resets to default) and on `session_shutdown`.

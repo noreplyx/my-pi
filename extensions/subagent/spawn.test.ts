@@ -14,9 +14,11 @@ interface FakeProc extends EventEmitter {
 
 let behavior: ((proc: FakeProc) => void) | null = null;
 let lastSpawnOpts: { env?: Record<string, string> } | null = null;
+const allSpawnEnvs: Array<Record<string, string> | undefined> = [];
 
 const spawnMock = mock((_cmd: string, _args: string[], _opts: unknown) => {
 	lastSpawnOpts = _opts as { env?: Record<string, string> };
+	allSpawnEnvs.push(lastSpawnOpts.env);
 	const proc = new EventEmitter() as FakeProc;
 	proc.stdout = new EventEmitter();
 	proc.stderr = new EventEmitter();
@@ -134,5 +136,40 @@ describe("runSingleAgent process lifecycle (mocked spawn)", () => {
 		expect(lastSpawnOpts?.env?.PI_AGENT_FILE).toBe("/tmp/coder.md");
 		// Session grants are in-memory only (never forwarded); secrets never propagate.
 		expect(lastSpawnOpts?.env?.ANTHROPIC_API_KEY).toBeUndefined();
+	});
+
+	test("parallel tasks each inherit their own target agent identity", async () => {
+		const { runParallel } = await import("./parallel.ts");
+		const agents2: any[] = [
+			...agents,
+			{
+				name: "impl",
+				description: "d",
+				tools: ["read", "write", "edit"],
+				model: undefined,
+				systemPrompt: "",
+				source: "user",
+				filePath: "/tmp/impl.md",
+				hasPermissionsBlock: true,
+			},
+		];
+		behavior = (proc) => {
+			proc.stdout.emit("data", msgLine("hi"));
+			setTimeout(() => proc.emit("close", 0), 5);
+		};
+		allSpawnEnvs.length = 0;
+		const out = await runParallel(
+			[
+				{ agent: "coder", task: "x" },
+				{ agent: "impl", task: "y" },
+			],
+			{},
+			{ defaultCwd: os.tmpdir(), dispatchDefaults: {}, agents: agents2, makeDetails },
+		);
+		expect(out.results.length).toBe(2);
+		const names = allSpawnEnvs.map((e) => e?.PI_AGENT_NAME).sort();
+		expect(names).toEqual(["coder", "impl"]);
+		const files = allSpawnEnvs.map((e) => e?.PI_AGENT_FILE).sort();
+		expect(files).toEqual(["/tmp/coder.md", "/tmp/impl.md"]);
 	});
 });

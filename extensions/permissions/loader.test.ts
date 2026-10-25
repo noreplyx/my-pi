@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describeCall, evaluate, normalizeDir, reloadAll, resolveGrantDir, resolveGrantPath, shortenHome, AGENT_BEATS_GLOBAL } from "./loader.ts";
 
 let tmpFiles: string[] = [];
@@ -434,5 +435,56 @@ describe("hardened global policy (permissions.json, no agent)", () => {
 		expect(evaluate("read", { path: ".aws/credentials" }, "/r").action).toBe("deny");
 		expect(evaluate("read", { path: "key.p12" }, "/r").action).toBe("deny");
 		expect(evaluate("read", { path: "src/app.ts" }, "/r").action).toBe("allow");
+	});
+});
+
+describe("orchestrator delegates to implementor (target allow = no prompt)", () => {
+	function useRealGlobal(): void {
+		const text = fs.readFileSync(new URL("../../permissions.json", import.meta.url), "utf-8");
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-delegate-"));
+		tmpDirs.push(dir);
+		const file = path.join(dir, "permissions.json");
+		fs.writeFileSync(file, text);
+		process.env.PI_PERMISSIONS_FILE = file;
+	}
+	function realAgentFile(name: string): string {
+		return fileURLToPath(new URL(`../../agents/${name}.md`, import.meta.url));
+	}
+	test("global-only edit/write asks (the prompt the agent layer must silence)", () => {
+		useRealGlobal();
+		delete process.env.PI_AGENT_NAME;
+		delete process.env.PI_AGENT_FILE;
+		reloadAll();
+		expect(evaluate("edit", { path: "src/foo.ts" }, "/repo").action).toBe("ask");
+		expect(evaluate("write", { path: "src/foo.ts" }, "/repo").action).toBe("ask");
+	});
+	test("parent subagent gate allows as orchestrator", () => {
+		useRealGlobal();
+		process.env.PI_AGENT_NAME = "orchestrator";
+		process.env.PI_AGENT_FILE = realAgentFile("orchestrator");
+		reloadAll();
+		const r = evaluate("subagent", { agent: "code-production-implementor", task: "edit src/foo.ts" }, "/repo");
+		expect(r.action).toBe("allow");
+		expect(r.source).toBe("agent");
+	});
+	test("child edit/write allow as implementor (no prompt forwarded to parent)", () => {
+		useRealGlobal();
+		process.env.PI_AGENT_NAME = "code-production-implementor";
+		process.env.PI_AGENT_FILE = realAgentFile("code-production-implementor");
+		reloadAll();
+		const edit = evaluate("edit", { path: "src/foo.ts" }, "/repo");
+		expect(edit.action).toBe("allow");
+		expect(edit.source).toBe("agent");
+		const write = evaluate("write", { path: "src/foo.ts" }, "/repo");
+		expect(write.action).toBe("allow");
+		expect(write.source).toBe("agent");
+	});
+	test("implementor test-path deny still holds in-child", () => {
+		useRealGlobal();
+		process.env.PI_AGENT_NAME = "code-production-implementor";
+		process.env.PI_AGENT_FILE = realAgentFile("code-production-implementor");
+		reloadAll();
+		expect(evaluate("edit", { path: "src/foo.test.ts" }, "/repo").action).toBe("deny");
+		expect(evaluate("write", { path: "tests/foo.ts" }, "/repo").action).toBe("deny");
 	});
 });
