@@ -306,13 +306,19 @@ describe("orchestrator delegates to implementor (target allow = no prompt)", () 
 	function realAgentFile(name: string): string {
 		return fileURLToPath(new URL(`../../agents/${name}.md`, import.meta.url));
 	}
-	test("parent subagent gate allows as orchestrator", () => {
+	test("parent subagent gate asks for implementors as orchestrator", () => {
 		process.env.PI_AGENT_NAME = "orchestrator";
 		process.env.PI_AGENT_FILE = realAgentFile("orchestrator");
 		reloadAll();
-		const r = evaluate("subagent", { agent: "code-production-implementor", task: "edit src/foo.ts" }, "/repo");
-		expect(r.action).toBe("allow");
-		expect(r.source).toBe("agent");
+		const prod = evaluate("subagent", { agent: "code-production-implementor", task: "edit src/foo.ts" }, "/repo");
+		expect(prod.action).toBe("ask");
+		expect(prod.source).toBe("agent");
+		const test = evaluate("subagent", { agent: "code-test-implementor", task: "write tests" }, "/repo");
+		expect(test.action).toBe("ask");
+		expect(test.source).toBe("agent");
+		const reviewer = evaluate("subagent", { agent: "code-reviewer", task: "review src/foo.ts" }, "/repo");
+		expect(reviewer.action).toBe("allow");
+		expect(reviewer.source).toBe("agent");
 	});
 	test("child edit/write allow as implementor (no prompt forwarded to parent)", () => {
 		process.env.PI_AGENT_NAME = "code-production-implementor";

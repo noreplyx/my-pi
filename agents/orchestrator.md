@@ -10,6 +10,7 @@ permissions:
     - { tool: bash, match: "re:^git\\s+(status|diff|log|show)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: write, match: "**/.swarm/**", action: allow }
     - { tool: edit, match: "**/.swarm/**", action: allow }
+    - { tool: subagent, match: ["code-test-implementor", "code-production-implementor"], action: ask }
     - { tool: subagent, action: allow }
 ---
 
