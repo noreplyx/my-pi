@@ -34,6 +34,10 @@ import {
 import { discoverAgents, formatAgentList, type AgentConfig } from "../subagent/agents.ts";
 import { normalizeAgentName, validateModelString } from "../subagent/utils.ts";
 import { describeStatus } from "../permissions/loader.ts";
+import {
+	AgentPickerComponent,
+	type AgentPickerItem,
+} from "./picker.ts";
 
 const ENV_NAME = "PI_AGENT_NAME";
 const ENV_FILE = "PI_AGENT_FILE";
@@ -270,10 +274,37 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 
-			// Direct switch: /agent <name>. Works without UI (scripts, RPC).
+			// Direct switch: /agent <name>. An exact match applies immediately
+			// without a picker (mirrors /model); anything else seeds the
+			// searchable picker below. Works without UI (scripts, RPC) for
+			// exact names only.
+			let initialSearch: string | undefined;
 			if (query) {
 				const agent = findAgent(agents, query);
-				if (!agent) {
+				if (agent) {
+					if (agent.source === "project" && !ctx.isProjectTrusted()) {
+						// Repo-controlled content: same fail-closed gate the
+						// subagent extension applies to project-local agents.
+						if (!ctx.hasUI) {
+							ctx.ui.notify(
+								`Blocked: project-local agent "${agent.name}" requires approval, but there is no UI to confirm in.`,
+								"error",
+							);
+							return;
+						}
+						const ok = await ctx.ui.confirm(
+							`Switch to project-local agent "${agent.name}"?`,
+							`Source: ${agent.filePath}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+						);
+						if (!ok) {
+							ctx.ui.notify("Canceled: agent switch not approved.", "warning");
+							return;
+						}
+					}
+					await applyAgent(pi, ctx, agent);
+					return;
+				}
+				if (!ctx.hasUI) {
 					const { text: available, remaining } = formatAgentList(agents, 20);
 					ctx.ui.notify(
 						`Unknown agent: "${truncate(query, 60)}". Available: ${available}${remaining > 0 ? ` (+${remaining} more)` : ""}`,
@@ -281,31 +312,10 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
-				if (agent.source === "project" && !ctx.isProjectTrusted()) {
-					// Repo-controlled content: same fail-closed gate the
-					// subagent extension applies to project-local agents.
-					if (!ctx.hasUI) {
-						ctx.ui.notify(
-							`Blocked: project-local agent "${agent.name}" requires approval, but there is no UI to confirm in.`,
-							"error",
-						);
-						return;
-					}
-					const ok = await ctx.ui.confirm(
-						`Switch to project-local agent "${agent.name}"?`,
-						`Source: ${agent.filePath}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-					);
-					if (!ok) {
-						ctx.ui.notify("Canceled: agent switch not approved.", "warning");
-						return;
-					}
-				}
-				await applyAgent(pi, ctx, agent);
-				return;
-			}
-
-			// Picker: /agent with no args.
-			if (!ctx.hasUI) {
+				// No exact match: fall through to the picker seeded with the
+				// typed text (mirrors /model <term> with no exact match).
+				initialSearch = query;
+			} else if (!ctx.hasUI) {
 				const { text: available, remaining } = formatAgentList(agents, 20);
 				ctx.ui.notify(
 					`${usageLine()}\nCurrent: ${current ? `${current.name} (${current.source})` : "(default session)"}\nAvailable: ${available}${remaining > 0 ? ` (+${remaining} more)` : ""}`,
@@ -313,24 +323,41 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
+
+			// Searchable picker (mirrors /model): type to fuzzy-filter, ↑↓ to
+			// move, Enter to switch, Esc to cancel fail-closed.
 			const defaultLabel = `(default session — clear override)${current ? "" : " ●"}`;
-			const labels = [defaultLabel, ...agents.map((a) => labelFor(a, a.name === current?.name))];
-			let picked: string | undefined;
+			const items: AgentPickerItem[] = [
+				{ label: defaultLabel, agent: null },
+				...agents.map((a) => ({
+					label: labelFor(a, a.name === current?.name),
+					agent: a as AgentConfig,
+				})),
+			];
+			let picked: AgentPickerItem | undefined;
 			try {
-				picked = await ctx.ui.select("Choose agent", labels, {
-					...(ctx.signal ? { signal: ctx.signal } : {}),
-				});
+				picked = await ctx.ui.custom<AgentPickerItem | undefined>(
+					(tui, theme, _keybindings, done) =>
+						new AgentPickerComponent(
+							tui,
+							theme,
+							items,
+							current?.name,
+							(item) => done(item),
+							() => done(undefined),
+							initialSearch,
+						),
+				);
 			} catch {
 				ctx.ui.notify("Agent picker unavailable on this client. Use /agent <name> instead.", "warning");
 				return;
 			}
 			if (picked === undefined) return; // Dismissed — fail closed, no change.
-			if (picked === defaultLabel) {
+			if (picked.agent === null) {
 				resetAgent(pi, ctx, "Cleared. ");
 				return;
 			}
-			const agent = agents[labels.indexOf(picked) - 1];
-			if (!agent) return; // Should not happen; never apply an unknown agent.
+			const agent = picked.agent;
 			if (agent.source === "project" && !ctx.isProjectTrusted()) {
 				const ok = await ctx.ui.confirm(
 					`Switch to project-local agent "${agent.name}"?`,

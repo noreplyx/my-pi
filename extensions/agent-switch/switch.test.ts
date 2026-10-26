@@ -1,6 +1,7 @@
 /** Smoke tests for the agent-switch extension (mocked ExtensionAPI). */
 import { describe, expect, test } from "bun:test";
 import factory from "./index.ts";
+import { AgentPickerComponent, getAgentSearchText } from "./picker.ts";
 
 function makePi() {
 	const handlers = new Map<string, (event: any, ctx: any) => any>();
@@ -45,6 +46,7 @@ function makeCtx(over: Record<string, any> = {}) {
 			notify: (message: string, type?: string) => {
 				notices.push({ message, type });
 			},
+			custom: async () => undefined,
 			select: async () => undefined,
 			confirm: async () => true,
 			setStatus: (...args: unknown[]) => {
@@ -87,9 +89,9 @@ describe("agent-switch", () => {
 		expect(statusLog.at(-1)).toEqual(["agent-switch", undefined]);
 	});
 
-	test("unknown agent is fail-closed", async () => {
+	test("unknown agent without UI is fail-closed", async () => {
 		const { handlers, commands, calls } = load();
-		const { ctx, notices } = makeCtx();
+		const { ctx, notices } = makeCtx({ hasUI: false });
 		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
 		const before = calls.setActiveTools.length;
 		await commands.get("agent").handler("nope", ctx);
@@ -98,21 +100,127 @@ describe("agent-switch", () => {
 		expect(process.env.PI_AGENT_NAME).toBeUndefined();
 	});
 
-	test("picker path switches to the selected label", async () => {
+	test("unknown agent with UI opens the picker seeded with the query", async () => {
+		const { handlers, commands } = load();
+		const { ctx } = makeCtx();
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		let captured: any;
+		(ctx.ui as any).custom = async (factory: any) => {
+			let out: any;
+			const stubTui = { requestRender: () => {} };
+			const stubTheme = {
+				fg: (_c: string, s: string) => s,
+				bold: (s: string) => s,
+			};
+			captured = factory(stubTui, stubTheme, undefined, (v: any) => {
+				out = v;
+			});
+			return out;
+		};
+		// Dismiss the seeded picker: fail closed, no change.
+		await commands.get("agent").handler("nope", ctx);
+		expect(process.env.PI_AGENT_NAME).toBeUndefined();
+		// The picker was seeded with the typed query (mirrors /model <term>).
+		expect(captured.getSearchInput().getValue()).toBe("nope");
+	});
+
+	test("picker path switches to the selected item", async () => {
 		const { handlers, commands } = load();
 		const { ctx } = makeCtx({
 			ui: undefined,
 		});
-		// Rebuild ctx with a select mock that picks code-reviewer.
+		// Rebuild ctx with a custom mock that drives the real picker
+		// component: type "reviewer" and pick the top filtered match.
 		const { ctx: ctx2, notices } = makeCtx();
 		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx2);
-		(ctx2.ui as any).select = async (_title: string, options: string[]) =>
-			options.find((o) => o.startsWith("code-reviewer")) ?? options[0];
+		(ctx2.ui as any).custom = async (factory: any) => {
+			let out: any;
+			const stubTui = { requestRender: () => {} };
+			const stubTheme = {
+				fg: (_c: string, s: string) => s,
+				bold: (s: string) => s,
+			};
+			const component = factory(stubTui, stubTheme, undefined, (v: any) => {
+				out = v;
+			});
+			for (const ch of "reviewer") component.handleInput(ch);
+			const match = (component as any).filtered.find((i: any) =>
+				i.agent?.name === "code-reviewer",
+			);
+			expect(match).toBeDefined();
+			(component as any).handleSelect(match);
+			return out;
+		};
 		await commands.get("agent").handler("", ctx2);
 		expect(process.env.PI_AGENT_NAME).toBe("code-reviewer");
 		expect(ctx).toBeDefined();
 		expect(notices.at(-1)?.type).toBe("info");
 		await commands.get("agent").handler("reset", ctx2);
+	});
+
+	test("picker dismiss is fail-closed", async () => {
+		const { handlers, commands, calls } = load();
+		const { ctx } = makeCtx();
+		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
+		const before = calls.setActiveTools.length;
+		// Default custom mock returns undefined (dismissed).
+		await commands.get("agent").handler("", ctx);
+		expect(process.env.PI_AGENT_NAME).toBeUndefined();
+		expect(calls.setActiveTools.length).toBe(before);
+	});
+
+	test("picker search text covers name, source, and description", () => {
+		const item = {
+			label: "code-reviewer",
+			agent: {
+				name: "code-reviewer",
+				source: "user",
+				description: "Reviews diffs for bugs",
+			} as any,
+		};
+		const text = getAgentSearchText(item).toLowerCase();
+		expect(text).toContain("code-reviewer");
+		expect(text).toContain("user");
+		expect(text).toContain("reviews diffs");
+		const reset = getAgentSearchText({ label: "default", agent: null }).toLowerCase();
+		expect(reset).toContain("reset");
+	});
+
+	test("AgentPickerComponent filters and resets selection like the model picker", () => {
+		const stubTui = { requestRender: () => {} };
+		const stubTheme = {
+			fg: (_c: string, s: string) => s,
+			bold: (s: string) => s,
+		};
+		const items = [
+			{ label: "default", agent: null },
+			{ label: "code-planner", agent: { name: "code-planner", source: "user", description: "Plans work" } as any },
+			{ label: "code-reviewer", agent: { name: "code-reviewer", source: "user", description: "Reviews code" } as any },
+		];
+		let selected: any = "unset";
+		const component = new AgentPickerComponent(
+			stubTui as any,
+			stubTheme as any,
+			items,
+			undefined,
+			(v) => {
+				selected = v;
+			},
+			() => {
+				selected = undefined;
+			},
+		);
+		expect((component as any).filtered.length).toBe(3);
+		component.filterAgents("reviewer");
+		expect((component as any).filtered.length).toBe(1);
+		expect((component as any).filtered[0].agent?.name).toBe("code-reviewer");
+		// Filtering moves the highlight to the top match (model parity).
+		expect((component as any).selectedIndex).toBe(0);
+		component.filterAgents("zzz-no-match");
+		expect((component as any).filtered.length).toBe(0);
+		component.filterAgents("");
+		expect((component as any).filtered.length).toBe(3);
+		expect(selected).toBe("unset");
 	});
 
 	test("reload clears a previous switch (session-only)", async () => {
