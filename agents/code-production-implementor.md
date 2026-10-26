@@ -9,6 +9,19 @@ permissions:
     - { tool: grep, action: allow }
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
     - { tool: bash, match: "re:^git\\s+(status|diff|log|show)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^dotnet\\s+((build|test|run|clean|restore|format|vstest|list)\\b|--(info|version|help)\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(npm|pnpm)\\s+((test|run(-script)?|exec|ls|list)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^bun\\s+((test|run|build|check|x)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^go\\s+((build|test|vet|fmt|run|list)\\b|version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^python3?\\s+--version[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^python3?\\s+-m\\s+(pytest|unittest|mypy|ruff|black|flake8)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^python3?\\s+[^;&|$`<>\\n]*\\.py\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(pytest|ruff|mypy|black|flake8)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^pip3?\\s+(list|show|check|freeze)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^uv\\s+((run|test)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(eslint|biome|tsc)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(npx|bunx)\\s+((eslint|biome|tsc)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: ["re:^(npm|pnpm|bun)\\s+(install|add|publish|pack|deploy)\\b", "re:^pip3?\\s+install\\b", "re:^uv\\s+(pip\\s+install|add|publish)\\b", "re:^dotnet\\s+(publish|pack|nuget\\s+push|new|add|remove|tool\\s+install)\\b", "re:^go\\s+(install|get)\\b", "re:^python3?\\s+-c\\b"], action: ask }
     - { tool: write, match: ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/tests/**", "**/e2e/**"], action: deny }
     - { tool: edit, match: ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/tests/**", "**/e2e/**"], action: deny }
     - { tool: write, action: allow }
