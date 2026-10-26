@@ -7,7 +7,7 @@ Tracked in git; secrets and machine-local state are gitignored.
 
 | Path | Purpose |
 |---|---|
-| `settings.json` | Default provider/model, changelog version |
+| `settings.json` | Default provider/model (auto-updated by `extensions/model-memory`), changelog version |
 | `agents/` | Per-agent `permissions:` frontmatter (`allow\|ask\|deny` per tool — see `extensions/permissions/README.md`); `agents/main.md` governs the main session |
 | `extensions/permissions/` | Permission enforcement extension + tests |
 | `extensions/subagent/` | Subagent delegation extension (spawns isolated `pi` processes) |
