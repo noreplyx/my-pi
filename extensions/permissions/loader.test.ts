@@ -288,7 +288,7 @@ describe("describeCall structured tools", () => {
 		expect(describeCall("subagent", { task: "just\n  a\ntask" }, "/p")).toBe('subagent "just a task"');
 	});
 
-	test("subagent swarm shows full workers + goal multiline without truncation", () => {
+	test("subagent swarm shows deduped agent names only", () => {
 		expect(
 			describeCall(
 				"subagent",
@@ -305,25 +305,24 @@ describe("describeCall structured tools", () => {
 				},
 				"/p",
 			),
-		).toBe(
-			'subagent swarm (4 workers), goal: "M0-M1 foundation"\n' +
-				"  - skeleton:code-production-implementor — Bootstrap Unity 2022.3.21f1 skeleton\n" +
-				"  - simcore:code-production-implementor — Implement Game.Sim pure logic\n" +
-				"  - worldgen:code-production-implementor — Implement deterministic worldgen\n" +
-				"  - extra:code-production-implementor — Extra worker",
-		);
+		).toBe('subagent swarm (4 workers), goal: "M0-M1 foundation"\n  - code-production-implementor ×4');
 		expect(
 			describeCall(
 				"subagent",
-				{ swarm: { goal: "g", workers: [{ id: "a", agent: "coder", task: "do it" }], merger: { agent: "m", task: "merge" } } },
+				{
+					swarm: {
+						goal: "g",
+						workers: [
+							{ id: "a", agent: "coder", task: "do one thing" },
+							{ id: "b", agent: "reviewer", task: "review it" },
+							{ id: "c", agent: "coder", task: "do another thing" },
+						],
+						merger: { agent: "m", task: "merge" },
+					},
+				},
 				"/p",
 			),
-		).toBe('subagent swarm (1 worker) + merger, goal: "g"\n  - a:coder — do it\n  + merger:m — merge');
-		// No truncation: long tasks pass through in full.
-		const longTask = `do ${"x".repeat(500)}`;
-		const longGot = describeCall("subagent", { swarm: { goal: "g", workers: [{ id: "a", agent: "coder", task: longTask }] } }, "/p");
-		expect(longGot.includes(longTask)).toBe(true);
-		expect(longGot.includes("…")).toBe(false);
+		).toBe('subagent swarm (3 workers) + merger, goal: "g"\n  - coder ×2\n  - reviewer\n  + merger:m');
 		expect(describeCall("subagent", { swarm: { goal: "g", workers: [] } }, "/p")).toBe("subagent (no details)");
 	});
 

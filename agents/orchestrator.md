@@ -11,6 +11,7 @@ permissions:
     - { tool: write, match: "**/.swarm/**", action: allow }
     - { tool: edit, match: "**/.swarm/**", action: allow }
     - { tool: subagent, match: ["code-test-implementor", "code-production-implementor"], action: ask }
+    - { tool: subagent, match: ["orchestrator", "..."], action: deny }
     - { tool: subagent, action: allow }
 ---
 

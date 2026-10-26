@@ -442,16 +442,11 @@ function describeSubagentItem(item: unknown): string {
 	return "";
 }
 
-/** `  - id:agent — full task` for one swarm worker (no truncation). */
-function describeSwarmWorker(worker: unknown): string {
+/** Agent name for one swarm worker (display only — no id, no task). */
+function swarmAgentName(worker: unknown): string {
 	if (typeof worker !== "object" || worker === null) return "";
 	const o = worker as Record<string, unknown>;
-	const id = asString(o.id) ?? "";
-	const agent = asString(o.agent) ?? "";
-	const task = oneLine(asString(o.task) ?? "");
-	const prefix = id && agent ? `${id}:${agent}` : (agent || id || "worker");
-	if (task) return `  - ${prefix} — ${shortenHomeInText(task)}`;
-	return `  - ${prefix}`;
+	return asString(o.agent) ?? asString(o.id) ?? "";
 }
 
 /** Human shape for subagent calls: single, chain, parallel, or swarm. */
@@ -470,14 +465,17 @@ function describeSubagent(input: Record<string, unknown>): string {
 		const workers = s.workers;
 		if (Array.isArray(workers) && workers.length > 0) {
 			const merger = s.merger;
-			const mergerText =
-				typeof merger === "object" && merger !== null
-					? describeSwarmWorker({ ...((merger as Record<string, unknown>) ?? {}), id: "merger" })
-					: "";
+			const mergerAgent =
+				typeof merger === "object" && merger !== null ? swarmAgentName(merger) : "";
 			const goal = oneLine(asString(s.goal) ?? "");
-			const header = `swarm (${workers.length} worker${workers.length === 1 ? "" : "s"})${mergerText ? " + merger" : ""}${goal ? `, goal: "${shortenHomeInText(goal)}"` : ""}`;
-			const lines = workers.map((w) => describeSwarmWorker(w)).filter(Boolean);
-			if (mergerText) lines.push(`  + ${mergerText.slice(4)}`);
+			const header = `swarm (${workers.length} worker${workers.length === 1 ? "" : "s"})${mergerAgent ? " + merger" : ""}${goal ? `, goal: "${shortenHomeInText(goal)}"` : ""}`;
+			const counts = new Map<string, number>();
+			for (const w of workers) {
+				const name = swarmAgentName(w) || "worker";
+				counts.set(name, (counts.get(name) ?? 0) + 1);
+			}
+			const lines = [...counts.entries()].map(([name, n]) => (n > 1 ? `  - ${name} ×${n}` : `  - ${name}`));
+			if (mergerAgent) lines.push(`  + merger:${mergerAgent}`);
 			return [header, ...lines].join("\n");
 		}
 	}
