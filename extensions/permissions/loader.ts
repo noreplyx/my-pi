@@ -373,7 +373,7 @@ function summarizeBash(cmd: string): string {
  * `subagent general "List files in ~/.pi/agent…"`.
  * File tools show the (possibly relative) path; find/grep append the
  * pattern when present; bash shows the full command; subagent shows the
- * agent plus a task snippet (or chain/parallel shape); anything else shows
+ * agent plus a task snippet (or chain/parallel/swarm shape); anything else shows
  * compact `key=value` pairs. Home directories shorten to `~` (display
  * only — matching and audit keep absolute paths). Pure — safe to
  * unit-test without `pi`.
@@ -442,7 +442,19 @@ function describeSubagentItem(item: unknown): string {
 	return "";
 }
 
-/** Human shape for subagent calls: single, chain, or parallel. */
+/** `  - id:agent — full task` for one swarm worker (no truncation). */
+function describeSwarmWorker(worker: unknown): string {
+	if (typeof worker !== "object" || worker === null) return "";
+	const o = worker as Record<string, unknown>;
+	const id = asString(o.id) ?? "";
+	const agent = asString(o.agent) ?? "";
+	const task = oneLine(asString(o.task) ?? "");
+	const prefix = id && agent ? `${id}:${agent}` : (agent || id || "worker");
+	if (task) return `  - ${prefix} — ${shortenHomeInText(task)}`;
+	return `  - ${prefix}`;
+}
+
+/** Human shape for subagent calls: single, chain, parallel, or swarm. */
 function describeSubagent(input: Record<string, unknown>): string {
 	const chain = input.chain;
 	const tasks = input.tasks;
@@ -451,6 +463,23 @@ function describeSubagent(input: Record<string, unknown>): string {
 	}
 	if (Array.isArray(tasks) && tasks.length > 0) {
 		return `parallel (${tasks.length} task${tasks.length === 1 ? "" : "s"}): ${describeSubagentItem(tasks[0])}`;
+	}
+	const swarm = input.swarm;
+	if (typeof swarm === "object" && swarm !== null) {
+		const s = swarm as Record<string, unknown>;
+		const workers = s.workers;
+		if (Array.isArray(workers) && workers.length > 0) {
+			const merger = s.merger;
+			const mergerText =
+				typeof merger === "object" && merger !== null
+					? describeSwarmWorker({ ...((merger as Record<string, unknown>) ?? {}), id: "merger" })
+					: "";
+			const goal = oneLine(asString(s.goal) ?? "");
+			const header = `swarm (${workers.length} worker${workers.length === 1 ? "" : "s"})${mergerText ? " + merger" : ""}${goal ? `, goal: "${shortenHomeInText(goal)}"` : ""}`;
+			const lines = workers.map((w) => describeSwarmWorker(w)).filter(Boolean);
+			if (mergerText) lines.push(`  + ${mergerText.slice(4)}`);
+			return [header, ...lines].join("\n");
+		}
 	}
 	return describeSubagentItem(input) || "(no details)";
 }

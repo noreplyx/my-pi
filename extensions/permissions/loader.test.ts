@@ -288,6 +288,45 @@ describe("describeCall structured tools", () => {
 		expect(describeCall("subagent", { task: "just\n  a\ntask" }, "/p")).toBe('subagent "just a task"');
 	});
 
+	test("subagent swarm shows full workers + goal multiline without truncation", () => {
+		expect(
+			describeCall(
+				"subagent",
+				{
+					swarm: {
+						goal: "M0-M1 foundation",
+						workers: [
+							{ id: "skeleton", agent: "code-production-implementor", task: "Bootstrap Unity 2022.3.21f1 skeleton" },
+							{ id: "simcore", agent: "code-production-implementor", task: "Implement Game.Sim pure logic" },
+							{ id: "worldgen", agent: "code-production-implementor", task: "Implement deterministic worldgen" },
+							{ id: "extra", agent: "code-production-implementor", task: "Extra worker" },
+						],
+					},
+				},
+				"/p",
+			),
+		).toBe(
+			'subagent swarm (4 workers), goal: "M0-M1 foundation"\n' +
+				"  - skeleton:code-production-implementor — Bootstrap Unity 2022.3.21f1 skeleton\n" +
+				"  - simcore:code-production-implementor — Implement Game.Sim pure logic\n" +
+				"  - worldgen:code-production-implementor — Implement deterministic worldgen\n" +
+				"  - extra:code-production-implementor — Extra worker",
+		);
+		expect(
+			describeCall(
+				"subagent",
+				{ swarm: { goal: "g", workers: [{ id: "a", agent: "coder", task: "do it" }], merger: { agent: "m", task: "merge" } } },
+				"/p",
+			),
+		).toBe('subagent swarm (1 worker) + merger, goal: "g"\n  - a:coder — do it\n  + merger:m — merge');
+		// No truncation: long tasks pass through in full.
+		const longTask = `do ${"x".repeat(500)}`;
+		const longGot = describeCall("subagent", { swarm: { goal: "g", workers: [{ id: "a", agent: "coder", task: longTask }] } }, "/p");
+		expect(longGot.includes(longTask)).toBe(true);
+		expect(longGot.includes("…")).toBe(false);
+		expect(describeCall("subagent", { swarm: { goal: "g", workers: [] } }, "/p")).toBe("subagent (no details)");
+	});
+
 	test("shortenHome shortens leading home only", () => {
 		const home = os.homedir();
 		expect(shortenHome(`${home}/x/y`)).toBe("~/x/y");

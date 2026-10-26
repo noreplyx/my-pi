@@ -193,7 +193,10 @@ export default function (pi: ExtensionAPI) {
 		const summary = describeCall(event.toolName, input, ctx.cwd);
 		// describeCall already caps bash at ~120 chars; this is a second
 		// guard so future tool summaries can never blow up the dialog title.
-		const shortSummary = summary.length > 140 ? `${summary.slice(0, 139)}…` : summary;
+		// Swarm summaries are intentionally multiline + untruncated (option A):
+		// exempt them here so the full worker/goal list reaches the prompt.
+		const isSwarmSummary = event.toolName.toLowerCase() === "subagent" && summary.includes("swarm (");
+		const shortSummary = !isSwarmSummary && summary.length > 140 ? `${summary.slice(0, 139)}…` : summary;
 		const dialogTitle = `Allow ${shortSummary}?`;
 		let choice: string | undefined;
 		try {
