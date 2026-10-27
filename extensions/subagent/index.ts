@@ -33,6 +33,7 @@ import {
 import { DEFAULT_RETRY_ATTEMPTS, DEFAULT_RETRY_BACKOFF_MS, runWithRetry } from "./resilience.ts";
 import { SubagentParams } from "./schema.ts";
 import { runSingleAgent } from "./single.ts";
+import { validateSubagentFormat } from "./validate.ts";
 import {
 	isCancelled,
 	listSwarmRuns,
@@ -113,7 +114,6 @@ export default function (pi: ExtensionAPI) {
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
 			const hasSingle = Boolean(params.agent && params.task);
 			const hasSwarm = Boolean(params.swarm && params.swarm.workers?.length);
-			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle) + Number(hasSwarm);
 
 			const parentDepth = parseSwarmDepth(process.env["PI_SUBAGENT_DEPTH"]);
 
@@ -131,17 +131,16 @@ export default function (pi: ExtensionAPI) {
 			const retryAttempts = Math.max(1, Math.min(5, Math.floor(params.retry?.attempts ?? DEFAULT_RETRY_ATTEMPTS)));
 			const retryBackoffMs = Math.max(0, params.retry?.backoffMs ?? DEFAULT_RETRY_BACKOFF_MS);
 
-			if (modeCount !== 1) {
-				const { text: available, remaining } = formatAgentList(agents, 20);
-				const more = remaining > 0 ? ` (+${remaining} more)` : "";
+			// Format first: malformed payloads fail here, before the
+			// project-local agent trust-approval dialog below prompts the user.
+			const { text: available, remaining } = formatAgentList(agents, 20);
+			const more = remaining > 0 ? ` (+${remaining} more)` : "";
+			const formatCheck = validateSubagentFormat(params, agents, { availableText: `${available}${more}` });
+			if (formatCheck.error) {
 				return {
-					content: [
-						{
-							type: "text",
-							text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}${more}`,
-						},
-					],
-					details: makeDetails("single")([]),
+					content: [{ type: "text", text: formatCheck.error }],
+					details: makeDetails(formatCheck.mode)([]),
+					...(formatCheck.isError ? { isError: true } : {}),
 				};
 			}
 
