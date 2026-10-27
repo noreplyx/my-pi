@@ -7,6 +7,7 @@ import type { AgentConfig } from "./agents.ts";
 import { isBudgetExceeded, runWithRetry, totalDeadline } from "./resilience.ts";
 import { runSingleAgent } from "./single.ts";
 import type { DispatchDefaults, OnUpdateCallback, ParentUI, SingleResult, SwarmCtx, SwarmInfo } from "./types.ts";
+import type { ForwardedPermissionStore } from "./forwarded-permissions.ts";
 import {
 	MAX_CONCURRENCY,
 	MAX_SWARM_TOTAL,
@@ -70,6 +71,7 @@ export interface SwarmDeps {
 	makeDetails: (results: SingleResult[], swarm?: SwarmInfo) => any;
 	workerDepth: number;
 	parentUI?: ParentUI;
+	forwardedPermissions?: ForwardedPermissionStore;
 }
 
 function failedWorker(
@@ -125,7 +127,7 @@ export async function runSwarm(
 	opts: SwarmOptions,
 	deps: SwarmDeps,
 ): Promise<{ results: SingleResult[]; text: string; isError: boolean; swarmInfo: SwarmInfo; aborted: boolean }> {
-	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, workerDepth, parentUI } = deps;
+	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, workerDepth, parentUI, forwardedPermissions } = deps;
 	const deadline = totalDeadline(opts.totalTimeoutMs);
 	const swarmInfo: SwarmInfo = { runId, swarmDir, depth: workerDepth };
 
@@ -208,6 +210,7 @@ export async function runSwarm(
 								allowQuestions: w.allowQuestions ?? opts.allowQuestions ?? true,
 								questionTimeoutMs: w.questionTimeoutMs ?? opts.questionTimeoutMs,
 								parentUI,
+								forwardedPermissions,
 								labelPrefix: `[swarm ${runId}/${w.id}]`,
 							},
 						),
@@ -296,6 +299,7 @@ export async function runSwarm(
 						allowQuestions: merger.allowQuestions ?? opts.allowQuestions ?? true,
 						questionTimeoutMs: merger.questionTimeoutMs ?? opts.questionTimeoutMs,
 						parentUI,
+						forwardedPermissions,
 						labelPrefix: `[swarm ${runId}/merger]`,
 					},
 				),

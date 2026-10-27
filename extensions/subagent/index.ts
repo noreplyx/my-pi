@@ -33,6 +33,7 @@ import {
 import { DEFAULT_RETRY_ATTEMPTS, DEFAULT_RETRY_BACKOFF_MS, runWithRetry } from "./resilience.ts";
 import { SubagentParams } from "./schema.ts";
 import { runSingleAgent } from "./single.ts";
+import { createForwardedPermissionStore } from "./forwarded-permissions.ts";
 import { validateSubagentFormat } from "./validate.ts";
 import {
 	isCancelled,
@@ -61,8 +62,24 @@ import {
 
 export type { SingleResult, SubagentDetails, SwarmInfo } from "./types.ts";
 export { runSingleAgent } from "./single.ts";
+export { createForwardedPermissionStore } from "./forwarded-permissions.ts";
 
 export default function (pi: ExtensionAPI) {
+	// Parent-side memo for forwarded child permission prompts: "Allow for
+	// this session" means the main session, scoped per agent. Identical
+	// repeated dialogs from later children of the same agent auto-approve
+	// without re-prompting. In-memory only, cleared on session shutdown —
+	// same lifetime as the permissions extension's own sessionGrants.
+	// Exact-title match only (v1).
+	const forwardedPermissions = createForwardedPermissionStore();
+
+	pi.on("session_shutdown", () => {
+		try {
+			forwardedPermissions.clear();
+		} catch {
+			/* never break shutdown */
+		}
+	});
 	pi.registerTool({
 		name: askUserToolDefinition.name,
 		label: askUserToolDefinition.label,
@@ -227,6 +244,7 @@ export default function (pi: ExtensionAPI) {
 						makeDetails: (results: SingleResult[]) => makeDetails("swarm", swarmInfo)(results),
 						workerDepth,
 						parentUI,
+						forwardedPermissions,
 					});
 					return {
 						content: [{ type: "text", text: out.text }],
@@ -260,6 +278,7 @@ export default function (pi: ExtensionAPI) {
 					onUpdate: onUpdate as any,
 					makeDetails: makeDetails("chain"),
 					parentUI,
+					forwardedPermissions,
 				});
 				return { content: [{ type: "text", text: out.text }], details: makeDetails("chain")(out.results), isError: out.isError };
 			}
@@ -286,6 +305,7 @@ export default function (pi: ExtensionAPI) {
 					onUpdate: onUpdate as any,
 					makeDetails: makeDetails("parallel"),
 					parentUI,
+					forwardedPermissions,
 				});
 				return { content: [{ type: "text", text: out.text }], details: makeDetails("parallel")(out.results), isError: out.allFailed };
 			}
@@ -309,6 +329,7 @@ export default function (pi: ExtensionAPI) {
 								allowQuestions: params.allowQuestions,
 								questionTimeoutMs: params.questionTimeoutMs,
 								parentUI,
+								forwardedPermissions,
 								labelPrefix: `[${params.agent}]`,
 							},
 						),
@@ -721,6 +742,7 @@ export default function (pi: ExtensionAPI) {
 				}),
 				workerDepth: depthCheck.depth,
 				parentUI: resumeUI,
+				forwardedPermissions,
 			});
 			if ("error" in out)
 				return { content: [{ type: "text", text: `Swarm resume failed: ${out.error}` }], details: {} as any, isError: true };

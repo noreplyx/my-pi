@@ -49,7 +49,11 @@ governed by `agents/main.md`.
   the whole directory — sibling files and subdirectories (recursive down,
   never up: a grant on a child never covers its parent). `bash` and other
   tools remember the exact call only. Session grants are in-memory only and
-  are cleared on session shutdown/reload.
+  are cleared on session shutdown/reload. Forwarded child permission prompts
+  (via `subagent`) are additionally memoized by the parent per agent + cwd +
+  dialog title, so one "Allow for this session" covers identical repeats
+  from later calls of the same agent (exact-title match only — see subagent
+  README).
 
 Targets: `bash`/`powershell` → `command`; `read`/`write`/`edit`/`ls` → path
 (abs + cwd-relative both tried); `find`/`grep` → `path:pattern` + each part;

@@ -20,6 +20,12 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, formatAgentList } from "./agents.ts";
+import {
+	FORWARDED_SESSION_VALUE,
+	isPermissionSelect,
+	normalizeAgentSegment,
+	normalizePermissionKey,
+} from "./forwarded-permissions.ts";
 import { isFireAndForgetMethod, isForwardedMethod, withQuestionLock } from "./questions.ts";
 import type { DispatchDefaults, ParentUI, RunSingleAgentOptions, SingleResult, SwarmCtx } from "./types.ts";
 import {
@@ -104,6 +110,7 @@ export async function runSingleAgent(
 	const questionTimeoutMs = opts?.questionTimeoutMs;
 	const parentUI = opts?.parentUI as ParentUI | undefined;
 	const labelPrefix = opts?.labelPrefix;
+	const forwardedPermissions = opts?.forwardedPermissions;
 	const setupFailed = (stderr: string): SingleResult => ({
 		agent: agentName,
 		agentSource: "unknown",
@@ -329,6 +336,25 @@ export async function runSingleAgent(
 						safeWriteStdin(proc, method === "confirm" ? { type: "extension_ui_response", id, confirmed: false } : { type: "extension_ui_response", id, cancelled: true });
 						return;
 					}
+					// Parent-side session memo: a repeated identical child
+					// permission dialog ("Allow for this session" picked
+					// before) is auto-approved without re-prompting. Keyed
+					// by agent + child cwd + raw child title (titles are
+					// cwd-relative summaries, so the cwd scopes the key;
+					// the agent scopes it per target agent — agent A's
+					// approval never covers agent B. Parallel/swarm label
+					// prefixes are added by the parent at display time and
+					// never enter the key). Check inside the lock so
+					// concurrent workers can't double-prompt.
+					const permissionShaped = isPermissionSelect(req);
+					const permissionKey = permissionShaped
+						? `${normalizeAgentSegment(agentName)}\0${resolvedCwd}\0${normalizePermissionKey(String(req.title ?? ""))}`
+						: null;
+					if (permissionShaped && permissionKey && forwardedPermissions?.get(permissionKey) === "session") {
+						currentResult.stderr += `\n[session-grant (parent): ${permissionKey.slice(0, 120)}]`;
+						safeWriteStdin(proc, { type: "extension_ui_response", id, value: FORWARDED_SESSION_VALUE });
+						return;
+					}
 					const title = `${labelPrefix ? `${labelPrefix} ` : `[${agentName}] `}${String(req.title ?? "Subagent question").slice(0, 300)}`;
 					const ctrl = new AbortController();
 					const onParentAbort = () => ctrl.abort();
@@ -344,6 +370,11 @@ export async function runSingleAgent(
 						if (method === "select") {
 							const options = Array.isArray(req.options) ? req.options.filter((o: unknown) => typeof o === "string").slice(0, 20) : [];
 							const picked = await parentUI.select(title, options, { signal: ctrl.signal });
+							// Only "Allow for this session" is memoized. "Allow
+							// once", Deny, and dismissals re-prompt next time.
+							if (permissionShaped && permissionKey && picked === FORWARDED_SESSION_VALUE) {
+								forwardedPermissions?.setSession(permissionKey);
+							}
 							if (picked === undefined) {
 								safeWriteStdin(proc, { type: "extension_ui_response", id, cancelled: true });
 							} else {

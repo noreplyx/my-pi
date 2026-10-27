@@ -7,6 +7,7 @@
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentScope } from "./agents.ts";
+import type { ForwardedPermissionStore } from "./forwarded-permissions.ts";
 import type { SubagentErrorCode, UsageStats } from "./utils.ts";
 
 export interface SingleResult {
@@ -82,4 +83,10 @@ export interface RunSingleAgentOptions {
 	parentUI?: ParentUI;
 	/** Prefix for parent dialog titles, e.g. "[swarm abc/worker-1]". */
 	labelPrefix?: string;
+	/**
+	 * Parent-side memo for forwarded child permission prompts ("Allow for
+	 * this session" means the main session). When set, identical repeated
+	 * permission dialogs are auto-approved without re-prompting.
+	 */
+	forwardedPermissions?: ForwardedPermissionStore;
 }

@@ -5,6 +5,7 @@ import type { AgentConfig } from "./agents.ts";
 import { runWithRetry, isBudgetExceeded, totalDeadline } from "./resilience.ts";
 import { runSingleAgent } from "./single.ts";
 import type { DispatchDefaults, OnUpdateCallback, ParentUI, SingleResult } from "./types.ts";
+import type { ForwardedPermissionStore } from "./forwarded-permissions.ts";
 import {
 	MAX_CONCURRENCY,
 	RESULT_RUNNING,
@@ -43,6 +44,7 @@ export interface ParallelDeps {
 	onUpdate?: OnUpdateCallback;
 	makeDetails: (results: SingleResult[]) => any;
 	parentUI?: ParentUI;
+	forwardedPermissions?: ForwardedPermissionStore;
 }
 
 function skippedResult(t: ParallelTaskInput, defaultCwd: string, reason: string, code: "aborted" | "budget-exceeded"): SingleResult {
@@ -69,7 +71,7 @@ export async function runParallel(
 	opts: ParallelOptions,
 	deps: ParallelDeps,
 ): Promise<{ results: SingleResult[]; successCount: number; text: string; allFailed: boolean }> {
-	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, parentUI } = deps;
+	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, parentUI, forwardedPermissions } = deps;
 	const deadline = totalDeadline(opts.totalTimeoutMs);
 	const allResults: SingleResult[] = new Array(tasks.length);
 	for (let i = 0; i < tasks.length; i++) {
@@ -134,6 +136,7 @@ export async function runParallel(
 									allowQuestions: t.allowQuestions ?? opts.allowQuestions ?? true,
 									questionTimeoutMs: t.questionTimeoutMs ?? opts.questionTimeoutMs,
 									parentUI,
+									forwardedPermissions,
 									labelPrefix: `[parallel ${t.agent}]`,
 								},
 							),

@@ -134,7 +134,10 @@ describe("runSingleAgent process lifecycle (mocked spawn)", () => {
 		await runSingleAgent(os.tmpdir(), {}, agents, "coder", "x", undefined, undefined, undefined, undefined, makeDetails);
 		expect(lastSpawnOpts?.env?.PI_AGENT_NAME).toBe("coder");
 		expect(lastSpawnOpts?.env?.PI_AGENT_FILE).toBe("/tmp/coder.md");
-		// Session grants are in-memory only (never forwarded); secrets never propagate.
+		// In-child session grants stay in-memory per process and are never
+		// forwarded via env; the parent memoizes forwarded "Allow for this
+		// session" answers per agent + cwd + dialog title instead (see
+		// forwarded-permissions.ts). Secrets never propagate.
 		expect(lastSpawnOpts?.env?.ANTHROPIC_API_KEY).toBeUndefined();
 	});
 

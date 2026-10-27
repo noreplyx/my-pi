@@ -11,6 +11,7 @@ Delegate tasks to specialized agents with isolated context (`pi --mode rpc` chil
 | `single.ts` | `runSingleAgent()` — one isolated `--mode rpc` child + UI forwarding + process-group kill |
 | `ask-user-tool.ts` | `ask_user` tool (frontmatter-gated, child calls `ctx.ui`, parent proxies) |
 | `questions.ts` | Parent-UI bridge: global question mutex, `decideQuestionResponse`, fire-and-forget filter |
+| `forwarded-permissions.ts` | Parent-side memo for forwarded child permission prompts (exact-title session cache) |
 | `parallel.ts` | `runParallel()` — concurrency 4, per-task retry, total budget |
 | `chain.ts` | `runChain()` — sequential `{previous}`, per-step retry, `onError` |
 | `swarm-orchestrator.ts` | `runSwarm()`, `validateWorkers()`, `resumeMissingWorkers()` |
@@ -51,6 +52,15 @@ prompts arrive as `extension_ui_request` on stdout; the parent forwards
   Dry-run with `/permissions-check --as-agent <name> …`.
 * `editor` / `custom` are rejected visibly (`[question skipped]` in stderr);
   `notify` / `setStatus` / `setWidget` are mirrored one-way.
+* Forwarded permission sessions: when a child permission prompt
+  (`Allow …?` with the three session choices) is answered with
+  **Allow for this session**, the parent memoizes it per agent + cwd +
+  dialog title for the main session. A repeated identical prompt from a
+  later child of the same agent auto-approves without re-prompting
+  (`[session-grant (parent)]` in stderr). A different agent, cwd, or
+  file/command still prompts. `Allow once`, `Deny`, and dismissals are
+  never memoized (fail-closed). In-memory only, cleared on session
+  shutdown.
 * No-UI parents (`!ctx.hasUI`, e.g. headless) auto-dismiss with a stderr note,
   preserving the old fail-closed behavior.
 

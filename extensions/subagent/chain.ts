@@ -6,6 +6,7 @@ import type { AgentConfig } from "./agents.ts";
 import { isBudgetExceeded, runWithRetry, totalDeadline } from "./resilience.ts";
 import { runSingleAgent } from "./single.ts";
 import type { DispatchDefaults, OnUpdateCallback, ParentUI, SingleResult } from "./types.ts";
+import type { ForwardedPermissionStore } from "./forwarded-permissions.ts";
 import { capPreviousOutput, emptyUsage, getFinalOutput, isFailedResult, substitutePrevious, truncateSingleOutput } from "./utils.ts";
 
 export interface ChainStepInput {
@@ -35,6 +36,7 @@ export interface ChainDeps {
 	onUpdate?: OnUpdateCallback;
 	makeDetails: (results: SingleResult[]) => any;
 	parentUI?: ParentUI;
+	forwardedPermissions?: ForwardedPermissionStore;
 }
 
 function getResultOutput(result: SingleResult): string {
@@ -49,7 +51,7 @@ export async function runChain(
 	opts: ChainOptions,
 	deps: ChainDeps,
 ): Promise<{ results: SingleResult[]; text: string; isError: boolean }> {
-	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, parentUI } = deps;
+	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, parentUI, forwardedPermissions } = deps;
 	const onError = opts.onError ?? "abort";
 	const deadline = totalDeadline(opts.totalTimeoutMs);
 	const results: SingleResult[] = [];
@@ -110,6 +112,7 @@ export async function runChain(
 								allowQuestions: step.allowQuestions ?? opts.allowQuestions ?? true,
 								questionTimeoutMs: step.questionTimeoutMs ?? opts.questionTimeoutMs,
 								parentUI,
+								forwardedPermissions,
 								labelPrefix: `[chain ${i + 1}/${steps.length} ${step.agent}]`,
 							},
 						),
