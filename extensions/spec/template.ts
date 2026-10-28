@@ -78,18 +78,18 @@ export function todayISO(): string {
 	return new Date().toISOString().slice(0, 10);
 }
 
-const FLOWCHART_STUB = `flowchart TD
+export const FLOWCHART_STUB = `flowchart TD
     A[Request] --> B{Validate}
     B -->|ok| C[Execute]
     B -->|fail| D[Reject]
     C --> E[Respond]`;
 
-const ER_STUB = `erDiagram
+export const ER_STUB = `erDiagram
     SPEC ||--o{ SECTION : contains
     SECTION ||--o{ TEST-CASE : verified-by
     SPEC ||--o{ CITATION : references`;
 
-const USECASE_STUB = `flowchart LR
+export const USECASE_STUB = `flowchart LR
     User((User)) --> UC1[Create spec]
     User --> UC2[Read spec]
     User --> UC3[Edit spec]
@@ -99,8 +99,21 @@ const USECASE_STUB = `flowchart LR
     UC3 -.-> SYS
     UC4 -.-> SYS`;
 
+export const STUB_DIAGRAMS: readonly string[] = [FLOWCHART_STUB, ER_STUB, USECASE_STUB];
+
+function normalizeDiagramBlock(block: string): string {
+	return (block ?? "").trim().replace(/\s+/g, " ");
+}
+
+/** True when a raw ```mermaid block body (as extracted by mermaidBlocks()) is still a template stub. */
+export function isStubDiagram(block: string): boolean {
+	const normalized = normalizeDiagramBlock(block);
+	if (!normalized) return false;
+	return STUB_DIAGRAMS.some((stub) => normalizeDiagramBlock(stub) === normalized);
+}
+
 function escCell(s: string): string {
-	return (s ?? "").replace(/\r?\n/g, "<br>").replace(/\|/g, "\\|").trim();
+	return (s ?? "").replace(/\r/g, "").replace(/\n/g, "<br>").replace(/\|/g, "\\|").trim();
 }
 
 export function buildSpecMarkdown(f: SpecFields): string {

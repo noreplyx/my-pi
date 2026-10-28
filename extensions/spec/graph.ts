@@ -8,12 +8,21 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { slugify } from "./template.ts";
+import { slugify, type SpecKind } from "./template.ts";
+import { validateSpecMarkdown } from "./validate.ts";
 
 export const SPECS_DIR = "specs";
 export const INDEX_FILE = "index.md";
 export const ARCHIVE_DIR = "_archived";
 const MOC_MARKER = "<!-- spec-index:auto -->";
+
+export const MAX_SPEC_FILES = 1000;
+export const MAX_SPEC_FILE_BYTES = 1024 * 1024;
+export const MAX_TITLE_CHARS = 200;
+export const MAX_UPDATED_CHARS = 50;
+
+const VALID_STATUSES = new Set(["draft", "confirmed", "implemented"]);
+const VALID_KINDS = new Set(["http", "non-http", "mixed"]);
 
 export function specsDir(cwd: string): string {
 	return path.join(cwd, SPECS_DIR);
@@ -45,6 +54,8 @@ export interface SpecEntry {
 	status: string;
 	kind: string;
 	updated: string;
+	validity: "valid" | "invalid";
+	missing?: string[];
 }
 
 function parseFrontmatter(md: string): Record<string, string> {
@@ -69,23 +80,96 @@ function titleOf(md: string, fallback: string): string {
 	return m ? m[1].trim() : fallback;
 }
 
+function normalizeStatus(raw: unknown): string {
+	const v = String(raw ?? "").trim().toLowerCase();
+	return VALID_STATUSES.has(v) ? v : "draft";
+}
+
+function normalizeKind(raw: unknown): SpecKind {
+	const v = String(raw ?? "").trim().toLowerCase();
+	return (VALID_KINDS.has(v) ? v : "mixed") as SpecKind;
+}
+
+function sanitizeTitle(raw: string): string {
+	return raw.replace(/[\r\n]+/g, " ").trim().slice(0, MAX_TITLE_CHARS);
+}
+
+function sanitizeUpdated(raw: string): string {
+	return raw.replace(/[\r\n]+/g, " ").trim().slice(0, MAX_UPDATED_CHARS);
+}
+
+/** Escape a value for embedding in the MOC markdown table. */
+function escapeMocCell(value: string): string {
+	return (value ?? "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/\|/g, "\\|")
+		.replace(/[\r\n]+/g, " ");
+}
+
 export function listSpecs(cwd: string): SpecEntry[] {
 	const dir = specsDir(cwd);
-	if (!fs.existsSync(dir)) return [];
+	try {
+		const dst = fs.lstatSync(dir);
+		if (dst.isSymbolicLink()) return [];
+		if (!dst.isDirectory()) return [];
+	} catch {
+		return [];
+	}
+	let files: string[];
+	try {
+		files = fs.readdirSync(dir);
+	} catch {
+		return [];
+	}
+	files.sort();
+	if (files.length > MAX_SPEC_FILES) files = files.slice(0, MAX_SPEC_FILES);
 	const entries: SpecEntry[] = [];
-	for (const f of fs.readdirSync(dir)) {
-		if (!f.endsWith(".md") || f === INDEX_FILE) continue;
-		const full = path.join(dir, f);
-		if (!fs.statSync(full).isFile()) continue;
-		const md = fs.readFileSync(full, "utf8");
-		const fm = parseFrontmatter(md);
+	for (const f of files) {
+		if (f === INDEX_FILE || f === ARCHIVE_DIR) continue;
+		if (!f.endsWith(".md")) continue;
 		const slug = f.slice(0, -3);
+		if (!slug) continue;
+		const full = path.join(dir, slug + ".md");
+		let st: fs.Stats;
+		try {
+			const lst = fs.lstatSync(full);
+			if (lst.isSymbolicLink()) continue;
+			if (!lst.isFile()) continue;
+			st = lst;
+		} catch {
+			continue;
+		}
+		if (st.size > MAX_SPEC_FILE_BYTES) {
+			entries.push({
+				slug,
+				title: sanitizeTitle(slug),
+				status: "draft",
+				kind: "mixed",
+				updated: "",
+				validity: "invalid",
+				missing: [`oversize: file exceeds 1MB (${st.size} bytes, skipped)`],
+			});
+			continue;
+		}
+		let md: string;
+		try {
+			md = fs.readFileSync(full, "utf8");
+		} catch {
+			continue;
+		}
+		const fm = parseFrontmatter(md);
+		const kind = normalizeKind(fm.kind);
+		const v = validateSpecMarkdown(md, kind);
 		entries.push({
 			slug,
-			title: titleOf(md, slug),
-			status: fm.status || "draft",
-			kind: fm.kind || "mixed",
-			updated: fm.updated || "",
+			title: sanitizeTitle(titleOf(md, slug)),
+			status: normalizeStatus(fm.status),
+			kind,
+			updated: sanitizeUpdated(fm.updated || ""),
+			validity: v.ok ? "valid" : "invalid",
+			...(v.ok ? {} : { missing: v.missing }),
 		});
 	}
 	return entries.sort((a, b) => a.slug.localeCompare(b.slug));
@@ -107,8 +191,11 @@ export function rebuildIndex(cwd: string): string {
 		}
 	}
 
+	const validCount = specs.filter((s) => s.validity === "valid").length;
+	const invalidCount = specs.length - validCount;
 	const rows = specs.map(
-		(s) => `| [[${s.slug}]] | ${s.title} | ${s.status} | ${s.kind} | ${s.updated} |`,
+		(s) =>
+			`| [[${escapeMocCell(s.slug)}]] | ${escapeMocCell(s.title)} | ${escapeMocCell(s.status)} | ${escapeMocCell(s.kind)} | ${escapeMocCell(s.updated)} | ${s.validity} |`,
 	);
 	const graphLinks = specs.map((s) => `[[${s.slug}]]`).join(" · ");
 
@@ -117,9 +204,11 @@ ${MOC_MARKER}
 
 ## Specs (${specs.length})
 
-| Spec | Title | Status | Kind | Updated |
-|---|---|---|---|---|
-${rows.join("\n") || "| _(none yet)_ | | | | |"}
+Specs ${specs.length} — ${validCount} valid / ${invalidCount} invalid
+
+| Spec | Title | Status | Kind | Updated | Valid |
+|---|---|---|---|---|---|
+${rows.join("\n") || "| _(none yet)_ | | | | | |"}
 
 ## Graph
 

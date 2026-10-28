@@ -35,10 +35,96 @@ const FIXED_SECTIONS = new Set([
 	"related",
 ]);
 
+export const MAX_SPEC_MD_CHARS = 1_000_000;
+export const MAX_MERMAID_BLOCK_CHARS = 20_000;
+
+/**
+ * Pure-JS mermaid sanity check (no exec, no child_process/eval).
+ * Returns a list of human-readable issues; empty means the block looks OK.
+ * All patterns are anchored/simple literals and inputs are length-capped
+ * to stay ReDoS- and timeout-safe.
+ */
+export function validateMermaidSyntax(block: string): string[] {
+	const issues: string[] = [];
+	if (typeof block !== "string" || !block.trim()) {
+		return ["mermaid block is empty"];
+	}
+	if (block.length > MAX_MERMAID_BLOCK_CHARS) {
+		return [`mermaid block exceeds ${MAX_MERMAID_BLOCK_CHARS} chars (${block.length})`];
+	}
+	// Balanced []{}() — single O(n) scan, quotes skipped so labels like
+	// A["[x]"] don't false-positive. No regex, no backtracking.
+	const pairs: Record<string, string> = { "]": "[", "}": "{", ")": "(" };
+	const stack: string[] = [];
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < block.length; i++) {
+		const c = block[i];
+		if (c === "\"" && !inSingle) inDouble = !inDouble;
+		else if (c === "'" && !inDouble) inSingle = !inSingle;
+		if (inSingle || inDouble) continue;
+		// ER crow's-foot cardinality (o{ and }o) is an operator, not a bracket.
+		if (c === "{" && block[i - 1] === "o") continue;
+		if (c === "}" && block[i + 1] === "o") continue;
+		if (c === "[" || c === "{" || c === "(") stack.push(c);
+		else if (c === "]" || c === "}" || c === ")") {
+			const want = pairs[c];
+			if (stack.length === 0 || stack[stack.length - 1] !== want) {
+				issues.push(`unbalanced brackets: unexpected '${c}'`);
+			break;
+		}
+			stack.pop();
+		}
+	}
+	if (stack.length > 0 && !issues.length) {
+		issues.push(`unbalanced brackets: unclosed '${stack[stack.length - 1]}'`);
+	}
+
+	// Diagram-type checks on a length-capped, anchored slice (no .* scans).
+	const head = block.slice(0, 200).trim();
+	const firstLine = head.split("\n", 1)[0] ?? "";
+	const isFlowHeader = /^\s*(?:flowchart|graph)\s+(TD|LR|TB|BT)\b/i.test(firstLine);
+	const hasFlowKeyword = /^\s*(?:flowchart|graph)\b/i.test(firstLine);
+	const isER = /^\s*erDiagram\b/i.test(head);
+	const isUsecase = /actor/i.test(block.slice(0, MAX_MERMAID_BLOCK_CHARS))
+		|| /usecase/i.test(head)
+		|| /use-case/i.test(head)
+		|| /UC\d/.test(head)
+		|| /\(\(/.test(head);
+
+	if (hasFlowKeyword && !isFlowHeader) {
+		issues.push("flowchart/graph missing direction (expected TD|LR|TB|BT)");
+	}
+	if (isFlowHeader) {
+		const hasEdge = /-->/.test(block)
+			|| /--/.test(block)
+			|| /\|[^|\n]{1,64}\|/.test(block);
+		if (!hasEdge) issues.push("flowchart/graph has no edge (expected --> or -- or |label|)");
+	}
+	if (isER) {
+		const hasRelation = /\|\|/.test(block) || /\}o/.test(block) || /o\{/.test(block);
+		const hasLink = /--/.test(block);
+		const hasLabelColon = /:/.test(block);
+		if (!hasRelation || !hasLink || !hasLabelColon) {
+			issues.push("erDiagram has no relation (expected ||--o{ style with colon label)");
+		}
+	}
+	if (isUsecase) {
+		if (!/actor/i.test(block) && !/\(\(/.test(block) && !/User/i.test(block)) {
+			issues.push("usecase diagram missing actor");
+		}
+		if (!/-->/.test(block)) {
+			issues.push("usecase diagram missing edge (expected --> from actor)");
+		}
+	}
+	return issues;
+}
+
 function headings(md: string): { level: number; text: string }[] {
 	const out: { level: number; text: string }[] = [];
 	for (const line of md.split("\n")) {
-		const m = /^(#{1,3})\s+(.+?)\s*$/.exec(line.trim());
+		if (line.length > 2000) continue;
+		const m = /^(#{1,3})\s+(.{1,500})\s*$/.exec(line.trim());
 		if (m) out.push({ level: m[1].length, text: m[2].trim() });
 	}
 	return out;
@@ -69,15 +155,26 @@ function hasTableWith(body: string, needles: string[]): boolean {
 
 function mermaidBlocks(md: string): string[] {
 	const blocks: string[] = [];
-	const re = /```mermaid\s*\n([\s\S]*?)```/gi;
+	const re = /```mermaid\s*\n([\s\S]{0,20000}?)```/gi;
 	let m: RegExpExecArray | null;
-	while ((m = re.exec(md)) !== null) blocks.push(m[1]);
+	let guard = 0;
+	while ((m = re.exec(md)) !== null && guard++ < 50) blocks.push(m[1]);
 	return blocks;
 }
 
 export function validateSpecMarkdown(md: string, kind: SpecKind = "mixed"): ValidationResult {
 	const missing: string[] = [];
 	const warnings: string[] = [];
+	if (typeof md !== "string" || !md.trim()) {
+		return { ok: false, missing: ["spec is empty"], warnings };
+	}
+	if (md.length > MAX_SPEC_MD_CHARS) {
+		return {
+			ok: false,
+			missing: [`spec exceeds ${MAX_SPEC_MD_CHARS} chars (${md.length})`],
+			warnings,
+		};
+	}
 	const hs = headings(md);
 	const h2 = hs.filter((h) => h.level === 2).map((h) => h.text.toLowerCase());
 
@@ -112,6 +209,11 @@ export function validateSpecMarkdown(md: string, kind: SpecKind = "mixed"): Vali
 		if (!hasFlow) missing.push("flow diagram: flowchart (```mermaid flowchart TD/LR)");
 		if (!hasER) missing.push("flow diagram: ER (```mermaid erDiagram)");
 		if (!hasUse) missing.push("flow diagram: usecase (mermaid with actor/usecase)");
+		blocks.forEach((b, i) => {
+			for (const issue of validateMermaidSyntax(b)) {
+			missing.push(`mermaid block #${i + 1}: ${issue}`);
+		}
+		});
 	}
 
 	const tests = sectionBody(md, "Test Cases");
@@ -141,11 +243,17 @@ export function validateSpecMarkdown(md: string, kind: SpecKind = "mixed"): Vali
 	if (!cit.trim() || /_\(optional\)_/i.test(cit)) {
 		warnings.push("citations empty (optional but recommended)");
 	}
-	if (!/\[\[.+?\]\]/.test(md)) {
+	if (!/\[\[[^\n\]]{1,200}\]\]/.test(md)) {
 		warnings.push("no [[wikilinks]] — Obsidian graph will not connect this spec");
 	}
-	if (/_TODO_/i.test(md)) {
-		warnings.push("contains _TODO_ placeholders");
+	if (/_TODO_/i.test(md.slice(0, MAX_SPEC_MD_CHARS))) {
+		missing.push("contains _TODO_ placeholders (unresolved)");
+	}
+	if (/AKIA[0-9A-Z]{16}/.test(md)) {
+		warnings.push("possible AWS access key detected (AKIA…) — remove secrets before committing");
+	}
+	if (/BEGIN PRIVATE KEY/.test(md)) {
+		warnings.push("possible private key block detected — remove secrets before committing");
 	}
 
 	return { ok: missing.length === 0, missing, warnings };
