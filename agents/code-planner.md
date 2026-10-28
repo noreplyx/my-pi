@@ -7,6 +7,7 @@ permissions:
   rules:
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
     - { tool: bash, match: "re:^git\\s+(status|diff|log|show)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^dotnet\\s+((build|test|run|clean|restore|format|vstest|list)\\b|--(info|version|help)\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: read, action: allow }
     - { tool: grep, action: allow }
 ---

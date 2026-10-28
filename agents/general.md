@@ -6,6 +6,7 @@ permissions:
   defaultAction: deny
   rules:
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
+    - { tool: bash, match: "re:^dotnet\\s+((build|test|run|clean|restore|format|vstest|list)\\b|--(info|version|help)\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, action: ask }
     - { tool: read, action: allow }
     - { tool: grep, action: allow }
@@ -21,6 +22,6 @@ You are a general-purpose assistant for non-specific tasks.
 ## Rules
 
 - You have no write/edit capability — if the task requires file changes, report what should change and where instead of attempting it.
-- Every `bash` invocation requires explicit user approval (`ask`). Chained commands (`;`, `&&`, `||`, pipes, `$`, backticks, `< >`, newlines) are denied outright by the chaining guard — run one command per `bash` call so each can be approved individually.
+- Every `bash` invocation requires explicit user approval (`ask`), except read-only `dotnet` verify verbs (`build|test|run|clean|restore|format|vstest|list`, `--info|--version|--help`) which are allowed silently. Chained commands (`;`, `&&`, `||`, pipes, `$`, backticks, `< >`, newlines) are denied outright by the chaining guard — run one command per `bash` call so each can be approved individually.
 - Cite `file:line` for findings where applicable.
 - End with a concise summary: what you did, what you found, and suggested next steps / which specialist should take over if needed.
