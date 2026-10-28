@@ -21,11 +21,14 @@ import type { Message } from "@earendil-works/pi-ai";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, formatAgentList } from "./agents.ts";
 import {
+	FORWARDED_SESSION_CHOICES,
 	FORWARDED_SESSION_VALUE,
+	isPermissionConfirm,
 	isPermissionSelect,
 	normalizeAgentSegment,
 	normalizePermissionKey,
 } from "./forwarded-permissions.ts";
+import { AUTO_APPROVE_ENV, isAutoApproveEnabled } from "../auto-approve/state.ts";
 import { isFireAndForgetMethod, isForwardedMethod, withQuestionLock } from "./questions.ts";
 import type { DispatchDefaults, ParentUI, RunSingleAgentOptions, SingleResult, SwarmCtx } from "./types.ts";
 import {
@@ -251,6 +254,13 @@ export async function runSingleAgent(
 				PI_AGENT_NAME: agent.name,
 				PI_AGENT_FILE: agent.filePath,
 			};
+			// Auto-approve inheritance: the child boots a fresh runtime whose
+			// in-memory toggle defaults OFF — pass it explicitly so delegated
+			// work doesn't re-prompt. Deny rules still block in the child.
+			// Grandchildren inherit transitively (child re-propagates from
+			// its own enabled state). Explicit per-spawn extra, never a
+			// blanket env passthrough (repo-controlled config can't set it).
+			if (isAutoApproveEnabled()) childExtra[AUTO_APPROVE_ENV] = "1";
 			if (swarmCtx) {
 				childExtra[SWARM_ENV_DIR] = swarmCtx.swarmDir;
 				childExtra[SWARM_ENV_RUN] = swarmCtx.runId;
@@ -319,6 +329,25 @@ export async function runSingleAgent(
 				if (!isForwardedMethod(method)) {
 					currentResult.stderr += `\n[question skipped: unsupported method "${method}"]`;
 					safeWriteStdin(proc, { type: "extension_ui_response", id, cancelled: true });
+					return;
+				}
+				// Parent-side auto-approve (defense in depth alongside the
+				// PI_AUTO_APPROVE env above): a permission dialog forwarded
+				// by a child that didn't inherit the toggle (stale code,
+				// missed spawn path) is approved here without prompting.
+				// Scoped to permission-shaped requests only — ask_user
+				// questions still respect allowQuestions/hasUI below.
+				// Replies "Allow once" (FORWARDED_SESSION_CHOICES[0]) so
+				// nothing is memoized; each prompt is approved individually
+				// by the toggle. Child-side deny never reaches us (the
+				// child enforces deny itself and never forwards it).
+				if (isAutoApproveEnabled() && (isPermissionSelect(req) || isPermissionConfirm(req))) {
+					currentResult.stderr += `\n[auto-approve (parent): ${String(req.title ?? method).slice(0, 120)}]`;
+					if (method === "confirm") {
+						safeWriteStdin(proc, { type: "extension_ui_response", id, confirmed: true });
+					} else {
+						safeWriteStdin(proc, { type: "extension_ui_response", id, value: FORWARDED_SESSION_CHOICES[0] });
+					}
 					return;
 				}
 				if (!allowQuestions || !parentUI?.hasUI) {

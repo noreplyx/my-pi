@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import * as realChildProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as os from "node:os";
+import { clearAutoApprove, setAutoApprove } from "../auto-approve/state.ts";
 
 interface FakeProc extends EventEmitter {
 	stdout: EventEmitter;
@@ -174,5 +175,107 @@ describe("runSingleAgent process lifecycle (mocked spawn)", () => {
 		expect(names).toEqual(["coder", "impl"]);
 		const files = allSpawnEnvs.map((e) => e?.PI_AGENT_FILE).sort();
 		expect(files).toEqual(["/tmp/coder.md", "/tmp/impl.md"]);
+	});
+
+	test("child inherits PI_AUTO_APPROVE only when parent toggle is ON", async () => {
+		behavior = (proc) => {
+			proc.stdout.emit("data", msgLine("hi"));
+			setTimeout(() => proc.emit("close", 0), 5);
+		};
+		try {
+			setAutoApprove(true);
+			lastSpawnOpts = null;
+			await runSingleAgent(os.tmpdir(), {}, agents, "coder", "x", undefined, undefined, undefined, undefined, makeDetails);
+			expect(lastSpawnOpts?.env?.PI_AUTO_APPROVE).toBe("1");
+		} finally {
+			clearAutoApprove();
+		}
+		lastSpawnOpts = null;
+		await runSingleAgent(os.tmpdir(), {}, agents, "coder", "x", undefined, undefined, undefined, undefined, makeDetails);
+		expect(lastSpawnOpts?.env?.PI_AUTO_APPROVE).toBeUndefined();
+	});
+
+	test("parent auto-approves forwarded permission dialogs without prompting", async () => {
+		const uiRequestLine = (method: string, extra: Record<string, unknown> = {}) =>
+			JSON.stringify({
+				type: "extension_ui_request",
+				id: `req-${method}`,
+				method,
+				title: "Allow bash npm test?",
+				options: ["Allow once", "Allow for this session", "Deny"],
+				...extra,
+			}) + "\n";
+		const explodingUI = {
+			hasUI: true,
+			select: () => {
+				throw new Error("parent select must not be called when auto-approve is ON");
+			},
+			confirm: () => {
+				throw new Error("parent confirm must not be called when auto-approve is ON");
+			},
+			input: () => {
+				throw new Error("parent input must not be called when auto-approve is ON");
+			},
+			notify: () => {},
+		};
+		try {
+			setAutoApprove(true);
+			// select-shaped permission dialog
+			behavior = (proc) => {
+				proc.stdout.emit("data", uiRequestLine("select"));
+				setTimeout(() => proc.emit("close", 0), 5);
+			};
+			const rSelect = await runSingleAgent(os.tmpdir(), {}, agents, "coder", "x", undefined, undefined, undefined, undefined, makeDetails, undefined, {
+				parentUI: explodingUI,
+			} as any);
+			expect(rSelect.stderr).toContain("[auto-approve (parent):");
+			// legacy confirm-fallback permission dialog
+			behavior = (proc) => {
+				proc.stdout.emit("data", uiRequestLine("confirm"));
+				setTimeout(() => proc.emit("close", 0), 5);
+			};
+			const rConfirm = await runSingleAgent(os.tmpdir(), {}, agents, "coder", "x", undefined, undefined, undefined, undefined, makeDetails, undefined, {
+				parentUI: explodingUI,
+			} as any);
+			expect(rConfirm.stderr).toContain("[auto-approve (parent):");
+		} finally {
+			clearAutoApprove();
+		}
+	});
+
+	test("non-permission questions still reach parent UI when auto-approve is ON", async () => {
+		let selectCalls = 0;
+		const parentUI = {
+			hasUI: true,
+			select: () => {
+				selectCalls++;
+				return Promise.resolve(undefined);
+			},
+			confirm: () => Promise.resolve(false),
+			input: () => Promise.resolve(undefined),
+			notify: () => {},
+		};
+		try {
+			setAutoApprove(true);
+			behavior = (proc) => {
+				proc.stdout.emit(
+					"data",
+					JSON.stringify({
+						type: "extension_ui_request",
+						id: "req-ask",
+						method: "select",
+						title: "Pick a color",
+						options: ["red", "green"],
+					}) + "\n",
+				);
+				setTimeout(() => proc.emit("close", 0), 5);
+			};
+			await runSingleAgent(os.tmpdir(), {}, agents, "coder", "x", undefined, undefined, undefined, undefined, makeDetails, undefined, {
+				parentUI,
+			} as any);
+			expect(selectCalls).toBe(1);
+		} finally {
+			clearAutoApprove();
+		}
 	});
 });

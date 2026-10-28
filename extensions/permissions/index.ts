@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { getAgentDir, withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildTargets, describeCall, describeStatus, evaluate, loadAllAgentFiles, reloadAll, resolveGrantDir, resolveGrantPath, warnStalePermissionsFileEnv } from "./loader.ts";
 import { matchToolName } from "./matcher.ts";
+import { isAutoApproveEnabled } from "../auto-approve/state.ts";
 import { createSessionGrants, SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICES } from "./session-grants.ts";
 import { collectDiagnostics, formatStartupReport, type Diagnostic, type FileReport } from "./validate.ts";
 
@@ -165,6 +166,13 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// action === "ask"
+		// Auto-approve (session-only toggle): ask prompts auto-allow without
+		// a dialog. Deny already returned above — this never bypasses deny.
+		// Audited like any other allow so the log stays complete.
+		if (isAutoApproveEnabled()) {
+			void audit("allow", event.toolName, result.target, `via=auto-approve ${where}${chainInfo}`);
+			return undefined;
+		}
 		// 1. Session grant hit — exact tool + target, or (file tools) a
 		//    directory grant covering this call's directory (recursive down,
 		//    never up: a child grant does not cover the parent).
@@ -239,6 +247,7 @@ export default function (pi: ExtensionAPI) {
 			const s = describeStatus(ctx.cwd);
 			const lines = [
 				`Agent: ${s.agentName ?? "(none)"}${s.agentFile ? ` @ ${s.agentFile}` : ""}${s.agentExists ? ` (${s.agentRuleCount} rules${s.agentDefault ? `, default=${s.agentDefault}` : ", no default — falls back to ask"})` : " (missing — all-default ask)"}`,
+				`Auto-approve: ${isAutoApproveEnabled() ? "ON (ask→allow, deny still blocks)" : "OFF"} (/auto-approve on|off|status)`,
 				...s.agentErrors.map((e) => `  ! ${e}`),
 				`Targets: bash→command, read/write/edit/ls→path, find/grep→path:pattern, other→JSON args.`,
 			];
@@ -347,6 +356,7 @@ export default function (pi: ExtensionAPI) {
 						...(r.rule ? [`rule: tool="${r.rule.tool}" match=${JSON.stringify(r.rule.match ?? "(any)")}`] : []),
 						...(r.segmentCount && r.segmentCount > 1 && r.segment ? [`segment: ${preview(r.segment, 200)}`] : []),
 						`target: ${preview(targets[0] ?? "", 500)}`,
+						...(r.action === "ask" && isAutoApproveEnabled() ? [`runtime: auto-approve ON — would allow (deny still blocks)`] : []),
 					].join("\n"),
 					"info",
 				);
