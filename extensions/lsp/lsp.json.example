@@ -1,0 +1,24 @@
+{
+	"autoStart": false,
+	"servers": {
+		"csharp": {
+			"command": "csharp-language-server",
+			"args": [],
+			"rootMarkers": ["*.sln", "*.csproj", "global.json"],
+			"enabled": true
+		},
+		"_comment_csharp_alternative": "Alternative: OmniSharp — use { \"command\": \"OmniSharp\", \"args\": [\"-lsp\"] } (download from https://github.com/OmniSharp/omnisharp-roslyn/releases)",
+		"python": {
+			"command": "pylsp",
+			"args": [],
+			"rootMarkers": ["pyproject.toml", "requirements.txt", "setup.py", ".git"],
+			"enabled": true
+		},
+		"typescript": {
+			"command": "typescript-language-server",
+			"args": ["--stdio"],
+			"rootMarkers": ["tsconfig.json", "package.json", "jsconfig.json"],
+			"enabled": true
+		}
+	}
+}

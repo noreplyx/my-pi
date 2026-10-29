@@ -1,6 +1,6 @@
 ---
-name: code-tester
-description: "Designs unit/integration/e2e test cases with diffs and examples. Read-only, touches no files."
+name: code-test-designer
+description: "Designs test cases (read-only, never implements) - distinct from code-test-implementor which writes test files"
 tools: [read, grep, bash]
 permissions:
   defaultAction: deny

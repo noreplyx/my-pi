@@ -237,8 +237,8 @@ describe("agent-switch", () => {
 		const { handlers, commands } = load();
 		const { ctx } = makeCtx();
 		await handlers.get("session_start")({ type: "session_start", reason: "startup" }, ctx);
-		await commands.get("agent").handler("code-tester", ctx);
-		expect(process.env.PI_AGENT_NAME).toBe("code-tester");
+		await commands.get("agent").handler("code-test-designer", ctx);
+		expect(process.env.PI_AGENT_NAME).toBe("code-test-designer");
 		await handlers.get("session_shutdown")({ type: "session_shutdown" }, ctx);
 		expect(process.env.PI_AGENT_NAME).toBeUndefined();
 	});
