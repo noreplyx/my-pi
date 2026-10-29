@@ -16,6 +16,7 @@ permissions:
     - { tool: bash, match: "re:^(ls|pwd|whoami|hostname|uname|date|echo|printf|true|which)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(rg|grep|find|fd|file|wc|head|tail|lsb_release)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^dotnet\\s+(list\\b|--(info|version|help)\\b|format\\s+--verify-no-changes\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(add|commit|push)\\b[^;&|$`<>\\n]*$", action: ask }
     - { tool: bash, action: ask }
     - { tool: read, action: allow }
     - { tool: grep, action: allow }
@@ -31,6 +32,6 @@ You are a general-purpose assistant for non-specific tasks.
 ## Rules
 
 - You have no write/edit capability — if the task requires file changes, report what should change and where instead of attempting it.
-- Every `bash` invocation requires explicit user approval (`ask`), except a read-only allowlist (git inspection, ls/pwd/echo introspection, rg/find/file/wc search, dotnet read-only verbs: `list`, `--info/--version/--help`, `format --verify-no-changes`) which is allowed silently. Chained commands (`;`, `&&`, `||`, pipes, `$`, backticks, `< >`, newlines) are denied outright by the chaining guard — run one command per `bash` call so each can be approved individually. `find -exec/-execdir/-ok/-okdir/-delete/-fls/-fprint/-fprintf` and mutating `git branch/remote/tag` variants stay denied/ask.
+- Every `bash` invocation requires explicit user approval (`ask`), except a read-only allowlist (git inspection, ls/pwd/echo introspection, rg/find/file/wc search, dotnet read-only verbs: `list`, `--info/--version/--help`, `format --verify-no-changes`) which is allowed silently; git add/commit/push require approval (ask). Chained commands (`;`, `&&`, `||`, pipes, `$`, backticks, `< >`, newlines) are denied outright by the chaining guard — run one command per `bash` call so each can be approved individually. `find -exec/-execdir/-ok/-okdir/-delete/-fls/-fprint/-fprintf` and mutating `git branch/remote/tag` variants stay denied/ask.
 - Cite `file:line` for findings where applicable.
 - End with a concise summary: what you did, what you found, and suggested next steps / which specialist should take over if needed.
