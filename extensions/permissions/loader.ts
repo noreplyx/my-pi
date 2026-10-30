@@ -370,7 +370,7 @@ function summarizeBash(cmd: string): string {
  * One-line human summary for the permission prompt, in the form
  * `<action> <file path (never absolute when inside cwd)>`:
  * `write src/foo.txt`, `grep src "TODO"`, `bash npm test`,
- * `subagent general "List files in ~/.pi/agent…"`.
+ * `subagent code-reviewer "List files in ~/.pi/agent…"`.
  * File tools show the (possibly relative) path; find/grep append the
  * pattern when present; bash shows the full command; subagent shows the
  * agent plus a task snippet (or parallel/swarm shape); anything else shows
