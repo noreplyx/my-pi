@@ -2,7 +2,7 @@
  * Resilience helpers: retry with backoff + total-budget deadline checks.
  *
  * Pure and unit-testable (no pi runtime imports). The orchestrators
- * (parallel/chain/swarm) use runWithRetry to get the agreed default:
+ * (parallel/swarm) use runWithRetry to get the agreed default:
  * retry once on any failure.
  */
 import type { SubagentErrorCode } from "./utils.ts";
@@ -72,8 +72,7 @@ export function totalDeadline(totalTimeoutMs: number | undefined, now = Date.now
 }
 
 /** Recommended total budget when the caller did not set one (docs only, not applied). */
-export function recommendedTotalTimeout(perTaskMs: number[], mode: "chain" | "parallel" | "swarm"): number {
+export function recommendedTotalTimeout(perTaskMs: number[], mode: "parallel" | "swarm"): number {
 	if (perTaskMs.length === 0) return 300000;
-	if (mode === "chain") return perTaskMs.reduce((a, b) => a + b, 0);
 	return Math.max(...perTaskMs) + 60000;
 }

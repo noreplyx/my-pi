@@ -26,9 +26,8 @@ describe("validateSubagentFormat", () => {
 		expect(r.error).toContain('requires both "agent" and "task"');
 	});
 
-	test("non-array tasks/chain, non-object swarm → errors", () => {
+	test("non-array tasks, non-object swarm → errors", () => {
 		expect(validateSubagentFormat({ tasks: "x" } as any, agents, avail).error).toContain('"tasks" must be an array');
-		expect(validateSubagentFormat({ chain: "x" } as any, agents, avail).error).toContain('"chain" must be an array');
 		expect(validateSubagentFormat({ swarm: "x" } as any, agents, avail).error).toContain('"swarm" must be an object');
 		expect(
 			validateSubagentFormat({ swarm: { goal: "g", workers: "x" } } as any, agents, avail).error,
@@ -63,13 +62,6 @@ describe("validateSubagentFormat", () => {
 			avail,
 		);
 		expect(r.error).toContain('Unknown agent: "ghost" in parallel tasks');
-	});
-
-	test("chain unknown agent + empty step task", () => {
-		const badAgent = validateSubagentFormat({ chain: [{ agent: "ghost", task: "a" }] }, agents, avail);
-		expect(badAgent.error).toContain('Unknown agent: "ghost" in chain steps');
-		const emptyTask = validateSubagentFormat({ chain: [{ agent: "coder", task: "" }] }, agents, avail);
-		expect(emptyTask.error).toContain("chain step 1");
 	});
 
 	test("invalid timeoutMs flagged with isError", () => {
@@ -128,11 +120,13 @@ describe("validateSubagentFormat", () => {
 		expect(r.error).toContain('Invalid onError');
 	});
 
-	test("valid parallel / chain / swarm pass", () => {
+	test("valid parallel / swarm pass", () => {
 		expect(
 			validateSubagentFormat({ tasks: [{ agent: "coder", task: "a" }, { agent: "reviewer", task: "b" }] }, agents, avail),
 		).toEqual({ mode: "parallel" });
-		expect(validateSubagentFormat({ chain: [{ agent: "coder", task: "a" }] }, agents, avail)).toEqual({ mode: "chain" });
+		expect(validateSubagentFormat({ chain: [{ agent: "coder", task: "a" }] } as any, agents, avail).error).toContain(
+			"exactly one mode",
+		);
 		expect(
 			validateSubagentFormat(
 				{ swarm: { goal: "g", workers: [{ id: "a", agent: "coder", task: "t" }], merger: { agent: "reviewer", task: "m {previous}" } } },

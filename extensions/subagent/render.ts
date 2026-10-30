@@ -2,7 +2,7 @@
  * Shared rendering primitives for the subagent TUI.
  *
  * Single implementation of: tool-call preview, result badges, wall-time
- * totals, and display-item truncation — used by all four mode renderers
+ * totals, and display-item truncation — used by all mode renderers
  * in index.ts so collapsed/expanded output stays consistent.
  */
 import * as os from "node:os";
@@ -102,9 +102,8 @@ export function getResultOutput(result: SingleResult): string {
 
 /** Truncate a task preview for renderCall (single shared implementation). */
 export function truncatePreview(text: string, max = 60): string {
-	const clean = text.replace(/\{previous\}/g, "").trim();
-	if (!text.includes("{previous}") && text.length <= max) return text;
-	return clean.length > max ? `${clean.slice(0, max)}...` : clean || text.slice(0, max);
+	if (text.length <= max) return text;
+	return `${text.slice(0, max)}...`;
 }
 
 /** `[errorCode]` + `⏱ duration` badges shared by every renderer. */
@@ -118,25 +117,21 @@ export function resultBadges(r: SingleResult): { errorBadge: string; durationBad
 
 /**
  * Unified totals line. Wall semantics are explicit and consistent:
- * chain sums step durations, parallel/swarm take the max (concurrent).
+ * parallel/swarm take the max (concurrent).
  */
-export function formatTotals(results: SingleResult[], mode: "single" | "parallel" | "chain" | "swarm"): string {
+export function formatTotals(results: SingleResult[]): string {
 	const usageStr = formatUsageStats(aggregateUsage(results));
-	const wallMs =
-		mode === "chain"
-			? results.reduce((a, r) => a + (r.durationMs || 0), 0)
-			: Math.max(0, ...results.map((r) => r.durationMs || 0));
-	const wallLabel = mode === "chain" ? "wall (sum)" : "wall (max)";
-	const wallStr = wallMs > 0 ? `${wallLabel} ${formatDuration(wallMs)}` : "";
+	const wallMs = Math.max(0, ...results.map((r) => r.durationMs || 0));
+	const wallStr = wallMs > 0 ? `wall (max) ${formatDuration(wallMs)}` : "";
 	return [usageStr, wallStr].filter(Boolean).join(" | ");
 }
 
-export function totalsSuffix(results: SingleResult[], mode: "single" | "parallel" | "chain" | "swarm"): string {
-	const t = formatTotals(results, mode);
+export function totalsSuffix(results: SingleResult[]): string {
+	const t = formatTotals(results);
 	return t ? `Total: ${t}` : "";
 }
 
-/** One-line worker/step row used by chain/parallel/swarm renderers. */
+/** One-line worker row used by parallel/swarm renderers. */
 export function workerRowLabel(r: SingleResult, label: string): { icon: "ok" | "fail" | "running"; text: string } {
 	if (r.exitCode === -1) return { icon: "running", text: `${label} ${r.agent} (running...)` };
 	if (isFailedResult(r)) {

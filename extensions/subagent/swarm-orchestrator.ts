@@ -17,8 +17,7 @@ import {
 	isFailedResult,
 	isValidWorkerId,
 	mapWithConcurrencyLimit,
-	substitutePrevious,
-	capPreviousOutput,
+	truncateToBudget,
 	truncateParallelOutput,
 	truncateSingleOutput,
 	buildMergerInput,
@@ -32,6 +31,24 @@ import {
 	updateManifestStatus,
 	writeManifest,
 } from "./swarm.ts";
+
+/** Budget for merger `{previous}` substitution (packed done/*.md into the merger prompt). */
+const MERGER_TASK_BUDGET = 12 * 1024;
+
+/** Cap merger input before substituting it into the merger prompt. */
+function capMergerInput(previousOutput: string): string {
+	if (Buffer.byteLength(previousOutput, "utf8") <= MERGER_TASK_BUDGET) return previousOutput;
+	return truncateToBudget(previousOutput, MERGER_TASK_BUDGET, "Previous worker output");
+}
+
+/**
+ * Substitute the merger `{previous}` placeholder using a replacement
+ * function, so `$`-patterns (`$&`, `$'`, `$$`, `$1`) in worker output
+ * pass through literally instead of being interpreted.
+ */
+function substituteMergerInput(task: string, previousOutput: string): string {
+	return task.replace(/\{previous\}/g, () => previousOutput);
+}
 
 export interface SwarmWorkerInput {
 	id: string;
@@ -287,7 +304,7 @@ export async function runSwarm(
 					dispatchDefaults,
 					agents,
 					merger.agent,
-					substitutePrevious(merger.task, capPreviousOutput(doneSection)),
+					substituteMergerInput(merger.task, capMergerInput(doneSection)),
 					merger.cwd,
 					workerResults.length + 1,
 					signal,

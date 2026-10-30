@@ -36,7 +36,7 @@ export const SWARM_RUN_ID_RE = /^swarm-\d{8}-\d{6}-[a-z0-9]{4}(?:-r\d+)?$/;
 export const SWARM_WORKER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 /** Cap for per-task text surfaced in parallel summaries. */
 export const PER_TASK_OUTPUT_CAP = 50 * 1024;
-/** Cap for single/chain final output surfaced in the tool result. */
+/** Cap for single final output surfaced in the tool result. */
 export const SINGLE_OUTPUT_CAP = 100 * 1024;
 /** Cap for raw child stdout accumulation (DoS guard). */
 export const STDOUT_CAP = 2 * 1024 * 1024;
@@ -44,8 +44,6 @@ export const STDOUT_CAP = 2 * 1024 * 1024;
 export const STDERR_CAP = 128 * 1024;
 /** Cap for messages retained per subagent result. */
 export const MAX_MESSAGES = 500;
-/** Budget for chain `{previous}` substitution into the next prompt. */
-export const PREVIOUS_OUTPUT_BUDGET = 12 * 1024;
 /** Max agent markdown file size read from disk (DoS guard). */
 export const MAX_AGENT_FILE_BYTES = 64 * 1024;
 /** Max system-prompt body kept per agent (DoS guard). */
@@ -238,21 +236,6 @@ export function truncateParallelOutput(output: string): string {
 
 export function truncateSingleOutput(output: string): string {
 	return truncateToBudget(output, SINGLE_OUTPUT_CAP, "Output");
-}
-
-/**
- * Substitute the chain `{previous}` placeholder using a replacement
- * function, so `$`-patterns (`$&`, `$'`, `$$`, `$1`) in the previous
- * output pass through literally instead of being interpreted.
- */
-export function substitutePrevious(task: string, previousOutput: string): string {
-	return task.replace(/\{previous\}/g, () => previousOutput);
-}
-
-/** Cap the previous step output before substituting it into the next prompt. */
-export function capPreviousOutput(previousOutput: string): string {
-	if (Buffer.byteLength(previousOutput, "utf8") <= PREVIOUS_OUTPUT_BUDGET) return previousOutput;
-	return `${truncateToBudget(previousOutput, PREVIOUS_OUTPUT_BUDGET, "Previous step output")} `;
 }
 
 /** Normalize an agent name for map keys (case/whitespace-insensitive). */

@@ -6,7 +6,6 @@ import {
 	aggregateUsage,
 	appendBounded,
 	buildChildEnv,
-	capPreviousOutput,
 	clampTimeoutMs,
 	emptyUsage,
 	ensureSwarmTools,
@@ -25,36 +24,11 @@ import {
 	parseSwarmDepth,
 	parseSwarmMessageLine,
 	parseToolList,
-	substitutePrevious,
 	swarmProtocolSnippet,
 	truncateToBudget,
 	validateModelString,
 	validateToolList,
 } from "./utils.ts";
-
-describe("substitutePrevious", () => {
-	test("passes $-patterns through literally", () => {
-		const out = substitutePrevious("a {previous} b", "costs $& and $' plus $$ and $1");
-		expect(out).toBe("a costs $& and $' plus $$ and $1 b");
-	});
-
-	test("replaces all occurrences", () => {
-		expect(substitutePrevious("{previous} + {previous}", "x")).toBe("x + x");
-	});
-});
-
-describe("capPreviousOutput", () => {
-	test("short output passes through", () => {
-		expect(capPreviousOutput("hello")).toBe("hello");
-	});
-
-	test("long output is truncated with a marker", () => {
-		const big = "y".repeat(100 * 1024);
-		const capped = capPreviousOutput(big);
-		expect(Buffer.byteLength(capped, "utf8")).toBeLessThanOrEqual(13 * 1024);
-		expect(capped).toContain("truncated");
-	});
-});
 
 describe("truncateToBudget", () => {
 	test("short output passes through", () => {

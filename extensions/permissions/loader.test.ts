@@ -277,10 +277,7 @@ describe("describeCall structured tools", () => {
 		expect(got.length).toBeLessThanOrEqual(`subagent general ""`.length + 60);
 	});
 
-	test("subagent chain/parallel show shape + first step", () => {
-		expect(describeCall("subagent", { chain: [{ agent: "a", task: "do one thing" }, { agent: "b", task: "do other" }] }, "/p")).toBe(
-			'subagent chain (2 steps): a "do one thing"',
-		);
+	test("subagent parallel shows shape + first step", () => {
 		expect(describeCall("subagent", { tasks: [{ agent: "c", task: "only task here" }] }, "/p")).toBe(
 			'subagent parallel (1 task): c "only task here"',
 		);

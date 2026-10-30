@@ -373,7 +373,7 @@ function summarizeBash(cmd: string): string {
  * `subagent general "List files in ~/.pi/agent…"`.
  * File tools show the (possibly relative) path; find/grep append the
  * pattern when present; bash shows the full command; subagent shows the
- * agent plus a task snippet (or chain/parallel/swarm shape); anything else shows
+ * agent plus a task snippet (or parallel/swarm shape); anything else shows
  * compact `key=value` pairs. Home directories shorten to `~` (display
  * only — matching and audit keep absolute paths). Pure — safe to
  * unit-test without `pi`.
@@ -430,7 +430,7 @@ function shortenHomeInText(s: string): string {
 	return s.split(home).join("~");
 }
 
-/** `agent "task snippet"` for one subagent item (single task or chain/parallel step). */
+/** `agent "task snippet"` for one subagent item (single task or parallel step). */
 function describeSubagentItem(item: unknown): string {
 	if (typeof item !== "object" || item === null) return "";
 	const o = item as Record<string, unknown>;
@@ -449,13 +449,9 @@ function swarmAgentName(worker: unknown): string {
 	return asString(o.agent) ?? asString(o.id) ?? "";
 }
 
-/** Human shape for subagent calls: single, chain, parallel, or swarm. */
+/** Human shape for subagent calls: single, parallel, or swarm. */
 function describeSubagent(input: Record<string, unknown>): string {
-	const chain = input.chain;
 	const tasks = input.tasks;
-	if (Array.isArray(chain) && chain.length > 0) {
-		return `chain (${chain.length} step${chain.length === 1 ? "" : "s"}): ${describeSubagentItem(chain[0])}`;
-	}
 	if (Array.isArray(tasks) && tasks.length > 0) {
 		return `parallel (${tasks.length} task${tasks.length === 1 ? "" : "s"}): ${describeSubagentItem(tasks[0])}`;
 	}
@@ -467,8 +463,8 @@ function describeSubagent(input: Record<string, unknown>): string {
 			const merger = s.merger;
 			const mergerAgent =
 				typeof merger === "object" && merger !== null ? swarmAgentName(merger) : "";
-			const goal = oneLine(asString(s.goal) ?? "");
-			const header = `swarm (${workers.length} worker${workers.length === 1 ? "" : "s"})${mergerAgent ? " + merger" : ""}${goal ? `, goal: "${shortenHomeInText(goal)}"` : ""}`;
+			const goal = truncate(shortenHomeInText(oneLine(asString(s.goal) ?? "")), 60);
+			const header = `swarm (${workers.length} worker${workers.length === 1 ? "" : "s"})${mergerAgent ? " + merger" : ""}${goal ? `, goal: "${goal}"` : ""}`;
 			const counts = new Map<string, number>();
 			for (const w of workers) {
 				const name = swarmAgentName(w) || "worker";

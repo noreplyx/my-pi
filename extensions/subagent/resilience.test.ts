@@ -92,8 +92,7 @@ describe("total budget deadline", () => {
 		expect(totalDeadline(Number.NaN)).toBeUndefined();
 	});
 
-	test("recommended budgets: chain sums, parallel/swarm take max+60s", () => {
-		expect(recommendedTotalTimeout([1000, 2000, 3000], "chain")).toBe(6000);
+	test("recommended budgets: parallel/swarm take max+60s", () => {
 		expect(recommendedTotalTimeout([1000, 2000, 3000], "parallel")).toBe(63000);
 		expect(recommendedTotalTimeout([5000], "swarm")).toBe(65000);
 	});

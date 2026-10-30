@@ -1,7 +1,7 @@
 /**
  * Subagent Tool - Delegate tasks to specialized agents (thin wiring).
  *
- * Orchestration lives in single.ts / parallel.ts / chain.ts /
+ * Orchestration lives in single.ts / parallel.ts /
  * swarm-orchestrator.ts; rendering primitives in render.ts; params in
  * schema.ts; resilience in resilience.ts. This file only wires the
  * `subagent` tool + swarm admin tools/commands to those modules.
@@ -9,7 +9,6 @@
  * Modes:
  *   - Single: { agent: "name", task: "..." }
  *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
- *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
  *   - Swarm: { swarm: { goal, workers: [{ id, agent, task }...], merger? } }
  */
 import * as fs from "node:fs";
@@ -19,7 +18,6 @@ import { CONFIG_DIR_NAME, getAgentDir, getMarkdownTheme } from "@earendil-works/
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents, formatAgentList } from "./agents.ts";
-import { runChain } from "./chain.ts";
 import { runParallel } from "./parallel.ts";
 import {
 	COLLAPSED_ITEM_COUNT,
@@ -100,10 +98,10 @@ export default function (pi: ExtensionAPI) {
 		label: "Subagent",
 		description: [
 			"Delegate tasks to specialized subagents with isolated context.",
-			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder),",
+			"Modes: single (agent + task), parallel (tasks array),",
 			"swarm ({goal, workers[{id,agent,task}], merger?} hierarchical blackboard in .swarm/<runId>/).",
 			"Resilience: retry {attempts, backoffMs} (default retry once), totalTimeoutMs (whole-operation budget),",
-			"onError abort|continue (default abort for chain, continue for parallel/swarm).",
+			"onError abort|continue (default continue for parallel/swarm).",
 			"Questions: child ask_user calls and permission prompts are forwarded to the user (serialized across workers);",
 			"set allowQuestions:false to auto-dismiss, questionTimeoutMs to bound each dialog.",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
@@ -127,7 +125,6 @@ export default function (pi: ExtensionAPI) {
 			const discovery = discoverAgents(ctx.cwd, agentScope);
 			const agents = discovery.agents;
 
-			const hasChain = (params.chain?.length ?? 0) > 0;
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
 			const hasSingle = Boolean(params.agent && params.task);
 			const hasSwarm = Boolean(params.swarm && params.swarm.workers?.length);
@@ -135,7 +132,7 @@ export default function (pi: ExtensionAPI) {
 			const parentDepth = parseSwarmDepth(process.env["PI_SUBAGENT_DEPTH"]);
 
 			const makeDetails =
-				(mode: "single" | "parallel" | "chain" | "swarm", swarm?: SwarmInfo) =>
+				(mode: "single" | "parallel" | "swarm", swarm?: SwarmInfo) =>
 				(results: SingleResult[]): SubagentDetails => ({
 					mode,
 					agentScope,
@@ -165,7 +162,6 @@ export default function (pi: ExtensionAPI) {
 			// require approval on untrusted projects.
 			if (agentScope === "project" || agentScope === "both") {
 				const requestedAgentNames = new Set<string>();
-				if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
 				if (params.tasks) for (const t of params.tasks) requestedAgentNames.add(t.agent);
 				if (params.agent) requestedAgentNames.add(params.agent);
 				if (params.swarm) {
@@ -190,7 +186,7 @@ export default function (pi: ExtensionAPI) {
 										`but there is no UI to confirm in. Run with a trusted project or a user-scoped agent.`,
 								},
 							],
-							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : hasSwarm ? "swarm" : "single")([]),
+							details: makeDetails(hasTasks ? "parallel" : hasSwarm ? "swarm" : "single")([]),
 						};
 					}
 					const ok = await ctx.ui.confirm(
@@ -200,7 +196,7 @@ export default function (pi: ExtensionAPI) {
 					if (!ok)
 						return {
 							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-							details: makeDetails(hasChain ? "chain" : hasTasks ? "parallel" : hasSwarm ? "swarm" : "single")([]),
+							details: makeDetails(hasTasks ? "parallel" : hasSwarm ? "swarm" : "single")([]),
 						};
 				}
 			}
@@ -259,28 +255,6 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
-			}
-
-			if (params.chain && params.chain.length > 0) {
-				const out = await runChain(params.chain, {
-					fallbackTimeoutMs: params.timeoutMs,
-					retryAttempts,
-					retryBackoffMs,
-					totalTimeoutMs: params.totalTimeoutMs,
-					onError: params.onError ?? "abort",
-					allowQuestions: params.allowQuestions,
-					questionTimeoutMs: params.questionTimeoutMs,
-				}, {
-					defaultCwd: ctx.cwd,
-					dispatchDefaults,
-					agents,
-					signal,
-					onUpdate: onUpdate as any,
-					makeDetails: makeDetails("chain"),
-					parentUI,
-					forwardedPermissions,
-				});
-				return { content: [{ type: "text", text: out.text }], details: makeDetails("chain")(out.results), isError: out.isError };
 			}
 
 			if (params.tasks && params.tasks.length > 0) {
@@ -361,18 +335,6 @@ export default function (pi: ExtensionAPI) {
 
 		renderCall(args, theme, _context) {
 			const scope: AgentScope = args.agentScope ?? "user";
-			if (args.chain && args.chain.length > 0) {
-				let text =
-					theme.fg("toolTitle", theme.bold("subagent ")) +
-					theme.fg("accent", `chain (${args.chain.length} steps)`) +
-					theme.fg("muted", ` [${scope}]`);
-				for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
-					const step = args.chain[i];
-					text += "\n  " + theme.fg("muted", `${i + 1}.`) + " " + theme.fg("accent", step.agent) + theme.fg("dim", ` ${truncatePreview(step.task, 40)}`);
-				}
-				if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
-				return new Text(text, 0, 0);
-			}
 			if (args.tasks && args.tasks.length > 0) {
 				let text =
 					theme.fg("toolTitle", theme.bold("subagent ")) +
@@ -491,63 +453,6 @@ export default function (pi: ExtensionAPI) {
 				return new Text(text, 0, 0);
 			}
 
-			if (details.mode === "chain") {
-				const successCount = details.results.filter((r) => !isFailedResult(r)).length;
-				const icon = successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
-
-				if (expanded) {
-					const container = new Container();
-					container.addChild(
-						new Text(icon + " " + theme.fg("toolTitle", theme.bold("chain ")) + theme.fg("accent", `${successCount}/${details.results.length} steps`), 0, 0),
-					);
-
-					for (const r of details.results) {
-						const rIcon = !isFailedResult(r) ? theme.fg("success", "✓") : theme.fg("error", "✗");
-						const displayItems = getDisplayItems(r.messages);
-						const finalOutput = getFinalOutput(r.messages);
-
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(`${theme.fg("muted", `─── Step ${r.step}: `) + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0));
-						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-
-						for (const item of displayItems) {
-							if (item.type === "toolCall") {
-								container.addChild(new Text(theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)), 0, 0));
-							}
-						}
-
-						if (finalOutput) {
-							container.addChild(new Spacer(1));
-							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-						}
-
-						const stepUsage = formatUsageStats(r.usage, r.model);
-						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
-					}
-
-					const totals = formatTotals(details.results, "chain");
-					if (totals) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(theme.fg("dim", `Total: ${totals}`), 0, 0));
-					}
-					return container;
-				}
-
-				let text = icon + " " + theme.fg("toolTitle", theme.bold("chain ")) + theme.fg("accent", `${successCount}/${details.results.length} steps`);
-				for (const r of details.results) {
-					const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
-					const displayItems = getDisplayItems(r.messages);
-					const { durationBadge } = resultBadges(r);
-					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}${theme.fg("dim", durationBadge)}`;
-					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
-					else text += `\n${renderDisplayItems(displayItems, 5)}`;
-				}
-				const totals = formatTotals(details.results, "chain");
-				if (totals) text += `\n\n${theme.fg("dim", `Total: ${totals}`)}`;
-				text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
-				return new Text(text, 0, 0);
-			}
-
 			if (details.mode === "parallel") {
 				const running = details.results.filter((r) => r.exitCode === RESULT_RUNNING).length;
 				const successCount = details.results.filter((r) => r.exitCode !== RESULT_RUNNING && !isFailedResult(r)).length;
@@ -584,7 +489,7 @@ export default function (pi: ExtensionAPI) {
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
 					}
 
-					const totals = formatTotals(details.results, "parallel");
+					const totals = formatTotals(details.results);
 					if (totals) {
 						container.addChild(new Spacer(1));
 						container.addChild(new Text(theme.fg("dim", `Total: ${totals}`), 0, 0));
@@ -602,7 +507,7 @@ export default function (pi: ExtensionAPI) {
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
 				if (!isRunning) {
-					const totals = formatTotals(details.results, "parallel");
+					const totals = formatTotals(details.results);
 					if (totals) text += `\n\n${theme.fg("dim", `Total: ${totals}`)}`;
 				}
 				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
@@ -625,7 +530,7 @@ export default function (pi: ExtensionAPI) {
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
 				}
 				if (!isRunning) {
-					const totals = formatTotals(details.results, "swarm");
+					const totals = formatTotals(details.results);
 					if (totals) text += `\n\n${theme.fg("dim", `Total: ${totals}`)}`;
 				}
 				if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;

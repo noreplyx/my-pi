@@ -41,7 +41,7 @@ governed by `agents/main.md`.
   (`Allow write src/foo.txt?`), short `bash` commands in full
   (long multi-step lines collapse to `first-step … (+N more)`),
   `grep <path> "<pattern>"` for searches, `subagent <agent>
-  "<task…>"` (or `chain (n steps)` / `parallel (n tasks)`) for delegated work, and `key=value` pairs for anything else. Titles are capped
+  "<task…>"` (single), `parallel (n tasks)`, or `swarm (n workers)` for delegated work, and `key=value` pairs for anything else. Titles are capped
   (~140 chars). Home directories shorten to `~` (display only). Full targets stay in the audit log and
   `/permissions-check`, and the shown title is audit-logged on every
   user decision. For file tools

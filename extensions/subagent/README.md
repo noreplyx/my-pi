@@ -13,7 +13,6 @@ Delegate tasks to specialized agents with isolated context (`pi --mode rpc` chil
 | `questions.ts` | Parent-UI bridge: global question mutex, `decideQuestionResponse`, fire-and-forget filter |
 | `forwarded-permissions.ts` | Parent-side memo for forwarded child permission prompts (exact-title session cache) |
 | `parallel.ts` | `runParallel()` — concurrency 4, per-task retry, total budget |
-| `chain.ts` | `runChain()` — sequential `{previous}`, per-step retry, `onError` |
 | `swarm-orchestrator.ts` | `runSwarm()`, `validateWorkers()`, `resumeMissingWorkers()` |
 | `schema.ts` | TypeBox params (incl. `retry`/`totalTimeoutMs`/`onError`) |
 | `resilience.ts` | `runWithRetry()` (default retry once), `totalDeadline()`, `recommendedTotalTimeout()` |
@@ -27,7 +26,6 @@ Delegate tasks to specialized agents with isolated context (`pi --mode rpc` chil
 |---|---|---|
 | single | `agent`, `task`, `cwd?`, `timeoutMs?`, `allowQuestions?`, `questionTimeoutMs?` | Retried once by default |
 | parallel | `tasks[{agent,task,cwd?,timeoutMs?,allowQuestions?,questionTimeoutMs?}]` | Max 8 tasks, concurrency 4, abort/budget drains queue |
-| chain | `chain[{agent,task,cwd?,timeoutMs?,allowQuestions?,questionTimeoutMs?}]` | Sequential, `{previous}` = capped prior output; `onError: abort` (default) or `continue` |
 | swarm | `swarm{goal, workers[{id,agent,task,cwd?,timeoutMs?,allowQuestions?,questionTimeoutMs?}], merger?, cleanup?}` | Blackboard `.swarm/<runId>/`, depth ≤3, total ≤8 |
 
 ## Questions (Option C)
@@ -36,7 +34,7 @@ Children run as `pi --mode rpc` servers. `ask_user` calls and permission
 prompts arrive as `extension_ui_request` on stdout; the parent forwards
 `select` / `confirm` / `input` to its own `ctx.ui` under a global FIFO mutex
 (parallel / swarm workers queue — titles are prefixed `[parallel …]`,
-`[chain …]`, `[swarm <runId>/<workerId>]`), then writes
+`[swarm <runId>/<workerId>]`), then writes
 `extension_ui_response` back to the child's stdin.
 
 * `ask_user` is frontmatter-gated: the child model sees it only when the
@@ -65,7 +63,7 @@ prompts arrive as `extension_ui_request` on stdout; the parent forwards
   preserving the old fail-closed behavior.
 
 Common: `retry {attempts (default 2), backoffMs (default 1000)}`, `totalTimeoutMs` (whole-operation
-budget, default unset = unbounded; chain recommends sum of steps, parallel/swarm max + 60s),
+budget, default unset = unbounded; parallel/swarm recommend max + 60s),
 `timeoutMs` per agent (default 300000, max 1800000). Timeout kills the
 process group (SIGTERM → SIGKILL after 5s) and returns partial output with
 `errorCode: "timeout"`.
@@ -75,7 +73,7 @@ process group (SIGTERM → SIGKILL after 5s) and returns partial output with
 `SingleResult`: `exitCode`, `stopReason`, `errorCode` (`ok` | `spawn-failed` | `timeout` |
 `aborted` | `non-zero` | `setup-error` | `budget-exceeded`), `timedOut`, `durationMs` (wall clock),
 `attempts`, `usage`, `messages`. TUI shows `⏱ 4m12s` + `[errorCode]` badges; totals show
-`wall (sum)` for chain, `wall (max)` for parallel/swarm.
+`wall (max)` for parallel/swarm.
 
 ## Swarm blackboard
 
@@ -87,6 +85,8 @@ all succeed, no abort); failures always keep the blackboard.
 
 Outbox writes are validated (`from`/`body` required, body capped); merger input is
 byte-budget packed (`MERGER_INPUT_BUDGET`, deterministic id order, omitted count reported).
+Merger `task` supports `{previous}` — replaced with the packed worker outputs
+(capped by `MERGER_INPUT_BUDGET` via `capMergerInput`/`substituteMergerInput`).
 
 Fork-resume: `swarm_resume {runId, merger?, cleanup?}` creates `<runId>-rN` (parent untouched),
 copies parent `done/*.md`, runs only missing workers, then the merger.

@@ -21,7 +21,7 @@ import {
 	parseSwarmDepth,
 } from "./utils.ts";
 
-export type SubagentMode = "single" | "parallel" | "chain" | "swarm";
+export type SubagentMode = "single" | "parallel" | "swarm";
 
 export interface FormatTaskItem {
 	agent?: unknown;
@@ -37,7 +37,6 @@ export interface SubagentFormatParams {
 	agent?: unknown;
 	task?: unknown;
 	tasks?: unknown;
-	chain?: unknown;
 	swarm?: unknown;
 	timeoutMs?: unknown;
 	onError?: unknown;
@@ -87,7 +86,6 @@ export function validateSubagentFormat(
 	const availableText = opts?.availableText ?? (agents.map((a) => a.name).join(", ") || "none");
 
 	const tasks = Array.isArray(params.tasks) ? (params.tasks as FormatTaskItem[]) : undefined;
-	const chain = Array.isArray(params.chain) ? (params.chain as FormatTaskItem[]) : undefined;
 	if (params.swarm !== undefined && (typeof params.swarm !== "object" || params.swarm === null || Array.isArray(params.swarm))) {
 		return { mode: "single", error: `Invalid parameters. "swarm" must be an object with {goal, workers}.` };
 	}
@@ -100,19 +98,15 @@ export function validateSubagentFormat(
 		: undefined;
 	const workers = swarm && Array.isArray(swarm.workers) ? (swarm.workers as FormatSwarmWorker[]) : undefined;
 
-	const hasChain = (chain?.length ?? 0) > 0;
 	const hasTasks = (tasks?.length ?? 0) > 0;
 	const hasSingle = Boolean(params.agent && params.task);
 	const hasSwarm = (workers?.length ?? 0) > 0;
-	const mode: SubagentMode = hasChain ? "chain" : hasTasks ? "parallel" : hasSwarm ? "swarm" : "single";
+	const mode: SubagentMode = hasTasks ? "parallel" : hasSwarm ? "swarm" : "single";
 	const fail = (error: string, isError?: boolean): FormatCheck => ({ mode, error, ...(isError ? { isError: true } : {}) });
 
 	// Non-array mode fields are malformed (dispatch indexes into them).
 	if (params.tasks !== undefined && !Array.isArray(params.tasks)) {
 		return fail(`Invalid parameters. "tasks" must be an array of {agent, task}.`);
-	}
-	if (params.chain !== undefined && !Array.isArray(params.chain)) {
-		return fail(`Invalid parameters. "chain" must be an array of {agent, task}.`);
 	}
 	if (swarm && swarm.workers !== undefined && !Array.isArray(swarm.workers)) {
 		return fail(`Invalid parameters. "swarm.workers" must be an array of {id, agent, task}.`);
@@ -124,7 +118,7 @@ export function validateSubagentFormat(
 		return fail(`Invalid parameters. Single mode requires both "agent" and "task". Available agents: ${availableText}`);
 	}
 
-	const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle) + Number(hasSwarm);
+	const modeCount = Number(hasTasks) + Number(hasSingle) + Number(hasSwarm);
 	if (modeCount !== 1) {
 		return fail(`Invalid parameters. Provide exactly one mode. Available agents: ${availableText}`);
 	}
@@ -169,15 +163,6 @@ export function validateSubagentFormat(
 		const u = unknownErr(list, " in parallel tasks");
 		if (u) return fail(u);
 		const bad = checkItems(list, (i) => `parallel task ${i + 1} ("${list[i].agent}")`);
-		if (bad) return fail(bad, bad.startsWith("Invalid timeoutMs"));
-		return { mode };
-	}
-
-	if (hasChain) {
-		const list = chain as FormatTaskItem[];
-		const u = unknownErr(list, " in chain steps");
-		if (u) return fail(u);
-		const bad = checkItems(list, (i) => `chain step ${i + 1} ("${list[i].agent}")`);
 		if (bad) return fail(bad, bad.startsWith("Invalid timeoutMs"));
 		return { mode };
 	}

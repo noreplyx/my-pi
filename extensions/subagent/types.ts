@@ -1,7 +1,7 @@
 /**
  * Shared types for the subagent extension.
  *
- * Extracted from index.ts so single/parallel/chain/swarm-orchestrator/render
+ * Extracted from index.ts so single/parallel/swarm-orchestrator/render
  * can share them without circular imports.
  */
 import type { AgentToolResult, ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -41,7 +41,7 @@ export interface SwarmInfo {
 }
 
 export interface SubagentDetails {
-	mode: "single" | "parallel" | "chain" | "swarm";
+	mode: "single" | "parallel" | "swarm";
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];

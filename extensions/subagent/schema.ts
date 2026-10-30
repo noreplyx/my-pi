@@ -22,13 +22,13 @@ export const RetrySchema = Type.Optional(
 export const TotalTimeoutMsSchema = Type.Optional(
 	Type.Number({
 		description:
-			"Total budget for the whole parallel/chain/swarm operation in ms (default unset = unbounded; chain recommended: sum of step timeouts, parallel/swarm: max + 60s)",
+			"Total budget for the whole parallel/swarm operation in ms (default unset = unbounded; parallel/swarm: max + 60s)",
 	}),
 );
 
 export const OnErrorSchema = Type.Optional(
 	Type.Union([Type.Literal("abort"), Type.Literal("continue")], {
-		description: 'On worker/step failure: "abort" stops, "continue" keeps going (default: abort for chain, continue for parallel/swarm)',
+		description: 'On worker failure: "abort" stops, "continue" keeps going (default: continue for parallel/swarm)',
 	}),
 );
 
@@ -43,15 +43,6 @@ export const QuestionTimeoutMsSchema = Type.Optional(
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-	timeoutMs: TimeoutMsSchema,
-	allowQuestions: AllowQuestionsSchema,
-	questionTimeoutMs: QuestionTimeoutMsSchema,
-});
-
-const ChainItem = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
-	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	timeoutMs: TimeoutMsSchema,
 	allowQuestions: AllowQuestionsSchema,
@@ -79,7 +70,7 @@ const SwarmSpec = Type.Object({
 	merger: Type.Optional(
 		Type.Object({
 			agent: Type.String({ description: "Agent to synthesize worker outputs" }),
-			task: Type.String({ description: "Merger task; {previous} = concatenated done/*.md" }),
+			task: Type.String({ description: "Merger task synthesizing worker outputs. `{previous}` is replaced with packed worker outputs (see MERGER_INPUT_BUDGET)." }),
 			cwd: Type.Optional(Type.String({ description: "Working directory for the merger process" })),
 			timeoutMs: TimeoutMsSchema,
 			allowQuestions: AllowQuestionsSchema,
@@ -98,7 +89,6 @@ export const SubagentParams = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
-	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
 	swarm: Type.Optional(SwarmSpec),
 	agentScope: Type.Optional(AgentScopeSchema),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
