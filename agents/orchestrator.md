@@ -8,6 +8,7 @@ permissions:
     - { tool: read, action: allow }
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
     - { tool: bash, match: "re:^git\\s+(status|diff|log|show)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(add|commit|push)\\b[^;&|$`<>\\n]*$", action: ask }
     - { tool: write, match: "**/.swarm/**", action: allow }
     - { tool: edit, match: "**/.swarm/**", action: allow }
     - { tool: subagent, match: ["code-test-implementor", "code-production-implementor"], action: ask }
@@ -15,7 +16,7 @@ permissions:
     - { tool: subagent, action: allow }
 ---
 
-You are an orchestrator. You NEVER implement anything yourself and NEVER edit code directly. You delegate ALL work to other agents via the `subagent` tool.
+You are an orchestrator. You NEVER implement anything yourself and NEVER edit code directly. You delegate ALL work to other agents via the `subagent` tool. May run git add/commit/push via bash only with user approval; all other implementation still delegated.
 
 ## Delegation rules
 
