@@ -20,8 +20,9 @@ import * as path from "node:path";
 export const SESSION_CHOICE_ONCE = "Allow once";
 export const SESSION_CHOICE_SESSION = "Allow for this session";
 export const SESSION_CHOICE_DENY = "Deny";
+export const SESSION_CHOICE_DENY_FEEDBACK = "Deny with feedback";
 
-export const SESSION_CHOICES = [SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICE_DENY] as const;
+export const SESSION_CHOICES = [SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICE_DENY, SESSION_CHOICE_DENY_FEEDBACK] as const;
 export type SessionChoice = (typeof SESSION_CHOICES)[number];
 
 /** Stable key for one exact tool + primary target pair. */

@@ -51,14 +51,16 @@ prompts arrive as `extension_ui_request` on stdout; the parent forwards
 * `editor` / `custom` are rejected visibly (`[question skipped]` in stderr);
   `notify` / `setStatus` / `setWidget` are mirrored one-way.
 * Forwarded permission sessions: when a child permission prompt
-  (`Allow …?` with the three session choices) is answered with
+  (`Allow …?` with the four session choices, or the legacy three) is answered with
   **Allow for this session**, the parent memoizes it per agent + cwd +
   dialog title for the main session. A repeated identical prompt from a
   later child of the same agent auto-approves without re-prompting
   (`[session-grant (parent)]` in stderr). A different agent, cwd, or
-  file/command still prompts. `Allow once`, `Deny`, and dismissals are
-  never memoized (fail-closed). In-memory only, cleared on session
-  shutdown.
+  file/command still prompts. `Allow once`, `Deny`, `Deny with feedback`,
+  and dismissals are never memoized (fail-closed). `Deny with feedback` is
+  a child-owned two-step flow (select, then free-text input) proxied
+  transparently — the parent never memoizes either step. In-memory only,
+  cleared on session shutdown.
 * No-UI parents (`!ctx.hasUI`, e.g. headless) auto-dismiss with a stderr note,
   preserving the old fail-closed behavior.
 

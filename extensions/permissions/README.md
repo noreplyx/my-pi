@@ -34,9 +34,14 @@ governed by `agents/main.md`.
     (`/foo/bar/` stays a path).
   - plain text → substring (`npm publish`)
 - `action`: `allow` (silent), `ask` (prompt; denied when no UI), `deny` (block).
-- `ask` prompts with three choices: **Allow once** (single call),
+- `ask` prompts with four choices: **Allow once** (single call),
   **Allow for this session** (remembers until the session ends), **Deny**
-  (blocks this call; dismissing the dialog also denies). Every dialog title
+  (blocks this call; dismissing the dialog also denies), **Deny with feedback**
+  (blocks this call and asks for a reason / what to do instead, returned to
+  the agent in the denial). Dismissing or leaving the feedback empty denies
+  without feedback; feedback is trimmed and capped (~500 chars). The legacy
+  confirm fallback (no `select` support) stays binary allow/deny with no
+  feedback step. Every dialog title
   shows a one-line summary — `<action> <path>` with cwd-relative paths
   (`Allow write src/foo.txt?`), short `bash` commands in full
   (long multi-step lines collapse to `first-step … (+N more)`),

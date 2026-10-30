@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
 	createForwardedPermissionStore,
+	FORWARDED_DENY_FEEDBACK_VALUE,
 	FORWARDED_SESSION_CHOICES,
+	FORWARDED_SESSION_CHOICES_LEGACY,
+	FORWARDED_SESSION_VALUE,
 	isPermissionConfirm,
 	isPermissionSelect,
 	normalizeAgentSegment,
@@ -21,6 +24,20 @@ describe("forwarded permission detection", () => {
 		expect(isPermissionSelect({ method: "select", title: "Pick one?", options: [...FORWARDED_SESSION_CHOICES] })).toBe(false);
 		// Option order matters (exact match guards against mimicry).
 		expect(isPermissionSelect({ method: "select", title: "Allow bash x?", options: [...FORWARDED_SESSION_CHOICES].reverse() })).toBe(false);
+	});
+
+	test("older three-option permission prompt is still recognised", () => {
+		expect(isPermissionSelect({ method: "select", title: "Allow bash npm test?", options: [...FORWARDED_SESSION_CHOICES_LEGACY] })).toBe(true);
+	});
+
+	test("reordered older options are rejected", () => {
+		expect(isPermissionSelect({ method: "select", title: "Allow bash x?", options: [...FORWARDED_SESSION_CHOICES_LEGACY].reverse() })).toBe(false);
+	});
+
+	test("deny with feedback answer is distinct from session approval", () => {
+		expect(FORWARDED_DENY_FEEDBACK_VALUE).toBe("Deny with feedback");
+		expect(FORWARDED_SESSION_VALUE).toBe("Allow for this session");
+		expect(FORWARDED_DENY_FEEDBACK_VALUE).not.toBe(FORWARDED_SESSION_VALUE);
 	});
 
 	test("unsupported methods are not permission dialogs", () => {

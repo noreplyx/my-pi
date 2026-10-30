@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { createSessionGrants, grantKey, SESSION_CHOICES } from "./session-grants.ts";
+import { createSessionGrants, grantKey, SESSION_CHOICE_DENY_FEEDBACK, SESSION_CHOICES } from "./session-grants.ts";
 
 describe("session grants", () => {
-	test("offers Allow once / Allow for this session / Deny", () => {
-		expect([...SESSION_CHOICES]).toEqual(["Allow once", "Allow for this session", "Deny"]);
+	test("offers Allow once, Allow for this session, Deny, Deny with feedback in order", () => {
+		expect([...SESSION_CHOICES]).toEqual(["Allow once", "Allow for this session", "Deny", "Deny with feedback"]);
+	});
+
+	test("deny with feedback choice is exported", () => {
+		expect(SESSION_CHOICE_DENY_FEEDBACK).toBe("Deny with feedback");
+		expect([...SESSION_CHOICES]).toContain(SESSION_CHOICE_DENY_FEEDBACK);
 	});
 
 	test("key is exact tool + target", () => {

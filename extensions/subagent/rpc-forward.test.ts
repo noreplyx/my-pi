@@ -195,7 +195,7 @@ describe("RPC question forwarding", () => {
 				id: "p1",
 				method: "select",
 				title: "Allow bash npm test?",
-				options: ["Allow once", "Allow for this session", "Deny"],
+				options: ["Allow once", "Allow for this session", "Deny", "Deny with feedback"],
 			}) + "\n";
 		behavior = (proc) => {
 			proc.stdout.emit("data", permLine);
@@ -236,7 +236,7 @@ describe("RPC question forwarding", () => {
 				id: "p1",
 				method: "select",
 				title: "Allow write src/foo.txt?",
-				options: ["Allow once", "Allow for this session", "Deny"],
+				options: ["Allow once", "Allow for this session", "Deny", "Deny with feedback"],
 			}) + "\n";
 		behavior = (proc) => {
 			proc.stdout.emit("data", permLine);
@@ -285,7 +285,7 @@ describe("RPC question forwarding", () => {
 				id: "p1",
 				method: "select",
 				title: "Allow bash npm test?",
-				options: ["Allow once", "Allow for this session", "Deny"],
+				options: ["Allow once", "Allow for this session", "Deny", "Deny with feedback"],
 			}) + "\n";
 		behavior = (proc) => {
 			proc.stdout.emit("data", permLine);
@@ -321,5 +321,87 @@ describe("RPC question forwarding", () => {
 		// Same agent again: memoized, no new prompt.
 		await runAs("coder");
 		expect(selectCalls).toBe(2);
+	});
+
+	test("older three-option prompt is still memoized (backward compatible)", async () => {
+		const { createForwardedPermissionStore } = await import("./forwarded-permissions.ts");
+		const store = createForwardedPermissionStore();
+		let selectCalls = 0;
+		const permLine =
+			JSON.stringify({
+				type: "extension_ui_request",
+				id: "p1",
+				method: "select",
+				title: "Allow bash npm test?",
+				options: ["Allow once", "Allow for this session", "Deny"],
+			}) + "\n";
+		behavior = (proc) => {
+			proc.stdout.emit("data", permLine);
+			setTimeout(() => {
+				proc.stdout.emit("data", msgLine("done"));
+				proc.stdout.emit("data", JSON.stringify({ type: "agent_settled", aborted: false }) + "\n");
+				setTimeout(() => proc.emit("close", 0), 5);
+			}, 20);
+		};
+		const parentUI = {
+			hasUI: true,
+			select: async () => {
+				selectCalls++;
+				return "Allow for this session";
+			},
+			confirm: async () => true,
+			input: async () => "y",
+			notify: () => {},
+		};
+		const runOpts = { parentUI: parentUI as any, forwardedPermissions: store, labelPrefix: "[coder]" };
+		await runSingleAgent(os.tmpdir(), {}, agents, "coder", "task one", undefined, undefined, undefined, undefined, makeDetails, undefined, runOpts);
+		expect(selectCalls).toBe(1);
+		await runSingleAgent(os.tmpdir(), {}, agents, "coder", "task two", undefined, undefined, undefined, undefined, makeDetails, undefined, runOpts);
+		expect(selectCalls).toBe(1);
+		const resp = lastProc!.stdin.writes.find((w) => w.includes('"p1"'));
+		expect(resp).toBeDefined();
+		expect(resp!).toContain("Allow for this session");
+	});
+
+	test("a deny with feedback answer asks again next time (never remembered)", async () => {
+		const { createForwardedPermissionStore } = await import("./forwarded-permissions.ts");
+		const store = createForwardedPermissionStore();
+		let selectCalls = 0;
+		const permLine =
+			JSON.stringify({
+				type: "extension_ui_request",
+				id: "p1",
+				method: "select",
+				title: "Allow bash npm test?",
+				options: ["Allow once", "Allow for this session", "Deny", "Deny with feedback"],
+			}) + "\n";
+		behavior = (proc) => {
+			proc.stdout.emit("data", permLine);
+			setTimeout(() => {
+				proc.stdout.emit("data", msgLine("done"));
+				proc.stdout.emit("data", JSON.stringify({ type: "agent_settled", aborted: false }) + "\n");
+				setTimeout(() => proc.emit("close", 0), 5);
+			}, 20);
+		};
+		const parentUI = {
+			hasUI: true,
+			select: async () => {
+				selectCalls++;
+				return "Deny with feedback";
+			},
+			confirm: async () => true,
+			input: async () => "y",
+			notify: () => {},
+		};
+		const runOpts = { parentUI: parentUI as any, forwardedPermissions: store, labelPrefix: "[coder]" };
+		await runSingleAgent(os.tmpdir(), {}, agents, "coder", "task one", undefined, undefined, undefined, undefined, makeDetails, undefined, runOpts);
+		expect(selectCalls).toBe(1);
+		expect(store.size).toBe(0);
+		await runSingleAgent(os.tmpdir(), {}, agents, "coder", "task two", undefined, undefined, undefined, undefined, makeDetails, undefined, runOpts);
+		expect(selectCalls).toBe(2);
+		expect(store.size).toBe(0);
+		const resp = lastProc!.stdin.writes.find((w) => w.includes('"p1"'));
+		expect(resp).toBeDefined();
+		expect(resp!).toContain("Deny with feedback");
 	});
 });

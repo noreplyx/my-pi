@@ -400,7 +400,7 @@ export async function runSingleAgent(
 							const options = Array.isArray(req.options) ? req.options.filter((o: unknown) => typeof o === "string").slice(0, 20) : [];
 							const picked = await parentUI.select(title, options, { signal: ctrl.signal });
 							// Only "Allow for this session" is memoized. "Allow
-							// once", Deny, and dismissals re-prompt next time.
+							// once", Deny variants, and dismissals re-prompt next time.
 							if (permissionShaped && permissionKey && picked === FORWARDED_SESSION_VALUE) {
 								forwardedPermissions?.setSession(permissionKey);
 							}

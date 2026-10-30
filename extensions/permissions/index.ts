@@ -20,7 +20,7 @@ import { getAgentDir, withFileMutationQueue, type ExtensionAPI } from "@earendil
 import { buildTargets, describeCall, describeStatus, evaluate, loadAllAgentFiles, reloadAll, resolveGrantDir, resolveGrantPath, warnStalePermissionsFileEnv } from "./loader.ts";
 import { matchToolName } from "./matcher.ts";
 import { isAutoApproveEnabled } from "../auto-approve/state.ts";
-import { createSessionGrants, SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICES } from "./session-grants.ts";
+import { createSessionGrants, SESSION_CHOICE_DENY_FEEDBACK, SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICES } from "./session-grants.ts";
 import { collectDiagnostics, formatStartupReport, type Diagnostic, type FileReport } from "./validate.ts";
 
 function auditPath(): string {
@@ -44,6 +44,9 @@ function preview(s: string, max = 120): string {
 	const oneLine = s.replace(/\s+/g, " ").trim() || "(no args)";
 	return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
+
+/** Max length (incl. ellipsis) for deny-with-feedback text in block reasons / audit. */
+const FEEDBACK_CAP = 500;
 
 /** Gather all agent configs for validation. Never throws. */
 function gatherFileReports(cwd: string): FileReport[] {
@@ -214,7 +217,14 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			// select() unavailable on this client (e.g. older RPC) — fall back
 			// to the legacy binary confirm rather than failing open.
-			const ok = await ctx.ui.confirm(dialogTitle, message);
+			// Fail closed: a throwing confirm (RPC disconnect, abort,
+			// headless) is an explicit deny, never a bubble-out exception.
+			let ok: boolean;
+			try {
+				ok = await ctx.ui.confirm(dialogTitle, message);
+			} catch {
+				return { block: true, reason: `Denied by user (${where}): ${label}` };
+			}
 			void audit(ok ? "allow" : "deny", event.toolName, result.target, `via=${where} user-confirm title=${JSON.stringify(dialogTitle)}`);
 			if (!ok) return { block: true, reason: `Denied by user (${where}): ${label}` };
 			return undefined;
@@ -235,6 +245,26 @@ export default function (pi: ExtensionAPI) {
 		if (choice === SESSION_CHOICE_ONCE) {
 			void audit("allow", event.toolName, result.target, `via=${where} user-allow-once title=${JSON.stringify(dialogTitle)}`);
 			return undefined;
+		}
+		if (choice === SESSION_CHOICE_DENY_FEEDBACK) {
+			// Deny with feedback: ask what to do instead. Fail closed —
+			// dismiss/empty/throw degrades to a plain deny.
+			let feedback: string | undefined;
+			try {
+				feedback = await ctx.ui.input("Deny feedback — why denied / what to do instead?", "e.g. use read instead of bash, or skip this step", {
+					...(ctx.signal ? { signal: ctx.signal } : {}),
+				});
+			} catch {
+				feedback = undefined;
+			}
+			const trimmed = (feedback ?? "").trim();
+			if (!trimmed) {
+				void audit("deny", event.toolName, result.target, `via=${where} user-deny-feedback-empty title=${JSON.stringify(dialogTitle)}`);
+				return { block: true, reason: `Denied by user (${where}): ${label}` };
+			}
+			const capped = trimmed.length > FEEDBACK_CAP ? `${trimmed.slice(0, FEEDBACK_CAP - 1)}…` : trimmed;
+			void audit("deny", event.toolName, result.target, `via=${where} user-deny-feedback title=${JSON.stringify(dialogTitle)} feedback=${JSON.stringify(capped)}`);
+			return { block: true, reason: `Denied by user (${where}): ${label}. Feedback: ${capped}` };
 		}
 		// SESSION_CHOICE_DENY or undefined (dismissed/escape) — fail closed.
 		void audit("deny", event.toolName, result.target, `via=${where} user-deny title=${JSON.stringify(dialogTitle)}`);

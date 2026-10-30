@@ -18,11 +18,13 @@
  * - Exact-title match only. No sibling-directory coverage: `Allow write
  *   a/foo.txt?` does not cover `Allow write a/bar.txt?` (that needs the
  *   shared-file store of Option B with structured tool+path data).
- * - `Allow once`, `Deny`, dismissals are never cached (fail-closed).
+ * - `Allow once`, `Deny`, `Deny with feedback`, dismissals are never cached (fail-closed).
+ *   Only "Allow for this session" is memoized.
  * - Legacy `confirm`-fallback permission dialogs are detected but never
- *   cached (a boolean cannot distinguish once vs session).
+ *   cached (a boolean cannot distinguish once vs session); Deny/dismiss
+ *   there also re-prompts (fail-closed).
  * - `ask_user` uses the identical RPC wire shape; detection is heuristic
- *   (exact 3-option match + `Allow …?` title). A model-crafted ask_user
+ *   (exact 3/4-option match + `Allow …?` title). A model-crafted ask_user
  *   with exactly those options and title would be misclassified on repeat
  *   — unlikely but nonzero; the structured-protocol fix (Option C) removes it.
  *
@@ -31,9 +33,14 @@
  */
 
 /** Must stay in sync with permissions/session-grants.ts SESSION_CHOICES. */
-export const FORWARDED_SESSION_CHOICES = ["Allow once", "Allow for this session", "Deny"] as const;
+export const FORWARDED_SESSION_CHOICES = ["Allow once", "Allow for this session", "Deny", "Deny with feedback"] as const;
+
+/** Legacy 3-option shape (pre-feedback clients). Still detected; "Allow for this session" is memoized, Deny/dismiss never cached. */
+export const FORWARDED_SESSION_CHOICES_LEGACY = ["Allow once", "Allow for this session", "Deny"] as const;
 
 export const FORWARDED_SESSION_VALUE = "Allow for this session";
+
+export const FORWARDED_DENY_FEEDBACK_VALUE = "Deny with feedback";
 
 /** Max cached grants; FIFO eviction of oldest. Titles are few; cap is a guard. */
 export const MAX_FORWARDED_GRANTS = 500;
@@ -51,8 +58,9 @@ function isStringArray(v: unknown): v is string[] {
 }
 
 /**
- * True for a child permission `select` dialog: exactly the three session
- * choices + an `Allow …?` title. Uses the raw `req.options` (pre-filter).
+ * True for a child permission `select` dialog: the session choices
+ * (4-option current, or 3-option legacy) + an `Allow …?` title.
+ * Uses the raw `req.options` (pre-filter).
  */
 export function isPermissionSelect(req: PermissionRequestShape): boolean {
 	if (req?.method !== "select") return false;
@@ -60,12 +68,14 @@ export function isPermissionSelect(req: PermissionRequestShape): boolean {
 	if (!isStringArray(req.options)) return false;
 	const opts = req.options as string[];
 	return (
-		opts.length === FORWARDED_SESSION_CHOICES.length &&
-		opts.every((o, i) => o === FORWARDED_SESSION_CHOICES[i])
+		(opts.length === FORWARDED_SESSION_CHOICES.length &&
+			opts.every((o, i) => o === FORWARDED_SESSION_CHOICES[i])) ||
+		(opts.length === FORWARDED_SESSION_CHOICES_LEGACY.length &&
+			opts.every((o, i) => o === FORWARDED_SESSION_CHOICES_LEGACY[i]))
 	);
 }
 
-/** True for the legacy confirm-fallback permission dialog (detect-only, never cached). */
+/** True for the legacy confirm-fallback permission dialog (detect-only, never cached — Deny/dismiss re-prompts fail-closed). */
 export function isPermissionConfirm(req: PermissionRequestShape): boolean {
 	if (req?.method !== "confirm") return false;
 	return typeof req.title === "string" && PERMISSION_TITLE_RE.test(req.title.trim());
