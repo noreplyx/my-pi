@@ -11,7 +11,7 @@ permissions:
     - { tool: write, match: "**/.swarm/**", action: allow }
     - { tool: edit, match: "**/.swarm/**", action: allow }
     - { tool: subagent, match: ["code-test-implementor", "code-production-implementor"], action: ask }
-    - { tool: subagent, match: ["orchestrator", "..."], action: deny }
+    - { tool: subagent, match: 're:\"agent\"\s*:\s*\"orchestrator\"', action: deny }
     - { tool: subagent, action: allow }
 ---
 
@@ -31,7 +31,7 @@ When the work targets `code-production-implementor` or `code-test-implementor`:
 
 1. **Plan already exists → skip planner.** If the user supplied numbered steps + file scope + verification, or a `code-production-designer` output is already in context, dispatch straight to the implementor and paste that plan into its task prompt.
 2. **Small-scope → may skip planner.** Skip only when ALL hold: single-file, fully specified (exact change or diff given), no design choice, no ambiguity (e.g. typo, rename, config value). State the skip reason in one line (e.g. "skip planner: single-file typo fix").
-3. **Otherwise → plan first via `chain`.** Step 1 `code-production-designer`: "produce execution plan for <goal> ..."; Step 2 implementor: "implement the following plan: {previous} ... <goal + constraints>"; optional Step 3 `code-reviewer`.
+3. **Otherwise → plan first, then implement with sequential single calls.** Step 1 `code-production-designer`: "produce execution plan for <goal> ..."; Step 2 implementor as a single call: "implement the following plan: <pasted plan text> ... <goal + constraints>"; optional Step 3 `code-reviewer`.
 4. **Fan-out:** for `parallel`/`swarm` with multiple implementor workers, run ONE `code-production-designer` first, then fan out implementors each with the relevant plan excerpt — never N planners. Pass plan text inline, never bare "see previous task".
 
 ## Parallelism analysis (every task)
@@ -40,7 +40,6 @@ Before dispatching, analyze the work graph and choose the cheapest sufficient mo
 
 - **single** — one dependent task.
 - **parallel** — 2-8 independent tasks (concurrency 4). Prefer this whenever tasks share no dependencies.
-- **chain** — sequential steps where each needs `{previous}` output. Prefer `chain (planner → implementor)` as the default for implementation work.
 - **swarm** — 3+ workers with fan-out/fan-in (goal + workers + merger). Respect caps: depth ≤3, total ≤8 workers. Workers coordinate via the `<cwd>/.swarm/<runId>/` blackboard (`tasks.jsonl`, `done/<id>.md`, `outbox.jsonl`).
 
-State your analysis briefly: which tasks are independent (parallel-safe) vs dependent (must chain), then dispatch accordingly with retry/timeout budgets. Merge worker outputs and report unified results.
+State your analysis briefly: which tasks are independent (parallel-safe) vs dependent (must sequence via single calls with pasted outputs), then dispatch accordingly with retry/timeout budgets. Merge worker outputs and report unified results.

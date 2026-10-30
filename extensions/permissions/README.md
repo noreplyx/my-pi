@@ -88,9 +88,11 @@ name: reviewer
 permissions:
   defaultAction: deny
   rules:
-    # Prefix allows match chained commands too — block metachars first.
+    # Single-command only: allow/ask matches must not chain commands.
+    # Split chained commands into separate rules (R7). Deny metachars first.
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
-    - { tool: bash, match: "re:^git\\s+(status|diff)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "git status", action: allow }
+    - { tool: bash, match: "git diff", action: allow }
     - { tool: ls, action: allow }
     - { tool: read, match: "**", action: allow }
 ---
@@ -127,10 +129,14 @@ silent.
 
 | Severity | Meaning |
 |---|---|
-| error | rule is broken: bad JSON, bad action, uncompilable `re:`/`/.../` (deny fails closed/blocking, allow/ask never matches), unreadable ref file |
+| error | rule is broken: bad JSON, bad action, uncompilable `re:`/`/.../` (deny fails closed/blocking, allow/ask never matches), unreadable ref file, chained shell command in `bash`/`powershell` allow/ask match (R7 — per-agent permissions must be single-command only; split into separate rules) |
 | warning | suspicious but functional: unknown tool name (may just connect later), unreachable shadowed rule, allow-all (`tool: "*"` or bare `bash`), prefix-anchored shell allow without a chaining guard, empty/no-effect agent block, default-allow with no rules, missing agent file (e.g. no `main.md` — that agent falls back to `ask`) |
 
-Shadowing is plain first-match order within each agent file.
+Shadowing is plain first-match order within each agent file. R7 (single-command
+only) applies to `bash`/`powershell` allow/ask matches with chaining operators
+(`;`, `&&`, `||`, `|`, `|&`, `&`, newlines, quote-aware via shell splitting);
+regex patterns and `deny` rules are exempt (regex `|` is alternation, and
+metachar denies like `re:[;&|$...]` intentionally contain chaining chars).
 Display: `ctx.ui.notify` in TUI/RPC, `console.warn` (stderr only) when
 headless — stdout is never touched so `--mode json` stays intact.
 Validation never blocks startup; broken rules are already fail-closed

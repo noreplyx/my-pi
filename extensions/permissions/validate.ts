@@ -9,6 +9,7 @@
  */
 
 import { globToRegExp, hasGlobChars, isRegexPattern } from "./matcher.ts";
+import { splitShellCommands } from "./shell-split.ts";
 import type { ValidatedConfig } from "./schema.ts";
 
 export type DiagnosticSeverity = "error" | "warning" | "info";
@@ -141,6 +142,31 @@ function validateRules(
 				message: `prefix-anchored shell allow matches chained commands (e.g. "git status; evil") — chain splitting evaluates each segment (strict: all must allow), a metachar deny stays recommended defense-in-depth`,
 				hint: `precede it with a deny on shell metachars (;, &&, ||, |, $(), backticks) or anchor with $, or rely on per-segment evaluation with strict all-allow`,
 			});
+		}
+
+		// R7: chained shell command in allow/ask match. Per-agent permissions
+		// must be single-command only — split chained matches into separate rules.
+		// Regex patterns are skipped (`|` is alternation, `;` may sit inside a
+		// character class/guard like `[^;&|$...]`). Deny is exempt: metachar
+		// denies such as `re:[;&|$...]` intentionally contain chaining chars.
+		if (
+			(r.action === "allow" || r.action === "ask") &&
+			(r.tool === "bash" || r.tool === "powershell")
+		) {
+			for (const p of patterns) {
+				if (typeof p !== "string") continue;
+				if (isRegexPattern(p) !== null) continue;
+				const segments = splitShellCommands(p);
+				if (segments.length > 1) {
+					diags.push({
+						severity: "error",
+						location: loc,
+						message: `chained shell command in permission match splits into ${segments.length} segments — per-agent permissions must be single-command only`,
+						hint: `split into ${segments.length} separate rules (one per command)`,
+					});
+					break;
+				}
+			}
 		}
 
 		// R4: overly broad allow.
