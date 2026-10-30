@@ -77,8 +77,10 @@ export interface RunSingleAgentOptions {
 	timeoutMs?: number;
 	/** When false, child questions are auto-dismissed (no parent dialog). Default true. */
 	allowQuestions?: boolean;
-	/** Per-question dialog budget in ms. Undefined → inherit task timeout. */
+	/** Per-question dialog budget in ms. Undefined → inherit task timeout (opt-in only, no default). */
 	questionTimeoutMs?: number;
+	/** Per-run FIFO question lock. Defaults to the global lock (single-mode). */
+	questionLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 	/** Parent UI bridge for forwarding child extension_ui_request lines. */
 	parentUI?: ParentUI;
 	/** Prefix for parent dialog titles, e.g. "[swarm abc/worker-1]". */

@@ -16,17 +16,73 @@ export interface ParentUI {
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 }
 
-/** Global FIFO mutex: parallel / swarm workers queue questions one at a time. */
-let questionQueue: Promise<void> = Promise.resolve();
+/** Per-run FIFO mutex: parallel / swarm workers queue questions one at a time.
+ * Single-mode reuses the global lock (legacy `withQuestionLock`). Parallel /
+ * swarm runs construct their own lock via `createQuestionLock()` so queues
+ * never leak across runs. `notify` and other fire-and-forget methods never
+ * enter the lock.
+ */
+export interface QuestionQueueStats {
+	/** Number of question handlers queued or holding the lock. */
+	depth: number;
+	/** Ms the oldest queued waiter has been waiting (0 when empty). */
+	oldestWaitMs: number;
+}
 
+export type QuestionLockFn = <T>(fn: () => Promise<T>) => Promise<T>;
+
+export type QuestionLock = QuestionLockFn & { getStats(): QuestionQueueStats };
+
+function makeQuestionLock(): QuestionLock {
+	let tail: Promise<void> = Promise.resolve();
+	let enqueuedAt: number[] = [];
+	const run = (<T>(fn: () => Promise<T>): Promise<T> => {
+		const started = Date.now();
+		enqueuedAt.push(started);
+		if (enqueuedAt.length > 1) {
+			try {
+				console.debug(`[subagent] question queued depth=${enqueuedAt.length}`);
+			} catch {
+				/* never break the child on logging */
+			}
+		}
+		const prev = tail;
+		let release!: () => void;
+		const current = new Promise<void>((r) => {
+			release = r;
+		});
+		tail = current;
+		const dequeue = () => {
+			const idx = enqueuedAt.indexOf(started);
+			if (idx >= 0) enqueuedAt.splice(idx, 1);
+		};
+		return prev.then(fn).finally(() => {
+			dequeue();
+			release();
+		});
+	}) as QuestionLock;
+	run.getStats = (): QuestionQueueStats => {
+		if (enqueuedAt.length === 0) return { depth: 0, oldestWaitMs: 0 };
+		return { depth: enqueuedAt.length, oldestWaitMs: Date.now() - Math.min(...enqueuedAt) };
+	};
+	return run;
+}
+
+/** Create an isolated per-run question lock (parallel / swarm). No default timeout. */
+export function createQuestionLock(): QuestionLock {
+	return makeQuestionLock();
+}
+
+const globalQuestionLock = makeQuestionLock();
+
+/** Legacy global lock (single-mode). Prefer `createQuestionLock()` for parallel/swarm runs. */
 export function withQuestionLock<T>(fn: () => Promise<T>): Promise<T> {
-	const prev = questionQueue;
-	let release!: () => void;
-	const current = new Promise<void>((r) => {
-		release = r;
-	});
-	questionQueue = current;
-	return prev.then(fn).finally(() => release());
+	return globalQuestionLock(fn);
+}
+
+/** Queue stats for the legacy global lock. */
+export function getQuestionQueueStats(): QuestionQueueStats {
+	return globalQuestionLock.getStats();
 }
 
 /** Methods that are fire-and-forget in RPC mode (child never waits). */

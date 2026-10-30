@@ -22,9 +22,37 @@ export interface RetryOptions {
 
 export const DEFAULT_RETRY_ATTEMPTS = 2;
 export const DEFAULT_RETRY_BACKOFF_MS = 1000;
+/** Upper bound for retry backoff (30s): delay = min(backoffMs * 2^(attempt-1), MAX). */
+export const MAX_RETRY_BACKOFF_MS = 30_000;
 const ALL_FAILURE_CODES: SubagentErrorCode[] = ["timeout", "spawn-failed", "non-zero", "setup-error", "aborted", "budget-exceeded"];
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Abort-aware sleep: resolves after `ms` unless `signal` aborts first.
+ * Pre-checks `aborted`, races sleep vs abort, throws the
+ * "Subagent was aborted" sentinel on abort, removes the listener in
+ * `finally`. Keeps the `sleep` override for tests. */
+async function sleepAbortable(
+	sleep: (ms: number) => Promise<void>,
+	ms: number,
+	signal?: AbortSignal,
+): Promise<void> {
+	if (signal?.aborted) throw new Error("Subagent was aborted");
+	if (!signal) {
+		await sleep(ms);
+		return;
+	}
+	let onAbort!: () => void;
+	const abortPromise = new Promise<never>((_, reject) => {
+		onAbort = () => reject(new Error("Subagent was aborted"));
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		await Promise.race([sleep(ms), abortPromise]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
 
 function isRetryable(code: SubagentErrorCode, retryOn: SubagentErrorCode[] | undefined): boolean {
 	if (code === "ok") return false;
@@ -45,7 +73,7 @@ export async function runWithRetry<T extends RetryableResult>(
 	opts?: RetryOptions,
 ): Promise<{ result: T; attempts: number }> {
 	const attempts = Math.max(1, Math.min(5, Math.floor(opts?.attempts ?? DEFAULT_RETRY_ATTEMPTS)));
-	const backoffMs = Math.max(0, opts?.backoffMs ?? DEFAULT_RETRY_BACKOFF_MS);
+	const backoffMs = Math.min(MAX_RETRY_BACKOFF_MS, Math.max(0, opts?.backoffMs ?? DEFAULT_RETRY_BACKOFF_MS));
 	const sleep = opts?.sleep ?? defaultSleep;
 	let last: T | null = null;
 	for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -53,8 +81,8 @@ export async function runWithRetry<T extends RetryableResult>(
 		last = await fn(attempt);
 		if (last.errorCode === "ok" || attempt === attempts) return { result: last, attempts: attempt };
 		if (!isRetryable(last.errorCode, opts?.retryOn)) return { result: last, attempts: attempt };
-		const delay = backoffMs * 2 ** (attempt - 1);
-		if (delay > 0) await sleep(delay);
+		const delay = Math.min(backoffMs * 2 ** (attempt - 1), MAX_RETRY_BACKOFF_MS);
+		if (delay > 0) await sleepAbortable(sleep, delay, opts?.signal);
 	}
 	return { result: last as T, attempts };
 }

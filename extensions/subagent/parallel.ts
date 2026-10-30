@@ -2,6 +2,7 @@
  * Parallel orchestrator: run N tasks with concurrency limit + retry + total budget.
  */
 import type { AgentConfig } from "./agents.ts";
+import { createQuestionLock } from "./questions.ts";
 import { runWithRetry, isBudgetExceeded, totalDeadline } from "./resilience.ts";
 import { runSingleAgent } from "./single.ts";
 import type { DispatchDefaults, OnUpdateCallback, ParentUI, SingleResult } from "./types.ts";
@@ -73,6 +74,14 @@ export async function runParallel(
 ): Promise<{ results: SingleResult[]; successCount: number; text: string; allFailed: boolean }> {
 	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, parentUI, forwardedPermissions } = deps;
 	const deadline = totalDeadline(opts.totalTimeoutMs);
+	const onError = opts.onError ?? "continue";
+	// Drain-only fail-fast: once a task fails with onError=abort, no new
+	// tasks start; in-flight tasks run to completion (never killed).
+	let failedFast = false;
+	// Per-run FIFO question lock: workers in this run serialize dialogs
+	// without blocking other runs or single-mode (global lock). No default
+	// question timeout — opt-in via questionTimeoutMs only.
+	const questionLock = createQuestionLock();
 	const allResults: SingleResult[] = new Array(tasks.length);
 	for (let i = 0; i < tasks.length; i++) {
 		allResults[i] = {
@@ -137,6 +146,7 @@ export async function runParallel(
 									questionTimeoutMs: t.questionTimeoutMs ?? opts.questionTimeoutMs,
 									parentUI,
 									forwardedPermissions,
+									questionLock,
 									labelPrefix: `[parallel ${t.agent}]`,
 								},
 							),
@@ -165,13 +175,25 @@ export async function runParallel(
 			}
 			allResults[index] = result;
 			emitParallelUpdate();
+			if (onError === "abort" && isFailedResult(result) && result.errorCode !== "aborted" && result.errorCode !== "budget-exceeded")
+				failedFast = true;
 			return result;
 		},
-		() => signal?.aborted ?? isBudgetExceeded(deadline),
+		() => (signal?.aborted ?? false) || isBudgetExceeded(deadline) || (onError === "abort" && failedFast),
 		(t, index) => {
-			const skipped = isBudgetExceeded(deadline)
-				? skippedResult(t, defaultCwd, "Task skipped: total budget exceeded.", "budget-exceeded")
-				: skippedResult(t, defaultCwd, "Task skipped: aborted before start.", "aborted");
+			let skipped: SingleResult;
+			if (signal?.aborted) {
+				skipped = skippedResult(t, defaultCwd, "Task skipped: aborted before start.", "aborted");
+			} else if (isBudgetExceeded(deadline)) {
+				skipped = skippedResult(t, defaultCwd, "Task skipped: total budget exceeded.", "budget-exceeded");
+			} else {
+				skipped = skippedResult(
+					t,
+					defaultCwd,
+					"Task skipped: onError=abort stopped queue after earlier failure.",
+					"aborted",
+				);
+			}
 			allResults[index] = skipped;
 			return skipped;
 		},
@@ -188,10 +210,11 @@ export async function runParallel(
 		return `### [${r.agent}] ${status}\n\n${output}`;
 	});
 	const allFailed = successCount === 0 && results.length > 0;
+	const earlyStop = onError === "abort" && failedFast ? " (stopped early: onError=abort, in-flight drained)" : "";
 	return {
 		results,
 		successCount,
-		text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n---\n\n")}`,
+		text: `Parallel: ${successCount}/${results.length} succeeded${earlyStop}\n\n${summaries.join("\n\n---\n\n")}`,
 		allFailed,
 	};
 }

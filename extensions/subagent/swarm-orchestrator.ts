@@ -4,6 +4,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentConfig } from "./agents.ts";
+import { createQuestionLock } from "./questions.ts";
 import { isBudgetExceeded, runWithRetry, totalDeadline } from "./resilience.ts";
 import { runSingleAgent } from "./single.ts";
 import type { DispatchDefaults, OnUpdateCallback, ParentUI, SingleResult, SwarmCtx, SwarmInfo } from "./types.ts";
@@ -74,6 +75,7 @@ export interface SwarmOptions {
 	retryAttempts?: number;
 	retryBackoffMs?: number;
 	totalTimeoutMs?: number;
+	onError?: "abort" | "continue";
 	cleanup?: boolean;
 	allowQuestions?: boolean;
 	questionTimeoutMs?: number;
@@ -147,6 +149,9 @@ export async function runSwarm(
 	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, workerDepth, parentUI, forwardedPermissions } = deps;
 	const deadline = totalDeadline(opts.totalTimeoutMs);
 	const swarmInfo: SwarmInfo = { runId, swarmDir, depth: workerDepth };
+	// Per-run FIFO question lock (isolated from single-mode global lock).
+	// No default question timeout — opt-in via questionTimeoutMs only.
+	const questionLock = createQuestionLock();
 
 	await appendTaskLedger(
 		swarmDir,
@@ -184,6 +189,10 @@ export async function runSwarm(
 		}
 	};
 	let aborted = false;
+	const onError = opts.onError ?? "continue";
+	// Drain-only fail-fast: no new workers start after a failure with
+	// onError=abort; in-flight workers run to completion (never killed).
+	let failedFast = false;
 	const checkCancelled = async (): Promise<boolean> => {
 		if (signal?.aborted) return true;
 		if (isBudgetExceeded(deadline)) return true;
@@ -228,6 +237,7 @@ export async function runSwarm(
 								questionTimeoutMs: w.questionTimeoutMs ?? opts.questionTimeoutMs,
 								parentUI,
 								forwardedPermissions,
+								questionLock,
 								labelPrefix: `[swarm ${runId}/${w.id}]`,
 							},
 						),
@@ -249,6 +259,8 @@ export async function runSwarm(
 				}
 			}
 			allResults[index] = result;
+			if (onError === "abort" && isFailedResult(result) && result.errorCode !== "aborted" && result.errorCode !== "budget-exceeded")
+				failedFast = true;
 			try {
 				await appendOutboxValidated(swarmDir, {
 					from: w.id,
@@ -261,19 +273,30 @@ export async function runSwarm(
 			emitSwarmUpdate();
 			return result;
 		},
-		() => signal?.aborted ?? isBudgetExceeded(deadline),
+		() => (signal?.aborted ?? false) || isBudgetExceeded(deadline) || (onError === "abort" && failedFast),
 		(w, index) => {
 			aborted = true;
-			const skipped = isBudgetExceeded(deadline)
-				? failedWorker(w, defaultCwd, Date.now(), `Worker ${w.id} skipped: total budget exceeded.`, "budget-exceeded")
-				: failedWorker(w, defaultCwd, Date.now(), `Worker ${w.id} skipped: swarm aborted before start.`, "aborted");
+			let skipped: SingleResult;
+			if (signal?.aborted) {
+				skipped = failedWorker(w, defaultCwd, Date.now(), `Worker ${w.id} skipped: swarm aborted before start.`, "aborted");
+			} else if (isBudgetExceeded(deadline)) {
+				skipped = failedWorker(w, defaultCwd, Date.now(), `Worker ${w.id} skipped: total budget exceeded.`, "budget-exceeded");
+			} else {
+				skipped = failedWorker(
+					w,
+					defaultCwd,
+					Date.now(),
+					`Worker ${w.id} skipped: onError=abort stopped queue after earlier failure.`,
+					"aborted",
+				);
+			}
 			allResults[index] = skipped;
 			return skipped;
 		},
 	);
 
 	const cancelled = await checkCancelled();
-	if (aborted || cancelled || signal?.aborted) {
+	if (aborted || cancelled || signal?.aborted || failedFast) {
 		await updateManifestStatus(swarmDir, "aborted").catch(() => {});
 		return {
 			results: workerResults,
@@ -317,6 +340,7 @@ export async function runSwarm(
 						questionTimeoutMs: merger.questionTimeoutMs ?? opts.questionTimeoutMs,
 						parentUI,
 						forwardedPermissions,
+						questionLock,
 						labelPrefix: `[swarm ${runId}/merger]`,
 					},
 				),

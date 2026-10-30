@@ -111,6 +111,7 @@ export async function runSingleAgent(
 	const effectiveTimeoutMs = timeoutClamp.timeoutMs;
 	const allowQuestions = opts?.allowQuestions ?? true;
 	const questionTimeoutMs = opts?.questionTimeoutMs;
+	const questionLock = opts?.questionLock ?? withQuestionLock;
 	const parentUI = opts?.parentUI as ParentUI | undefined;
 	const labelPrefix = opts?.labelPrefix;
 	const forwardedPermissions = opts?.forwardedPermissions;
@@ -360,7 +361,7 @@ export async function runSingleAgent(
 					}
 					return;
 				}
-				void withQuestionLock(async () => {
+				void questionLock(async () => {
 					if (settled || signal?.aborted) {
 						safeWriteStdin(proc, method === "confirm" ? { type: "extension_ui_response", id, confirmed: false } : { type: "extension_ui_response", id, cancelled: true });
 						return;

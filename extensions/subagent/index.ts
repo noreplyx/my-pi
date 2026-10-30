@@ -29,7 +29,7 @@ import {
 	truncatePreview,
 } from "./render.ts";
 import { DEFAULT_RETRY_ATTEMPTS, DEFAULT_RETRY_BACKOFF_MS, runWithRetry } from "./resilience.ts";
-import { SubagentParams } from "./schema.ts";
+import { AgentScopeSchema, OnErrorSchema, SubagentParams } from "./schema.ts";
 import { runSingleAgent } from "./single.ts";
 import { createForwardedPermissionStore } from "./forwarded-permissions.ts";
 import { validateSubagentFormat } from "./validate.ts";
@@ -102,8 +102,8 @@ export default function (pi: ExtensionAPI) {
 			"swarm ({goal, workers[{id,agent,task}], merger?} hierarchical blackboard in .swarm/<runId>/).",
 			"Resilience: retry {attempts, backoffMs} (default retry once), totalTimeoutMs (whole-operation budget),",
 			"onError abort|continue (default continue for parallel/swarm).",
-			"Questions: child ask_user calls and permission prompts are forwarded to the user (serialized across workers);",
-			"set allowQuestions:false to auto-dismiss, questionTimeoutMs to bound each dialog.",
+			"Questions: child ask_user calls and permission prompts are forwarded to the user (serialized per-run FIFO);",
+			"set allowQuestions:false to auto-dismiss, opt-in questionTimeoutMs to bound each dialog (no default timeout). notify never queued.",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
@@ -228,6 +228,7 @@ export default function (pi: ExtensionAPI) {
 						retryAttempts,
 						retryBackoffMs,
 						totalTimeoutMs: params.totalTimeoutMs,
+						onError: params.onError ?? "continue",
 						cleanup: spec.cleanup,
 						allowQuestions: params.allowQuestions,
 						questionTimeoutMs: params.questionTimeoutMs,
@@ -595,7 +596,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "swarm_resume",
 		label: "Swarm resume",
-		description: "Fork-resume a swarm: creates <runId>-rN, copies parent done/*.md, runs only missing workers, then merger.",
+		description: "Fork-resume a swarm: creates <runId>-rN, copies parent done/*.md, runs only missing workers, then merger. Respects agentScope (default user) for project-local agents.",
 		parameters: Type.Object({
 			runId: Type.String({ description: "Parent runId to resume from" }),
 			merger: Type.Optional(Type.Object({
@@ -607,13 +608,16 @@ export default function (pi: ExtensionAPI) {
 			cleanup: Type.Optional(Type.Boolean()),
 			timeoutMs: Type.Optional(Type.Number()),
 			totalTimeoutMs: Type.Optional(Type.Number()),
+			onError: OnErrorSchema,
+			agentScope: Type.Optional(AgentScopeSchema),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const dispatchDefaults = {
 				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 				thinkingLevel: ctx.thinkingLevel,
 			};
-			const discovery = discoverAgents(ctx.cwd, "user");
+			const discovery = discoverAgents(ctx.cwd, params.agentScope ?? "user");
+			const agentScope: AgentScope = params.agentScope ?? "user";
 			const parentDepth = parseSwarmDepth(process.env["PI_SUBAGENT_DEPTH"]);
 			const depthCheck = nextSwarmDepth(parentDepth);
 			if ("error" in depthCheck)
@@ -625,11 +629,61 @@ export default function (pi: ExtensionAPI) {
 				input: (title, placeholder, opts) => ctx.ui.input(title, placeholder, opts as any),
 				notify: (message, type) => ctx.ui.notify(message, type),
 			};
+			// Project-local agents are repo-controlled: require approval BEFORE
+			// forkSwarmRun creates the <runId>-rN dir, so cancel leaves no leak.
+			if (agentScope === "project" || agentScope === "both") {
+				const parentManifest = await readManifest(path.join(ctx.cwd, ".swarm", params.runId));
+				const requestedNames = new Set<string>();
+				if (params.merger) requestedNames.add(params.merger.agent);
+				if (parentManifest) for (const w of parentManifest.workers) requestedNames.add(w.agent);
+				const projectRequested = Array.from(requestedNames)
+					.map((name) => discovery.agents.find((a) => a.name.toLowerCase() === name.toLowerCase()))
+					.filter((a): a is AgentConfig => a?.source === "project");
+				if (projectRequested.length > 0 && !ctx.isProjectTrusted()) {
+					const names = projectRequested.map((a) => a.name).join(", ");
+					const dir = discovery.projectAgentsDir ?? "(unknown)";
+					if (!ctx.hasUI) {
+						return {
+							content: [
+								{
+									type: "text",
+									text:
+										`Blocked: project-local agents (${names}) from ${dir} require approval, ` +
+										`but there is no UI to confirm in. Run with a trusted project or a user-scoped agent.`,
+									},
+							],
+							details: {
+								mode: "swarm" as const,
+								agentScope,
+								projectAgentsDir: discovery.projectAgentsDir,
+								results: [],
+								warnings: discovery.warnings,
+							} as any,
+						};
+					}
+					const ok = await ctx.ui.confirm(
+						"Run project-local agents?",
+						`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+					);
+					if (!ok)
+						return {
+							content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
+							details: {
+								mode: "swarm" as const,
+								agentScope,
+								projectAgentsDir: discovery.projectAgentsDir,
+								results: [],
+								warnings: discovery.warnings,
+							} as any,
+						};
+				}
+			}
 			const out = await resumeMissingWorkers(ctx.cwd, params.runId, params.merger, {
 				fallbackTimeoutMs: params.timeoutMs,
 				retryAttempts: DEFAULT_RETRY_ATTEMPTS,
 				retryBackoffMs: DEFAULT_RETRY_BACKOFF_MS,
 				totalTimeoutMs: params.totalTimeoutMs,
+				onError: params.onError ?? "continue",
 				cleanup: params.cleanup,
 			}, {
 				defaultCwd: ctx.cwd,
@@ -639,7 +693,7 @@ export default function (pi: ExtensionAPI) {
 				onUpdate: onUpdate as any,
 				makeDetails: (results: SingleResult[], swarm?: SwarmInfo) => ({
 					mode: "swarm" as const,
-					agentScope: "user" as const,
+					agentScope,
 					projectAgentsDir: discovery.projectAgentsDir,
 					results,
 					warnings: discovery.warnings,
@@ -659,11 +713,12 @@ export default function (pi: ExtensionAPI) {
 		name: "swarm_gc",
 		label: "Swarm GC",
 		description:
-			"List/prune stale .swarm/<runId>/ blackboard dirs. Dry-run by default; pass apply:true to delete. A run is deleted only when older than olderThanDays AND outside the newest keepLastN.",
+			"List/prune stale .swarm/<runId>/ blackboard dirs. Dry-run by default; pass apply:true to delete. A run is deleted only when older than olderThanDays AND outside the newest keepLastN. Running runs and excludeRunId are never deleted. mtime is max-file mtime.",
 		parameters: Type.Object({
 			olderThanDays: Type.Optional(Type.Number({ description: "Delete runs older than N days (default 7)" })),
 			keepLastN: Type.Optional(Type.Number({ description: "Always keep newest N runs (default 10)" })),
 			apply: Type.Optional(Type.Boolean({ description: "Actually delete (default false = dry-run)" })),
+			excludeRunId: Type.Optional(Type.String({ description: "Never delete this runId (active swarm)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!params.apply) {
@@ -671,6 +726,7 @@ export default function (pi: ExtensionAPI) {
 				const preview = await pruneSwarmRuns(ctx.cwd, {
 					olderThanDays: params.olderThanDays,
 					keepLastN: params.keepLastN,
+					excludeRunId: params.excludeRunId,
 					dryRun: true,
 				});
 				const lines = runs.slice(0, 20).map((r) => {
@@ -691,6 +747,7 @@ export default function (pi: ExtensionAPI) {
 			const res = await pruneSwarmRuns(ctx.cwd, {
 				olderThanDays: params.olderThanDays,
 				keepLastN: params.keepLastN,
+				excludeRunId: params.excludeRunId,
 				dryRun: false,
 			});
 			return {
@@ -708,7 +765,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("swarm-gc", {
-		description: "Prune stale .swarm/<runId>/ dirs: /swarm-gc [--older-than N] [--keep-last N] [--apply]",
+		description: "Prune stale .swarm/<runId>/ dirs: /swarm-gc [--older-than N] [--keep-last N] [--apply] [--exclude <runId>]",
 		handler: async (args, ctx) => {
 			const text = args ?? "";
 			const num = (re: RegExp): number | undefined => {
@@ -717,12 +774,18 @@ export default function (pi: ExtensionAPI) {
 				const n = Number(m[1]);
 				return Number.isFinite(n) && n >= 0 ? n : undefined;
 			};
+			const str = (re: RegExp): string | undefined => {
+				const m = text.match(re);
+				return m?.[1];
+			};
 			const olderThan = num(/--older-than\s+(\d+(?:\.\d+)?)/) ?? 7;
 			const keepLast = num(/--keep-last\s+(\d+)/) ?? 10;
+			const excludeRunId = str(/--exclude(?:-run-id)?\s+(\S+)/);
 			const apply = text.includes("--apply");
 			const res = await pruneSwarmRuns(ctx.cwd, {
 				olderThanDays: olderThan,
 				keepLastN: keepLast,
+				excludeRunId,
 				dryRun: !apply,
 			});
 			const verb = apply ? "Deleted" : "Would delete";

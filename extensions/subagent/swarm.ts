@@ -231,24 +231,35 @@ export interface SwarmRunSummary {
 	sizeBytes: number;
 }
 
-async function dirSizeBytes(dir: string): Promise<number> {
+/** Walk a swarm run dir once, returning total bytes + max file mtime.
+ * Reused by `listSwarmRuns` so `mtimeMs` reflects the newest file inside
+ * (not the directory mtime, which is unreliable across filesystems). */
+async function dirStats(dir: string): Promise<{ sizeBytes: number; maxMtimeMs: number }> {
 	let total = 0;
+	let maxMtime = 0;
 	let entries: fs.Dirent[] = [];
 	try {
 		entries = await fs.promises.readdir(dir, { withFileTypes: true });
 	} catch {
-		return 0;
+		return { sizeBytes: 0, maxMtimeMs: 0 };
 	}
 	for (const e of entries) {
 		const p = path.join(dir, e.name);
 		try {
-			if (e.isDirectory()) total += await dirSizeBytes(p);
-			else total += (await fs.promises.stat(p)).size;
+			if (e.isDirectory()) {
+				const sub = await dirStats(p);
+				total += sub.sizeBytes;
+				if (sub.maxMtimeMs > maxMtime) maxMtime = sub.maxMtimeMs;
+			} else {
+				const st = await fs.promises.stat(p);
+				total += st.size;
+				if (st.mtimeMs > maxMtime) maxMtime = st.mtimeMs;
+			}
 		} catch {
 			/* skipped */
 		}
 	}
-	return total;
+	return { sizeBytes: total, maxMtimeMs: maxMtime };
 }
 
 /** List all swarm runs under <cwd>/.swarm, newest first. */
@@ -267,7 +278,14 @@ export async function listSwarmRuns(cwd: string): Promise<SwarmRunSummary[]> {
 		try {
 			const st = await fs.promises.stat(swarmDir);
 			if (!st.isDirectory()) continue;
-			out.push({ runId: e, swarmDir, mtimeMs: st.mtimeMs, sizeBytes: await dirSizeBytes(swarmDir) });
+			const stats = await dirStats(swarmDir);
+			// Effective mtime is the oldest evidence (dir mtime vs newest
+			// file inside): a stale run is collectible even when its files
+			// were recently touched, while truly-active runs stay safe via
+			// the manifest `status==="running"` guard + `excludeRunId` in
+			// `pruneSwarmRuns`. Falls back to dir mtime when empty/unreadable.
+			const mtimeMs = stats.maxMtimeMs > 0 ? Math.min(st.mtimeMs, stats.maxMtimeMs) : st.mtimeMs;
+			out.push({ runId: e, swarmDir, mtimeMs, sizeBytes: stats.sizeBytes });
 		} catch {
 			/* skipped */
 		}
@@ -294,7 +312,9 @@ export interface PruneSwarmRunsResult {
 /**
  * GC for `.swarm/<runId>/` blackboards. Conservative by default: a run is
  * deleted only when it is BOTH older than `olderThanDays` AND outside the
- * newest `keepLastN` (dry-run by default).
+ * newest `keepLastN` (dry-run by default). Runs with manifest
+ * `status==="running"` are always kept, as is `excludeRunId` (the active
+ * run).
  */
 export async function pruneSwarmRuns(cwd: string, opts: PruneSwarmRunsOptions = {}): Promise<PruneSwarmRunsResult> {
 	const olderThanDays = opts.olderThanDays ?? SWARM_GC_DEFAULT_DAYS;
@@ -310,7 +330,21 @@ export async function pruneSwarmRuns(cwd: string, opts: PruneSwarmRunsOptions = 
 		const isNewest = i < keepLastN;
 		const isOld = r.mtimeMs < cutoff;
 		const isActive = opts.excludeRunId !== undefined && r.runId === opts.excludeRunId;
-		if (!isActive && isOld && !isNewest) {
+		if (isActive) {
+			kept.push(r.runId);
+			continue;
+		}
+		// Best-effort: never GC a run that still reports running.
+		try {
+			const manifest = await readManifest(r.swarmDir);
+			if (manifest?.status === "running") {
+				kept.push(r.runId);
+				continue;
+			}
+		} catch {
+			/* unreadable manifest → fall through to age checks */
+		}
+		if (isOld && !isNewest) {
 			deleted.push(r.runId);
 			freedBytes += r.sizeBytes;
 			if (!dryRun) {
