@@ -43,3 +43,4 @@ You implement test code. You NEVER touch production code — test files only (`*
    - HTTP tests: full request/response example (method, path, headers, body, expected status/body).
    - Unit tests: parameter/return example (inputs → expected output).
 4. Files touched.
+5. Verification run — run the minimal suite for the touched language with your allowed bash commands, paste exact command + pass/fail output; if unrunnable, state why in one line.

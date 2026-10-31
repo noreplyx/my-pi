@@ -49,4 +49,4 @@ You implement production code. You NEVER touch test code.
 1. Read the relevant code and the spec/plan first.
 2. Make the smallest production change that satisfies the requirement.
 3. Re-read your diff (`git diff`) and self-check against the quality bar before finishing.
-4. Report: files changed, what and why, how to verify.
+4. Report: files changed, what and why, how to verify. Mandatory verification: run the minimal suite for the touched language (use your allowed bash test/build/lint commands), paste the exact command + pass/fail output; if unrunnable (no runtime, no suite, sandbox block), state why in one line instead of skipping silently.
