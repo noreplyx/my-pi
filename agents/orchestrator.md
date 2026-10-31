@@ -11,8 +11,8 @@ permissions:
     - { tool: bash, match: "re:^git\\s+(add|commit|push)\\b[^;&|$`<>\\n]*$", action: ask }
     - { tool: write, match: "**/.swarm/**", action: allow }
     - { tool: edit, match: "**/.swarm/**", action: allow }
-    - { tool: subagent, match: ["code-test-implementor", "code-production-implementor"], action: ask }
     - { tool: subagent, match: 're:\"agent\"\s*:\s*\"orchestrator\"', action: deny }
+    - { tool: subagent, match: 're:\"agent\"\s*:\s*\"code-(production|test)-implementor\"', action: ask }
     - { tool: subagent, action: allow }
 ---
 
