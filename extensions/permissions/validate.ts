@@ -43,15 +43,63 @@ function compiles(pattern: string): boolean {
 	}
 }
 
+/** Basename of a display path (both `/` and `\\` separators). Case-sensitive. */
+export function baseNameOf(p: string): string {
+	const s = p.split("/").pop() ?? p;
+	return s.split("\\").pop() ?? s;
+}
+
+/** True when a FileReport label identifies the active agent file.
+ *
+ * Tolerant path forms (case-sensitive name): exact match after trim,
+ * basename match (`reviewer.md` vs `agents/reviewer.md` vs absolute
+ * path), or suffix match with a `/` separator guard
+ * (`agents/reviewer.md` matches `/proj/agents/reviewer.md` but
+ * `agents/reviewer.md` does NOT match `/xagents/reviewer.md`).
+ * This keeps R2 enabled across absolute-path / different cwd-relative
+ * label forms instead of silently disabling it on mismatch. */
+export function isActiveAgentFile(label: string, activeFileLabel: string | null | undefined): boolean {
+	const l = label?.trim() ?? "";
+	const a = activeFileLabel?.trim() ?? "";
+	if (!l || !a) return false;
+	if (l === a) return true;
+	if (baseNameOf(l) === baseNameOf(a)) return true;
+	// Defense-in-depth: subsumed by basename above (equal basenames already
+	// returned), kept so a future basename change cannot silently widen this.
+	if (l.endsWith(`/${a}`) || a.endsWith(`/${l}`)) return true;
+	return false;
+}
+
+/** Options for scoping startup validation. R2 (unknown-tool) can be
+ *  scoped to the active agent only; all other rules always run globally. */
+export interface ValidateOptions {
+	/** Label of the active agent file. Tolerant match via {@link isActiveAgentFile}
+	 *  (exact, basename, or `/`-guarded suffix) — callers should pass a
+	 *  `FileReport.label` (or any path form of it, e.g. absolute path).
+	 *  Null = unknown. Normalized (`trim()`) at entry. */
+	activeFileLabel?: string | null;
+	/** When true, run the R2 unknown-tool block only for the active file (skip entirely when null). */
+	scopeUnknownToolCheckToActive?: boolean;
+	/** @deprecated Use `activeFileLabel` instead. Kept for compatibility. */
+	activeLabel?: string | null;
+	/** @deprecated Use `scopeUnknownToolCheckToActive` instead. Kept for compatibility. */
+	scopeR2ToActive?: boolean;
+}
+
 /** Validate the rules of one file. `knownTools` = pi.getAllTools() names; empty = skip R2. */
 function validateRules(
 	label: string,
 	validated: ValidatedConfig,
 	knownTools: string[],
 	isAgent: boolean,
+	opts?: ValidateOptions,
 ): Diagnostic[] {
 	const diags: Diagnostic[] = [];
 	const rules = validated.config.rules;
+	// Per-file R2 scope (hoisted: identical for every rule in this file).
+	const r2ScopingEnabled = opts?.scopeUnknownToolCheckToActive ?? opts?.scopeR2ToActive ?? false;
+	const activeAgentLabel = opts?.activeFileLabel?.trim() || opts?.activeLabel?.trim() || null;
+	const unknownToolCheckInScope = !r2ScopingEnabled ? true : activeAgentLabel ? isActiveAgentFile(label, activeAgentLabel) : false;
 
 	// Surface schema errors (bad action / bad match type / bad tool).
 	for (const e of validated.errors) {
@@ -88,26 +136,32 @@ function validateRules(
 
 		// R2: tool matches no known tool (likely typo). Warning only — MCP/custom
 		// tools may connect after startup, so this can be a false positive.
+		// Scoped to the active agent only (R2 scopeUnknownToolCheckToActive + activeFileLabel,
+		// other agents' files skip R2, so a minimal session never flags tools
+		// that simply are not registered here. Case-insensitive, glob-aware,
+		// as at runtime. Enforcement is unaffected — this is reporting only.
 		if (knownTools.length > 0) {
-			const toolMayBeRegex = isRegexPattern(r.tool) !== null;
-			const matchesKnown =
-				toolMayBeRegex ||
-				knownTools.some((t) => {
-					if (!hasGlobChars(r.tool)) return toolLower === t.toLowerCase();
-					try {
-						return globToRegExp(toolLower).test(t.toLowerCase());
-					} catch {
-						return false;
-					}
-				});
-			if (!matchesKnown) {
-				diags.push({
-					severity: "warning",
-					location: loc,
-					message: `tool ${JSON.stringify(r.tool)} matches no known tool (yet?) — typo, or a tool that connects later`,
-					hint: `check the spelling; ignore this if the tool connects after startup (MCP/custom tools)`,
-					tag: { kind: "unknown-tool", pattern: r.tool },
-				});
+			if (unknownToolCheckInScope) {
+				const toolMayBeRegex = isRegexPattern(r.tool) !== null;
+				const matchesKnown =
+					toolMayBeRegex ||
+					knownTools.some((t) => {
+						if (!hasGlobChars(r.tool)) return toolLower === t.toLowerCase();
+						try {
+							return globToRegExp(toolLower).test(t.toLowerCase());
+						} catch {
+							return false;
+						}
+					});
+				if (!matchesKnown) {
+					diags.push({
+						severity: "warning",
+						location: loc,
+						message: `tool ${JSON.stringify(r.tool)} matches no known tool (yet?) — typo, or a tool that connects later`,
+						hint: `check the spelling; ignore this if the tool connects after startup (MCP/custom tools)`,
+						tag: { kind: "unknown-tool", pattern: r.tool },
+					});
+				}
 			}
 		}
 
@@ -223,8 +277,17 @@ function validateRules(
 }
 
 /** Validate all agent files (agent-only — no global layer, no cross-file
- *  shadowing). Never throws. */
-export function collectDiagnostics(files: FileReport[], knownTools: string[]): Diagnostic[] {
+ *  shadowing). Never throws.
+ *
+ *  `knownTools` is the dynamic session tool list (pi.getAllTools()); the R2
+ *  unknown-tool check runs only for the active agent when
+ *  `opts.scopeUnknownToolCheckToActive` is true (skipped entirely when the
+ *  normalized `activeFileLabel` is null); all other rules (R1/R3-R7) always
+ *  run globally. Active-file matching is tolerant (see {@link isActiveAgentFile}:
+ *  exact, basename, or `/`-guarded suffix — so absolute-path or different
+ *  cwd-relative forms still match instead of silently disabling R2).
+ *  Empty `knownTools` still skips the R2 check entirely. */
+export function collectDiagnostics(files: FileReport[], knownTools: string[], opts?: ValidateOptions): Diagnostic[] {
 	const diags: Diagnostic[] = [];
 	try {
 		for (const f of files) {
@@ -239,7 +302,7 @@ export function collectDiagnostics(files: FileReport[], knownTools: string[]): D
 				});
 				continue;
 			}
-			diags.push(...validateRules(f.label, f.validated, knownTools, f.isAgent));
+			diags.push(...validateRules(f.label, f.validated, knownTools, f.isAgent, opts));
 		}
 	} catch (e: any) {
 		diags.push({ severity: "error", location: "permissions", message: `validator failed: ${e?.message ?? e}` });

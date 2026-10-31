@@ -150,3 +150,21 @@ at enforcement time.
 Unknown-tool warnings are provisional: MCP/custom tools can register after
 startup, so such a warning retracts automatically the first time its tool
 is actually invoked (and stays retracted in `/permissions-status`).
+
+R2 (unknown-tool) is scoped to the active agent only
+(`PI_AGENT_FILE` → `PI_AGENT_NAME` → `agents/main.md`; see
+`resolveActiveAgentFileLabel` in `index.ts`, injectable `env` param for
+tests; `resolveActiveAgentLabel` remains as a deprecated alias). Matching
+is tolerant (exact, basename, or `/`- (or `\`-) guarded suffix — so absolute-path or
+different cwd-relative forms still match) via `isActiveAgentFile` in
+`validate.ts`, driven by `ValidateOptions.scopeUnknownToolCheckToActive` +
+`activeFileLabel` (`scopeR2ToActive`/`activeLabel` remain as deprecated
+aliases). All other rules (R1/R3–R7)
+still validate every agent file globally. When the active agent cannot be
+matched to a report, R2 falls back to `main.md` when present and is
+skipped otherwise — never expanded to all agents. A minimal session
+therefore stays silent for other agents' valid tools, while a genuine
+typo in the active agent (e.g. `wriet`) still warns, still notifies at
+startup, and still retracts once the tool is observed at runtime.
+Enforcement is unaffected (loader/matcher fail-closed semantics
+unchanged, and R2 is reporting-only).

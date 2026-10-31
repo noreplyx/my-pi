@@ -21,7 +21,7 @@ import { buildTargets, describeCall, describeStatus, evaluate, loadAllAgentFiles
 import { matchToolName } from "./matcher.ts";
 import { isAutoApproveEnabled } from "../auto-approve/state.ts";
 import { createSessionGrants, SESSION_CHOICE_DENY_FEEDBACK, SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICES } from "./session-grants.ts";
-import { collectDiagnostics, formatStartupReport, type Diagnostic, type FileReport } from "./validate.ts";
+import { baseNameOf, collectDiagnostics, formatStartupReport, type Diagnostic, type FileReport } from "./validate.ts";
 
 function auditPath(): string {
 	return path.join(getAgentDir(), "permissions", "audit.log");
@@ -47,6 +47,43 @@ function preview(s: string, max = 120): string {
 
 /** Max length (incl. ellipsis) for deny-with-feedback text in block reasons / audit. */
 const FEEDBACK_CAP = 500;
+
+/** Resolve which agent file R2 unknown-tool validation applies to.
+ *
+ * Order: PI_AGENT_FILE (trim) → PI_AGENT_NAME (trim) → agents/main.md
+ * fallback. Matching normalizes labels (basename vs `agents/<name>.md`
+ * vs absolute path; agent names compare case-sensitively; suffix matches
+ * require a `/` (or `\\`) separator guard so `/xagents/reviewer.md` does NOT match
+ * `agents/reviewer.md`). Returns the matching FileReport.label, the main.md
+ * label as fallback when the named agent has no report, or null when even
+ * main.md is absent (R2 is then skipped for startup — never expanded to
+ * all agents). `env` is injectable for tests (defaults to process.env).
+ * Read-only: loader.ts/matcher.ts enforcement is untouched. */
+export function resolveActiveAgentFileLabel(reports: FileReport[], env: NodeJS.ProcessEnv = process.env): string | null {
+	const mainLabel = reports.find((r) => baseNameOf(r.label) === "main.md")?.label ?? null;
+	const file = env.PI_AGENT_FILE?.trim() || null;
+	const name = env.PI_AGENT_NAME?.trim() || null;
+	if (file) {
+		const exact = reports.find((r) => r.label === file)?.label;
+		if (exact) return exact;
+		const base = baseNameOf(file);
+		const byBase = reports.find((r) => baseNameOf(r.label) === base)?.label;
+		if (byBase) return byBase;
+		const bySuffix = reports.find((r) => file.endsWith(`/${r.label}`) || file.endsWith(`\\${r.label}`) || r.label.endsWith(`/${file}`) || r.label.endsWith(`\\${file}`))?.label;
+		if (bySuffix) return bySuffix;
+		return mainLabel;
+	}
+	if (name) {
+		const base = name.endsWith(".md") ? baseNameOf(name) : `${baseNameOf(name)}.md`;
+		const matchedLabel = reports.find((r) => baseNameOf(r.label) === base)?.label ?? null;
+		if (matchedLabel) return matchedLabel;
+		return mainLabel;
+	}
+	return mainLabel;
+}
+
+/** @deprecated Use {@link resolveActiveAgentFileLabel} instead. Kept for compatibility. */
+export const resolveActiveAgentLabel = resolveActiveAgentFileLabel;
 
 /** Gather all agent configs for validation. Never throws. */
 function gatherFileReports(cwd: string): FileReport[] {
@@ -114,6 +151,16 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
+	/** Single scoped-diagnostics pipeline (R2 unknown-tool scoped to the
+	 *  active agent file; all other rules global; retracted warnings
+	 *  filtered). Shared by session_start and permissions-status. */
+	function getScopedDiagnostics(cwd: string): Diagnostic[] {
+		const reports = gatherFileReports(cwd);
+		return withoutRetracted(
+			collectDiagnostics(reports, knownToolNames(), { scopeUnknownToolCheckToActive: true, activeFileLabel: resolveActiveAgentFileLabel(reports) }),
+		);
+	}
+
 	// Startup validation: warn about broken/suspicious permission configs.
 	// Startup/reload only (not resume/fork/new) to avoid repeat noise.
 	// Never blocks startup — broken rules are already fail-closed at enforcement.
@@ -122,7 +169,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			reloadAll();
 			const staleEnv = warnStalePermissionsFileEnv();
-			const diags = withoutRetracted(collectDiagnostics(gatherFileReports(ctx.cwd), knownToolNames()));
+			const diags = getScopedDiagnostics(ctx.cwd);
 			if (staleEnv) {
 				diags.push({ severity: "warning", location: "PI_PERMISSIONS_FILE", message: staleEnv });
 			}
@@ -281,7 +328,7 @@ export default function (pi: ExtensionAPI) {
 				...s.agentErrors.map((e) => `  ! ${e}`),
 				`Targets: bash→command, read/write/edit/ls→path, find/grep→path:pattern, other→JSON args.`,
 			];
-			const diags = withoutRetracted(collectDiagnostics(gatherFileReports(ctx.cwd), knownToolNames()));
+			const diags = getScopedDiagnostics(ctx.cwd);
 			if (diags.length > 0) {
 				lines.push(`--- validation (${diags.length}) ---`);
 				for (const d of diags.slice(0, 20)) lines.push(`${d.severity}  ${d.location}: ${d.message}`);
