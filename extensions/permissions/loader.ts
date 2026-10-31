@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { matchTargets, matchToolName, hasInvalidRegex } from "./matcher.ts";
+import { matchTargets, matchToolName, hasInvalidGlobMatch, hasInvalidRegex } from "./matcher.ts";
 import { splitShellCommands } from "./shell-split.ts";
 import {
 	type PermissionAction,
@@ -54,6 +54,25 @@ export const FALLBACK_DEFAULT_ACTION: PermissionAction = "ask";
 
 /** Agent file backing the main session (no PI_AGENT_NAME/PI_AGENT_FILE). */
 export const MAIN_AGENT_NAME = "main";
+
+/** Explicit agent identity override (e.g. `--as-agent`). Null = use process env. */
+export interface AgentOverride {
+	name?: string;
+	file?: string;
+}
+
+/** Resolve an absolute path through symlinks; lexical fallback on ENOENT. Never throws. */
+function canonicalAbs(candidate: string): string {
+	try {
+		return fs.realpathSync(candidate);
+	} catch {
+		try {
+			return normalizeDir(path.resolve(candidate));
+		} catch {
+			return candidate;
+		}
+	}
+}
 
 /** Warned once per process when the removed PI_PERMISSIONS_FILE var is set. */
 let warnedPermissionsFileEnv = false;
@@ -137,8 +156,9 @@ function loadFileIntoCache(filePath: string, prev: CacheEntry | null): CacheEntr
 	return { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig(value), filePath };
 }
 
-/** Resolve the current agent's permissions file/content from the environment. */
-function currentAgentKey(): string {
+/** Resolve the current agent key from env or an explicit override. */
+function currentAgentKey(cwd?: string, override: AgentOverride | null = null): string {
+	if (override) return ["override", override.name ?? "", override.file ?? "", cwd ?? ""].join("|");
 	return `${process.env.PI_AGENT_NAME ?? ""}\0${process.env.PI_AGENT_FILE ?? ""}`;
 }
 
@@ -172,6 +192,8 @@ function loadMainEntry(cwd?: string): CacheEntry | null {
 			if (ref.kind === "file") return loadFileIntoCache(path.resolve(path.dirname(c), ref.path), null);
 			if (ref.kind === "inline")
 				return { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig(ref.value), filePath: c };
+			if (ref.kind === "invalid")
+				return { mtimeMs: stat.mtimeMs, exists: true, validated: { config: { defaultAction: "ask", rules: [] }, errors: [ref.error], hasDefault: false }, filePath: c };
 			return { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig({}), filePath: c };
 		} catch {
 			continue;
@@ -180,13 +202,13 @@ function loadMainEntry(cwd?: string): CacheEntry | null {
 	return null;
 }
 
-function loadAgentEntry(cwd?: string): CacheEntry | null {
-	const name = process.env.PI_AGENT_NAME?.trim();
-	const file = process.env.PI_AGENT_FILE?.trim();
+function loadAgentEntry(cwd?: string, override: AgentOverride | null = null): CacheEntry | null {
+	const name = (override?.name ?? process.env.PI_AGENT_NAME ?? "").trim();
+	const file = (override?.file ?? process.env.PI_AGENT_FILE ?? "").trim();
 	// Main session (no agent env): policy comes from agents/main.md.
 	if (!name && !file) return loadMainEntry(cwd);
-	const key = `${currentAgentKey()}\0${cwd ?? ""}`;
-	if (agentCache.key === key && agentCache.entry) {
+	const key = `${currentAgentKey(cwd, override)}\0${cwd ?? ""}`;
+	if (!override && agentCache.key === key && agentCache.entry) {
 		// Revalidate mtime if file-backed. Negative (unknown-agent) entries are
 		// NOT pinned — fall through and re-probe so a file created after a
 		// miss is picked up without a reload.
@@ -214,8 +236,10 @@ function loadAgentEntry(cwd?: string): CacheEntry | null {
 			} else if (ref.kind === "file") {
 				const resolved = path.resolve(path.dirname(file), ref.path);
 				entry = loadFileIntoCache(resolved, null);
-			} else {
+			} else if (ref.kind === "inline") {
 				entry = { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig(ref.value), filePath: file };
+			} else {
+				entry = { mtimeMs: stat.mtimeMs, exists: true, validated: { config: { defaultAction: "ask", rules: [] }, errors: [ref.error], hasDefault: false }, filePath: file };
 			}
 		} catch (e: any) {
 			entry = {
@@ -250,6 +274,8 @@ function loadAgentEntry(cwd?: string): CacheEntry | null {
 				if (ref.kind === "file") entry = loadFileIntoCache(path.resolve(path.dirname(c), ref.path), null);
 				else if (ref.kind === "inline")
 					entry = { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig(ref.value), filePath: c };
+				else if (ref.kind === "invalid")
+					entry = { mtimeMs: stat.mtimeMs, exists: true, validated: { config: { defaultAction: "ask", rules: [] }, errors: [ref.error], hasDefault: false }, filePath: c };
 				else
 					entry = { mtimeMs: stat.mtimeMs, exists: true, validated: validateConfig({}), filePath: c };
 				break;
@@ -266,8 +292,10 @@ function loadAgentEntry(cwd?: string): CacheEntry | null {
 			};
 		}
 	}
-	agentCache.key = key;
-	agentCache.entry = entry;
+	if (!override) {
+		agentCache.key = key;
+		agentCache.entry = entry;
+	}
 	return entry;
 }
 
@@ -280,11 +308,30 @@ function asString(v: unknown): string | null {
 }
 
 function pickPath(input: Record<string, unknown>): string | null {
-	for (const k of ["path", "file_path", "filePath", "dir", "cwd"]) {
-		const s = asString(input[k]);
-		if (s) return s;
+	for (const key of ["path", "file_path", "filePath", "dir", "cwd"]) {
+		const found = asString(input[key]);
+		if (found) return found;
 	}
 	return null;
+}
+
+/** True for file-path tools whose match targets are path globs. */
+function isPathTool(toolName: string): boolean {
+	const lower = toolName.toLowerCase();
+	return ["read", "write", "edit", "ls", "find", "grep"].includes(lower);
+}
+
+/**
+ * True when a path tool call carries no known path key. Fail-closed:
+ * allow rules never match an empty target (only deny can match, else ask).
+ * Never synthesize a matchable "."/"" — `ls` keeps "." only when the
+ * input is truly empty (bare cwd listing).
+ */
+export function isEmptyPathTarget(toolName: string, input: Record<string, unknown>): boolean {
+	if (!isPathTool(toolName)) return false;
+	if (pickPath(input) !== null) return false;
+	if (toolName.toLowerCase() === "ls" && Object.keys(input).length === 0) return false;
+	return true;
 }
 
 /**
@@ -298,7 +345,8 @@ export function buildTargets(toolName: string, input: Record<string, unknown>, c
 		return [cmd];
 	}
 	if (["read", "write", "edit"].includes(lower)) {
-		const raw = pickPath(input) ?? "";
+		const raw = pickPath(input);
+		if (raw === null) return [""];
 		const cands = [raw];
 		if (raw) {
 			try {
@@ -314,13 +362,20 @@ export function buildTargets(toolName: string, input: Record<string, unknown>, c
 		return cands;
 	}
 	if (lower === "ls") {
-		const raw = pickPath(input) ?? ".";
+		const raw = pickPath(input);
+		if (raw === null) {
+			// Bare `ls` with truly empty input lists cwd — keep ".".
+			// Any other input shape without a path is fail-closed empty.
+			if (Object.keys(input).length === 0) return [".", path.resolve(cwd, ".")];
+			return [""];
+		}
 		return [raw, path.resolve(cwd, raw)];
 	}
 	if (lower === "find" || lower === "grep") {
-		const p = pickPath(input) ?? ".";
+		const targetPath = pickPath(input);
 		const pattern = asString(input.pattern) ?? "";
-		return [pattern ? `${p}:${pattern}` : p, p, pattern].filter(Boolean);
+		if (targetPath === null) return pattern ? [pattern, ""] : [""];
+		return [pattern ? `${targetPath}:${pattern}` : targetPath, targetPath, pattern].filter(Boolean);
 	}
 	try {
 		const json = JSON.stringify(input);
@@ -498,13 +553,14 @@ export function normalizeDir(p: string): string {
  * Absolute file path for a tool call, for directory-grant matching.
  * File tools only; null for bash/non-path tools or when no path is present.
  * Uses the path part of the input (not the `path:pattern` display target).
+ * Symlink-canonicalized via realpath with lexical fallback. Never throws.
  */
 export function resolveGrantPath(toolName: string, input: Record<string, unknown>, cwd: string): string | null {
 	if (!isPathTool(toolName)) return null;
 	const raw = pickPath(input);
 	if (!raw) return null;
 	try {
-		return normalizeDir(path.resolve(cwd, raw));
+		return canonicalAbs(path.resolve(cwd, raw));
 	} catch {
 		return null;
 	}
@@ -518,14 +574,18 @@ export function resolveGrantPath(toolName: string, input: Record<string, unknown
  * Never throws — falls back to the parent directory when stat fails.
  */
 export function resolveGrantDir(toolName: string, input: Record<string, unknown>, cwd: string): string | null {
-	const p = resolveGrantPath(toolName, input, cwd);
-	if (!p) return null;
+	const grantPath = resolveGrantPath(toolName, input, cwd);
+	if (!grantPath) return null;
 	try {
-		if (fs.statSync(p).isDirectory()) return normalizeDir(p);
+		if (fs.statSync(grantPath).isDirectory()) return canonicalAbs(grantPath);
 	} catch {
 		// Nonexistent path (e.g. file to be created) — treat as a file.
 	}
-	return path.dirname(p);
+	try {
+		return canonicalAbs(path.dirname(grantPath));
+	} catch {
+		return path.dirname(grantPath);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -541,36 +601,70 @@ export function resolveGrantDir(toolName: string, input: Record<string, unknown>
  * Parent `subagent` invocations are gated by the parent agent's layer;
  * inner child calls are gated by the target agent's layer.
  */
-/** True for tools whose match targets are file paths (segment-aware globs). */
-function isPathTool(toolName: string): boolean {
-	const lower = toolName.toLowerCase();
-	return ["read", "write", "edit", "ls", "find", "grep"].includes(lower);
+/** True for tools whose match targets are file paths (segment-aware globs). See isPathTool above. */
+
+/**
+ * Defense-in-depth: does an allow-decided shell segment smuggle substitution
+ * or redirection (`$(`, `${`, backtick, `<()`, `>()`, unquoted `>`/`<`/`2>&1`)?
+ * Quote-aware for single/double quotes (backticks are substitution, not quotes).
+ * Never throws.
+ */
+function hasDangerousShell(segment: string): boolean {
+	try {
+		if (segment.includes("$(") || segment.includes("${") || segment.includes("`") || segment.includes("<(") || segment.includes(">(")) return true;
+		let stripped = "";
+		let quote: string | null = null;
+		for (let index = 0; index < segment.length; index += 1) {
+			const ch = segment[index];
+			if (quote) {
+				if (ch === quote) quote = null;
+				stripped += " ";
+				continue;
+			}
+			if (ch === "'" || ch === '"') {
+				quote = ch;
+			stripped += " ";
+				continue;
+			}
+			stripped += ch;
+		}
+		// Unclosed quote: the shell would treat the remainder as quoted (or a
+		// syntax error), so a hidden `>`/`<` can't be trusted as quoted — fail
+		// closed to ask.
+		if (quote !== null) return true;
+		return stripped.includes(">") || stripped.includes("<");
+	} catch {
+		return false;
+	}
 }
 
-export function evaluate(toolName: string, input: Record<string, unknown>, cwd: string): EvalResult {
+export function evaluate(toolName: string, input: Record<string, unknown>, cwd: string, override: AgentOverride | null = null): EvalResult {
 	const targets = buildTargets(toolName, input, cwd);
 	const primary = targets[0] ?? "";
 	const pathMode = isPathTool(toolName);
+	const emptyTarget = isEmptyPathTarget(toolName, input);
 
-	const agentEntry = loadAgentEntry(cwd);
+	const agentEntry = loadAgentEntry(cwd, override);
 	const agentRules = agentEntry?.exists ? agentEntry.validated.config.rules : [];
 
-	// Fail-closed broken patterns: an uncompilable regex never matches via
-	// `matchOne` (returns false). For `deny` that would be fail-open, so a
-	// deny rule with a broken pattern is treated as matching everything its
-	// tool selector matches; a broken `allow`/`ask` is treated as never
-	// matching (falls through to default). Both cases are also reported by
-	// validation (R1) — this only decides the runtime direction.
+	// Fail-closed broken patterns: an uncompilable regex or invalid glob never
+	// matches via `matchOne` (returns false). For `deny` that would be fail-open,
+	// so a deny rule with a broken pattern is treated as matching everything its
+	// tool selector matches; a broken `allow`/`ask` is treated as never matching
+	// (falls through to default). Empty path targets never match allow rules
+	// (only deny can match, else ask). Both cases are also reported by
+	// validation (R1/R1b) — this only decides the runtime direction.
 	const firstMatch = (rules: PermissionRule[], cands: string[]) => {
-		for (let i = 0; i < rules.length; i++) {
-			const r = rules[i];
-			if (!matchToolName(r.tool, toolName)) continue;
-			if (hasInvalidRegex(r.match)) {
-				if (r.action === "deny") return { index: i, rule: r };
+		for (let ruleIndex = 0; ruleIndex < rules.length; ruleIndex++) {
+			const rule = rules[ruleIndex];
+			if (!matchToolName(rule.tool, toolName)) continue;
+			if (emptyTarget && rule.action === "allow") continue;
+			if (hasInvalidRegex(rule.match) || hasInvalidGlobMatch(rule.match)) {
+				if (rule.action === "deny") return { index: ruleIndex, rule };
 				continue;
 			}
-			if (!matchTargets(r.match, cands, pathMode)) continue;
-			return { index: i, rule: r };
+			if (!matchTargets(rule.match, cands, pathMode)) continue;
+			return { index: ruleIndex, rule };
 		}
 		return null;
 	};
@@ -608,8 +702,16 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 						return { ...results[i], target: primary, segment: segments[i], segmentIndex: i, segmentCount: segments.length };
 					}
 				}
-				const firstNonAllow = results.findIndex((r) => r.action !== "allow");
+				const firstNonAllow = results.findIndex((result) => result.action !== "allow");
 				if (firstNonAllow === -1) {
+					// All segments allow — defense-in-depth: a smuggled
+					// substitution/redirect in any allow segment downgrades to ask.
+					// Deny stays authoritative (returned above).
+					for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
+						if (hasDangerousShell(segments[segmentIndex])) {
+							return { ...results[segmentIndex], action: "ask", target: primary, segment: segments[segmentIndex], segmentIndex, segmentCount: segments.length };
+						}
+					}
 					return { ...results[0], action: "allow", target: primary, segment: segments[0], segmentIndex: 0, segmentCount: segments.length };
 				}
 				return {
@@ -620,6 +722,13 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 					segmentCount: segments.length,
 				};
 			}
+			// Single-segment allow with smuggled substitution/redirect → ask.
+			// Deny stays authoritative (evalOne deny is returned untouched).
+			const single = evalOne([primary], primary);
+			if (single.action === "allow" && hasDangerousShell(primary)) {
+				return { ...single, action: "ask" };
+			}
+			return single;
 		} catch {
 			// Fail closed to whole-string evaluation below.
 		}
@@ -628,7 +737,7 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 	return evalOne(targets, primary);
 }
 
-export function describeStatus(cwd?: string): {
+export function describeStatus(cwd?: string, override: AgentOverride | null = null): {
 	agentName: string | null;
 	agentFile: string | null;
 	agentExists: boolean;
@@ -636,10 +745,12 @@ export function describeStatus(cwd?: string): {
 	agentRuleCount: number;
 	agentDefault: string | null;
 } {
-	const a = loadAgentEntry(cwd);
+	const a = loadAgentEntry(cwd, override);
+	const overrideName = override?.name?.trim() || null;
+	const overrideFile = override?.file?.trim() || null;
 	return {
-		agentName: process.env.PI_AGENT_NAME?.trim() || (a?.exists ? MAIN_AGENT_NAME : null),
-		agentFile: process.env.PI_AGENT_FILE?.trim() || a?.filePath || null,
+		agentName: overrideName ?? (process.env.PI_AGENT_NAME?.trim() || (a?.exists ? MAIN_AGENT_NAME : null)),
+		agentFile: overrideFile ?? (process.env.PI_AGENT_FILE?.trim() || a?.filePath || null),
 		agentExists: a?.exists ?? false,
 		agentErrors: a?.validated.errors ?? [],
 		agentRuleCount: a?.validated.config.rules.length ?? 0,
@@ -701,6 +812,10 @@ function readAgentFileReport(filePath: string, cwd: string, projectRoot: string 
 		const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
 		const ref = resolveAgentPermissionsRef(frontmatter.permissions);
 		if (ref.kind === "none") return null; // no permissions block — nothing to report
+		if (ref.kind === "invalid") {
+			const agentName = typeof frontmatter.name === "string" ? frontmatter.name : path.basename(filePath);
+			return { filePath, label, agentName, validated: { config: { defaultAction: "ask", rules: [] }, errors: [ref.error], hasDefault: false } };
+		}
 		const agentName = typeof frontmatter.name === "string" ? frontmatter.name : path.basename(filePath);
 		if (ref.kind === "file") {
 			const resolved = path.resolve(path.dirname(filePath), ref.path);
@@ -714,7 +829,11 @@ function readAgentFileReport(filePath: string, cwd: string, projectRoot: string 
 					: validateConfig(value),
 			};
 		}
-		return { filePath, label, agentName, validated: validateConfig(ref.value) };
+		if (ref.kind === "inline") return { filePath, label, agentName, validated: validateConfig(ref.value) };
+		// All four ref kinds return above — unreachable, kept as a fail-closed
+		// fallback so a future kind can't silently fall through to `catch`.
+		const _exhaustive: never = ref;
+		return { filePath, label, agentName, validated: { config: { defaultAction: "ask", rules: [] }, errors: ["invalid permissions value"], hasDefault: false } };
 	} catch (e: any) {
 		return {
 			filePath,

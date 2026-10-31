@@ -31,6 +31,35 @@ describe("R1 invalid regex", () => {
 	});
 });
 
+describe("R1b invalid glob", () => {
+	test("reports error with fail-closed wording", () => {
+		const diags = collectDiagnostics(
+			[report("agents/reviewer.md", [{ tool: "read", match: "[z-a]", action: "deny" }])],
+			["read"],
+		);
+		expect(
+			diags.some((d) => d.severity === "error" && d.message.includes("invalid glob") && d.message.includes("fails closed")),
+		).toBe(true);
+	});
+	test("valid glob is clean", () => {
+		const diags = collectDiagnostics(
+			[report("agents/reviewer.md", [{ tool: "read", match: "src/*.ts", action: "allow" }])],
+			["read"],
+		);
+		expect(diags.some((d) => d.message.includes("invalid glob"))).toBe(false);
+	});
+});
+
+describe("R2 tool matching is case-insensitive", () => {
+	test("no unknown-tool warning on case-only mismatch", () => {
+		const diags = collectDiagnostics(
+			[report("agents/reviewer.md", [{ tool: "Read", match: "src/*", action: "allow" }])],
+			["read"],
+		);
+		expect(diags.some((d) => d.message.includes("matches no known tool"))).toBe(false);
+	});
+});
+
 describe("missing agent file", () => {
 	test("missing main.md warns and falls back to ask", () => {
 		const diags = collectDiagnostics(

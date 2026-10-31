@@ -3,12 +3,11 @@
  *
  * Pure functions (no fs, no pi) so they can be unit-tested directly.
  * Enforcement never depends on this module — it only *reports* problems.
- * Broken regexes fail closed at runtime in loader.ts (deny blocks,
- * allow/ask never matches); these diagnostics make that visible at startup
- * instead of mid-run.
+ * Broken regexes and broken globs fail closed at runtime in loader.ts
+ * (deny blocks, allow/ask never matches); these diagnostics make that
+ * visible at startup instead of mid-run.
  */
-
-import { globToRegExp, hasGlobChars, isRegexPattern } from "./matcher.ts";
+import { globToRegExp, hasGlobChars, hasInvalidGlob, isRegexPattern } from "./matcher.ts";
 import { splitShellCommands } from "./shell-split.ts";
 import type { ValidatedConfig } from "./schema.ts";
 
@@ -61,8 +60,11 @@ function validateRules(
 
 	rules.forEach((r, i) => {
 		const loc = `${label} rules[${i}]`;
+		// Tool names match case-insensitively at runtime (see matchToolName),
+		// so all tool-name comparisons here use the lowered form.
+		const toolLower = r.tool.toLowerCase();
 
-		// R1: regex that never compiles. Runtime fails closed (deny blocks,
+		// R1/R1b: regex or glob that never compiles. Runtime fails closed (deny blocks,
 		// allow/ask never matches) — this diagnostic is the visibility path.
 		const patterns = r.match === undefined ? [] : Array.isArray(r.match) ? r.match : [r.match];
 		for (const p of patterns) {
@@ -74,6 +76,13 @@ function validateRules(
 					message: `invalid regex ${JSON.stringify(p)} — deny fails closed (blocks), allow/ask never matches`,
 					hint: `fix the pattern or use a glob/substring instead`,
 				});
+			} else if (isRegexPattern(p.trim()) === null && hasInvalidGlob(p)) {
+				diags.push({
+					severity: "error",
+					location: loc,
+					message: `invalid glob ${JSON.stringify(p)} — deny fails closed (blocks), allow/ask never matches`,
+					hint: `fix the character class or escape the brackets`,
+				});
 			}
 		}
 
@@ -84,9 +93,9 @@ function validateRules(
 			const matchesKnown =
 				toolMayBeRegex ||
 				knownTools.some((t) => {
-					if (!hasGlobChars(r.tool)) return r.tool === t;
+					if (!hasGlobChars(r.tool)) return toolLower === t.toLowerCase();
 					try {
-						return globToRegExp(r.tool).test(t);
+						return globToRegExp(toolLower).test(t.toLowerCase());
 					} catch {
 						return false;
 					}
@@ -107,7 +116,7 @@ function validateRules(
 		// Plain first-match order applies within each agent file.
 		for (let k = 0; k < i; k++) {
 			const prev = rules[k];
-			const sameTool = prev.tool === r.tool || prev.tool === "*";
+			const sameTool = prev.tool.toLowerCase() === toolLower || prev.tool === "*";
 			if (!sameTool) continue;
 			const prevAll = prev.match === undefined;
 			const sameMatch = JSON.stringify(prev.match ?? null) === JSON.stringify(r.match ?? null);
@@ -128,7 +137,7 @@ function validateRules(
 		// defense-in-depth (redirects/subshells stay inside their segment).
 		if (
 			r.action === "allow" &&
-			(r.tool === "bash" || r.tool === "powershell") &&
+			(toolLower === "bash" || toolLower === "powershell") &&
 			patterns.some((p) => {
 				if (typeof p !== "string") return false;
 				const rx = isRegexPattern(p);
@@ -151,7 +160,7 @@ function validateRules(
 		// denies such as `re:[;&|$...]` intentionally contain chaining chars.
 		if (
 			(r.action === "allow" || r.action === "ask") &&
-			(r.tool === "bash" || r.tool === "powershell")
+			(toolLower === "bash" || toolLower === "powershell")
 		) {
 			for (const p of patterns) {
 				if (typeof p !== "string") continue;
@@ -178,7 +187,7 @@ function validateRules(
 					message: `allows every tool call — allow-all`,
 					hint: `scope it to specific tools`,
 				});
-			} else if ((r.tool === "bash" || r.tool === "powershell") && r.match === undefined) {
+			} else if ((toolLower === "bash" || toolLower === "powershell") && r.match === undefined) {
 				diags.push({
 					severity: "warning",
 					location: loc,

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describeCall, evaluate, normalizeDir, reloadAll, resolveGrantDir, resolveGrantPath, shortenHome } from "./loader.ts";
+import { describeCall, describeStatus, evaluate, normalizeDir, reloadAll, resolveGrantDir, resolveGrantPath, shortenHome } from "./loader.ts";
 
 let tmpDirs: string[] = [];
 
@@ -123,6 +123,38 @@ describe("fail-closed invalid regex", () => {
 	test("broken allow never matches (falls through)", () => {
 		useAgent([{ tool: "bash", match: "re:([", action: "allow" }], "ask");
 		expect(evaluate("bash", { command: "echo hello" }, "/tmp").action).toBe("ask");
+	});
+});
+
+describe("fail-closed invalid glob", () => {
+	test("broken class deny blocks", () => {
+		useAgent([{ tool: "read", match: "[z-a]", action: "deny" }]);
+		expect(evaluate("read", { path: "src/a.ts" }, "/repo").action).toBe("deny");
+	});
+	test("broken class allow never matches (falls through)", () => {
+		useAgent([{ tool: "read", match: "[z-a]", action: "allow" }], "ask");
+		expect(evaluate("read", { path: "src/a.ts" }, "/repo").action).toBe("ask");
+	});
+});
+
+describe("dangerous shell downgrade", () => {
+	test("allow with smuggled redirect/substitution becomes ask", () => {
+		useAgent([{ tool: "bash", action: "allow" }], "ask");
+		expect(evaluate("bash", { command: "echo hi > /tmp/x" }, "/tmp").action).toBe("ask");
+		expect(evaluate("bash", { command: "echo $(id)" }, "/tmp").action).toBe("ask");
+		expect(evaluate("bash", { command: "echo `id`" }, "/tmp").action).toBe("ask");
+	});
+	test("quoted redirect stays allow, unclosed quote fails closed", () => {
+		useAgent([{ tool: "bash", action: "allow" }], "ask");
+		expect(evaluate("bash", { command: `echo "a > b"` }, "/tmp").action).toBe("allow");
+		expect(evaluate("bash", { command: `echo 'foo > /tmp/x` }, "/tmp").action).toBe("ask");
+	});
+	test("deny stays authoritative over dangerous segments", () => {
+		useAgent([
+			{ tool: "bash", match: "*rm -rf*", action: "deny" },
+			{ tool: "bash", action: "allow" },
+		]);
+		expect(evaluate("bash", { command: "echo hi > /tmp/x; rm -rf /tmp/y" }, "/tmp").action).toBe("deny");
 	});
 });
 
@@ -372,5 +404,23 @@ describe("orchestrator delegates to implementor (target allow = no prompt)", () 
 		reloadAll();
 		expect(evaluate("edit", { path: "src/foo.test.ts" }, "/repo").action).toBe("deny");
 		expect(evaluate("write", { path: "tests/foo.ts" }, "/repo").action).toBe("deny");
+	});
+});
+
+describe("describeStatus override", () => {
+	test("explicit override wins over env", () => {
+		useAgent([{ tool: "read", match: "src/*", action: "allow" }], "ask");
+		const file = process.env.PI_AGENT_FILE as string;
+		const s = describeStatus("/repo", { name: "override-agent", file });
+		expect(s.agentName).toBe("override-agent");
+		expect(s.agentFile).toBe(file);
+		expect(s.agentRuleCount).toBe(1);
+	});
+	test("null override preserves env behavior", () => {
+		useAgent([{ tool: "read", match: "src/*", action: "allow" }], "ask");
+		const file = process.env.PI_AGENT_FILE as string;
+		const s = describeStatus("/repo", null);
+		expect(s.agentFile).toBe(file);
+		expect(s.agentRuleCount).toBe(1);
 	});
 });

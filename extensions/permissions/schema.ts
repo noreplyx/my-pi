@@ -111,14 +111,14 @@ export function validateConfig(raw: unknown): ValidatedConfig {
 	return { config: { defaultAction, rules }, errors, hasDefault };
 }
 
-/** Agent frontmatter `permissions` may be an inline object or a path string. */
+/** Agent frontmatter `permissions` may be an inline object or a path string. Non-object/non-string values are invalid (fail-closed, surfaced as an error — never silently ignored). */
 export function resolveAgentPermissionsRef(
 	frontmatterPermissions: unknown,
-): { kind: "inline"; value: unknown } | { kind: "file"; path: string } | { kind: "none" } {
+): { kind: "inline"; value: unknown } | { kind: "file"; path: string } | { kind: "none" } | { kind: "invalid"; error: string } {
 	if (frontmatterPermissions === undefined) return { kind: "none" };
 	if (typeof frontmatterPermissions === "string") return { kind: "file", path: frontmatterPermissions };
-	if (typeof frontmatterPermissions === "object" && frontmatterPermissions !== null) {
+	if (typeof frontmatterPermissions === "object" && frontmatterPermissions !== null && !Array.isArray(frontmatterPermissions)) {
 		return { kind: "inline", value: frontmatterPermissions };
 	}
-	return { kind: "none" };
+	return { kind: "invalid", error: `permissions must be an object or a path string, got ${Array.isArray(frontmatterPermissions) ? "array" : typeof frontmatterPermissions}` };
 }

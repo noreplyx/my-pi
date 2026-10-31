@@ -22,7 +22,9 @@ describe("splitShellCommands", () => {
 	test("quoted delimiters do not split", () => {
 		expect(splitShellCommands(`echo "a; b" && git status`)).toEqual([`echo "a; b"`, "git status"]);
 		expect(splitShellCommands(`echo 'a && b' | head`)).toEqual([`echo 'a && b'`, "head"]);
-		expect(splitShellCommands("echo `a | b` && c")).toEqual(["echo `a | b`", "c"]);
+		// Backticks are command substitution, not quoting — delimiters inside
+		// them DO split so each substituted command is evaluated per-segment.
+		expect(splitShellCommands("echo `a | b` && c")).toEqual(["echo `a", "b`", "c"]);
 	});
 	test("backslash escapes delimiter", () => {
 		expect(splitShellCommands(`echo a\\;b && c`)).toEqual([`echo a\\;b`, "c"]);

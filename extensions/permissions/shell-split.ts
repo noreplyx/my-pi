@@ -8,8 +8,10 @@
  * Combine rule (in loader.ts): any segment `deny` → whole call `deny`;
  * all segments `allow` → `allow`; otherwise `ask`.
  *
- * Quote-aware: delimiters inside single quotes, double quotes, or backticks
- * do not split. Backslash escapes the next character. This is intentionally
+ * Quote-aware: delimiters inside single quotes or double quotes do not
+ * split. Backticks are NOT quoting — they are command substitution
+ * (`echo `id`` still runs `id`), so delimiters inside backticks DO split.
+ * Backslash escapes the next character. This is intentionally
  * NOT a full shell parser — `$(…)`, `<()`, redirects (`>`, `<`, `2>&1`)
  * stay inside their segment and are still caught by existing deny
  * substring/regex rules.
@@ -21,7 +23,7 @@
 export function splitShellCommands(cmd: string): string[] {
 	const segments: string[] = [];
 	let current = "";
-	let quote: string | null = null; // "'", '"', or "`"
+	let quote: string | null = null; // "'" or '"' only — backtick is substitution, never quoting
 	let escaped = false;
 
 	const push = () => {
@@ -55,7 +57,7 @@ export function splitShellCommands(cmd: string): string[] {
 			i += 1;
 			continue;
 		}
-		if (c === "'" || c === '"' || c === "`") {
+		if (c === "'" || c === '"') {
 			quote = c;
 			current += c;
 			i += 1;

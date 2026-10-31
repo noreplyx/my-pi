@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
 	globToRegExp,
+	hasInvalidGlob,
+	hasInvalidGlobMatch,
 	hasInvalidRegex,
 	isRegexPattern,
 	matchOne,
@@ -71,5 +73,28 @@ describe("matchToolName", () => {
 		expect(matchToolName("bash", "bash")).toBe(true);
 		expect(matchToolName("mcp__*", "mcp__github")).toBe(true);
 		expect(matchToolName("bash", "read")).toBe(false);
+	});
+	test("exact matching is case-insensitive", () => {
+		expect(matchToolName("Read", "read")).toBe(true);
+		expect(matchToolName("BASH", "bash")).toBe(true);
+		expect(matchToolName("MCP__*", "mcp__github")).toBe(true);
+	});
+});
+
+describe("hasInvalidGlob", () => {
+	test("detects unclosed bracket and trailing backslash", () => {
+		expect(hasInvalidGlob("src/[abc")).toBe(true);
+		expect(hasInvalidGlob("src/*.ts\\")).toBe(true);
+		expect(hasInvalidGlob("src/*.ts")).toBe(false);
+	});
+	test("detects character classes whose translation never compiles", () => {
+		expect(hasInvalidGlob("[z-a]")).toBe(true);
+		// Invalid globs never match via matchOne (fail-closed in loader firstMatch).
+		expect(matchOne("[z-a]", "a")).toBe(false);
+	});
+	test("non-globs and regexes are never invalid globs", () => {
+		expect(hasInvalidGlob("npm publish")).toBe(false);
+		expect(hasInvalidGlob("re:([")).toBe(false);
+		expect(hasInvalidGlobMatch(undefined)).toBe(false);
 	});
 });
