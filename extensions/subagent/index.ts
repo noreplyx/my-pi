@@ -46,6 +46,7 @@ import { resumeMissingWorkers, runSwarm, validateWorkers } from "./swarm-orchest
 import { askUserToolDefinition } from "./ask-user-tool.ts";
 import type { ParentUI, SingleResult, SubagentDetails, SwarmInfo } from "./types.ts";
 import {
+	DEFAULT_CODEMODE_MAX_WORKERS,
 	MAX_PARALLEL_TASKS,
 	RESULT_RUNNING,
 	clampTimeoutMs,
@@ -63,6 +64,9 @@ export { runSingleAgent } from "./single.ts";
 export { createForwardedPermissionStore } from "./forwarded-permissions.ts";
 
 export default function (pi: ExtensionAPI) {
+	if (!process.env.PI_CODEMODE_MAX_WORKERS) {
+		process.env.PI_CODEMODE_MAX_WORKERS = DEFAULT_CODEMODE_MAX_WORKERS;
+	}
 	// Parent-side memo for forwarded child permission prompts: "Allow for
 	// this session" means the main session, scoped per agent. Identical
 	// repeated dialogs from later children of the same agent auto-approve

@@ -1,9 +1,35 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import { describeCall, describeStatus, evaluate, normalizeDir, reloadAll, resolveGrantDir, resolveGrantPath, shortenHome } from "./loader.ts";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+try {
+	await import("@earendil-works/pi-coding-agent");
+} catch {
+	const releasesRoot = fileURLToPath(new URL("../../install/releases", import.meta.url));
+	const versions = fs.existsSync(releasesRoot) ? fs.readdirSync(releasesRoot).sort().reverse() : [];
+	for (const version of versions) {
+		const candidate = path.join(releasesRoot, version, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js");
+		if (fs.existsSync(candidate)) {
+			const mod = await import(pathToFileURL(candidate).href);
+			mock.module("@earendil-works/pi-coding-agent", () => mod);
+			break;
+		}
+	}
+}
+
+const {
+	describeCall,
+	describeStatus,
+	evaluate,
+	loadConfiguredMcpServers,
+	normalizeDir,
+	reloadAll,
+	resolveGrantDir,
+	resolveGrantPath,
+	shortenHome,
+} = await import("./loader.ts");
 
 let tmpDirs: string[] = [];
 
@@ -241,9 +267,9 @@ describe("agent layer (no global fallback)", () => {
 
 describe("grant dir resolution", () => {
 	test("file tools resolve to the containing directory", () => {
-		expect(resolveGrantPath("write", { path: "src/a.txt" }, "/proj")).toBe("/proj/src/a.txt");
-		expect(resolveGrantDir("write", { path: "src/a.txt" }, "/proj")).toBe("/proj/src");
-		expect(resolveGrantPath("grep", { path: "src", pattern: "foo" }, "/proj")).toBe("/proj/src");
+		expect(resolveGrantPath("write", { path: "src/a.txt" }, "/proj")).toBe(path.resolve("/proj", "src/a.txt"));
+		expect(resolveGrantDir("write", { path: "src/a.txt" }, "/proj")).toBe(path.resolve("/proj", "src"));
+		expect(resolveGrantPath("grep", { path: "src", pattern: "foo" }, "/proj")).toBe(path.resolve("/proj", "src"));
 	});
 
 	test("existing directory target grants itself", () => {
@@ -256,30 +282,30 @@ describe("grant dir resolution", () => {
 	});
 
 	test("nonexistent path grants its parent, bash returns null", () => {
-		expect(resolveGrantDir("write", { path: "/nope/nested/f.txt" }, "/")).toBe("/nope/nested");
+		expect(resolveGrantDir("write", { path: "/nope/nested/f.txt" }, "/")).toBe(path.resolve("/nope/nested"));
 		expect(resolveGrantPath("bash", { command: "ls" }, "/proj")).toBeNull();
 		expect(resolveGrantDir("bash", { command: "ls" }, "/proj")).toBeNull();
 		expect(resolveGrantDir("write", {}, "/proj")).toBeNull();
 	});
 
 	test("relative and trailing-slash paths normalize", () => {
-		expect(resolveGrantPath("write", { path: "../x.txt" }, "/proj/sub")).toBe("/proj/x.txt");
-		expect(resolveGrantPath("read", { path: "/a/b/" }, "/")).toBe("/a/b");
-		expect(normalizeDir("/")).toBe("/");
+		expect(resolveGrantPath("write", { path: "../x.txt" }, "/proj/sub")).toBe(path.resolve("/proj/x.txt"));
+		expect(resolveGrantPath("read", { path: "/a/b/" }, "/")).toBe(path.resolve("/a/b"));
+		expect(normalizeDir("/")).toBe(path.normalize("/"));
 	});
 });
 
 describe("describeCall", () => {
 	test("file tools show action + cwd-relative path", () => {
-		expect(describeCall("write", { path: "src/foo.txt" }, "/proj")).toBe("write src/foo.txt");
-		expect(describeCall("read", { path: "/proj/src/bar.txt" }, "/proj")).toBe("read src/bar.txt");
+		expect(describeCall("write", { path: "src/foo.txt" }, "/proj")).toBe(`write ${path.join("src", "foo.txt")}`);
+		expect(describeCall("read", { path: "/proj/src/bar.txt" }, "/proj")).toBe(`read ${path.join("src", "bar.txt")}`);
 		expect(describeCall("edit", { path: "x.ts" }, "/proj")).toBe("edit x.ts");
 		expect(describeCall("ls", {}, "/proj")).toBe("ls .");
 	});
 
 	test("outside-cwd paths stay absolute", () => {
-		expect(describeCall("read", { path: "/etc/hosts" }, "/proj")).toBe("read /etc/hosts");
-		expect(describeCall("write", { path: "../up.txt" }, "/proj/sub")).toBe("write /proj/up.txt");
+		expect(describeCall("read", { path: "/etc/hosts" }, "/proj")).toBe(`read ${path.resolve("/etc/hosts")}`);
+		expect(describeCall("write", { path: "../up.txt" }, "/proj/sub")).toBe(`write ${path.resolve("/proj/up.txt")}`);
 		expect(describeCall("write", {}, "/proj")).toBe("write (no path)");
 		expect(describeCall("read", { path: "..notes.txt" }, "/proj")).toBe("read ..notes.txt");
 	});
@@ -357,7 +383,7 @@ describe("describeCall structured tools", () => {
 
 	test("shortenHome shortens leading home only", () => {
 		const home = os.homedir();
-		expect(shortenHome(`${home}/x/y`)).toBe("~/x/y");
+		expect(shortenHome(path.join(home, "x", "y"))).toBe(`~${path.sep}x${path.sep}y`);
 		expect(shortenHome(home)).toBe("~");
 		expect(shortenHome("/etc/hosts")).toBe("/etc/hosts");
 		expect(shortenHome("rel/path")).toBe("rel/path");
@@ -422,5 +448,298 @@ describe("describeStatus override", () => {
 		const s = describeStatus("/repo", null);
 		expect(s.agentFile).toBe(file);
 		expect(s.agentRuleCount).toBe(1);
+	});
+});
+
+describe("discovering configured MCP servers", () => {
+	function makeTempFolder(prefix: string): string {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+		tmpDirs.push(dir);
+		return dir;
+	}
+
+	function writeGlobalMcpConfig(agentDir: string, content: string | Record<string, unknown>): string {
+		fs.mkdirSync(agentDir, { recursive: true });
+		const filePath = path.join(agentDir, "mcp.json");
+		fs.writeFileSync(filePath, typeof content === "string" ? content : JSON.stringify(content, null, 2), "utf-8");
+		return filePath;
+	}
+
+	function writeProjectMcpConfig(projectRoot: string, content: string | Record<string, unknown>): string {
+		const piDir = path.join(projectRoot, ".pi");
+		fs.mkdirSync(piDir, { recursive: true });
+		const filePath = path.join(piDir, "mcp.json");
+		fs.writeFileSync(filePath, typeof content === "string" ? content : JSON.stringify(content, null, 2), "utf-8");
+		return filePath;
+	}
+
+	test("discovers enabled command and web servers from user configuration with comments and UTF-8 BOM", () => {
+		const agentDir = makeTempFolder("pi-mcp-global-");
+		const jsonWithBomAndComments = `\uFEFF{
+			// Global MCP servers with line and block comments
+			"mcpServers": {
+				"Cli-Default": { "command": "npx", "args": ["-y", "cli-srv"] },
+				"Cli-Stdio": { "type": "stdio", "command": "node" },
+				/* Web transports preserve // inside URL strings */
+				"Web-Http": { "type": "http", "url": "https://example.com/mcp" },
+				"Web-Stream": { "type": "streamable-http", "url": "https://example.com/stream" },
+				"Web-Implicit": { "url": "https://example.com/default" }
+			}
+		}`;
+		writeGlobalMcpConfig(agentDir, jsonWithBomAndComments);
+
+		const servers = loadConfiguredMcpServers(undefined, { agentDir });
+		expect(servers).toEqual([
+			"cli_default",
+			"cli_stdio",
+			"web_http",
+			"web_stream",
+			"web_implicit",
+		]);
+	});
+
+	test("merges global servers with trusted project servers", () => {
+		const agentDir = makeTempFolder("pi-mcp-merge-global-");
+		const projectRoot = makeTempFolder("pi-mcp-merge-proj-");
+		const nestedCwd = path.join(projectRoot, "packages", "service", "src");
+		fs.mkdirSync(nestedCwd, { recursive: true });
+
+		writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"global-ado": { command: "npx" },
+			},
+		});
+		writeProjectMcpConfig(projectRoot, {
+			mcpServers: {
+				"project-db": { type: "http", url: "https://db.example.com/mcp" },
+			},
+		});
+
+		expect(loadConfiguredMcpServers(nestedCwd, { agentDir, projectTrusted: true })).toEqual([
+			"global_ado",
+			"project_db",
+		]);
+
+		// When agentDir IS projectRoot/.pi, global and project paths resolve to the same file
+		// so it must not be re-applied as a project file (which would reject global-only auth).
+		const sharedPiDir = path.join(projectRoot, ".pi");
+		writeGlobalMcpConfig(sharedPiDir, {
+			mcpServers: {
+				"same-file-auth": { type: "http", url: "https://auth.example.com/mcp", auth: { type: "oauth" } },
+			},
+		});
+		reloadAll();
+		expect(loadConfiguredMcpServers(nestedCwd, { agentDir: sharedPiDir, projectTrusted: true })).toEqual([
+			"same_file_auth",
+		]);
+	});
+
+	test("ignores project server configuration when projectTrusted is false", () => {
+		const agentDir = makeTempFolder("pi-mcp-untrusted-global-");
+		const projectRoot = makeTempFolder("pi-mcp-untrusted-proj-");
+
+		writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"global-ado": { command: "npx" },
+			},
+		});
+		writeProjectMcpConfig(projectRoot, {
+			mcpServers: {
+				"global-ado": { disabled: true },
+				"untrusted-srv": { command: "evil-mcp" },
+			},
+		});
+
+		expect(loadConfiguredMcpServers(projectRoot, { agentDir, projectTrusted: false })).toEqual([
+			"global_ado",
+		]);
+	});
+
+	test("allows a trusted project override to disable a global server", () => {
+		const agentDir = makeTempFolder("pi-mcp-disable-global-");
+		const projectRoot = makeTempFolder("pi-mcp-disable-proj-");
+
+		writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"srv-disabled-flag": { command: "node" },
+				"srv-enabled-false": { command: "node", enabled: true },
+				"srv-kept": { command: "node" },
+			},
+		});
+		writeProjectMcpConfig(projectRoot, {
+			mcpServers: {
+				"srv-disabled-flag": { disabled: true },
+				"srv-enabled-false": { enabled: false },
+			},
+		});
+
+		expect(loadConfiguredMcpServers(projectRoot, { agentDir, projectTrusted: true })).toEqual([
+			"srv_kept",
+		]);
+	});
+
+	test("allows a trusted project override to re-enable a globally disabled server", () => {
+		const agentDir = makeTempFolder("pi-mcp-reenable-global-");
+		const projectRoot = makeTempFolder("pi-mcp-reenable-proj-");
+
+		writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"srv-was-disabled": { command: "node", disabled: true },
+				"srv-was-unenabled": { command: "node", enabled: false },
+			},
+		});
+		writeProjectMcpConfig(projectRoot, {
+			mcpServers: {
+				"srv-was-disabled": { enabled: true },
+				"srv-was-unenabled": { enabled: true },
+			},
+		});
+
+		expect(loadConfiguredMcpServers(projectRoot, { agentDir, projectTrusted: true })).toEqual([
+			"srv_was_disabled",
+			"srv_was_unenabled",
+		]);
+	});
+
+	test("ignores an orphan project override when no matching global server exists", () => {
+		const agentDir = makeTempFolder("pi-mcp-orphan-global-");
+		const projectRoot = makeTempFolder("pi-mcp-orphan-proj-");
+
+		writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"existing-global": { command: "node" },
+			},
+		});
+		writeProjectMcpConfig(projectRoot, {
+			mcpServers: {
+				"orphan-override": { enabled: true, exposure: "direct" },
+			},
+		});
+
+		expect(loadConfiguredMcpServers(projectRoot, { agentDir, projectTrusted: true })).toEqual([
+			"existing_global",
+		]);
+	});
+
+	test("excludes servers marked disabled/not enabled or with non-boolean flags, and excludes hidden servers unless at least one tool has a reachable exposure in toolExposure", () => {
+		const agentDir = makeTempFolder("pi-mcp-exposure-");
+
+		writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"marked-disabled": { command: "node", disabled: true },
+				"marked-not-enabled": { command: "node", enabled: false },
+				"non-boolean-enabled": { command: "node", enabled: "yes" },
+				"non-boolean-disabled": { command: "node", disabled: 0 },
+				"hidden-without-tools": { command: "node", exposure: "hidden" },
+				"hidden-only-unreachable": {
+					command: "node",
+					exposure: "hidden",
+					toolExposure: { ping: "hidden", other: "invalid-mode" },
+				},
+				"hidden-with-direct": {
+					command: "node",
+					exposure: "hidden",
+					toolExposure: { ping: "hidden", search: "direct" },
+				},
+				"hidden-with-codemode": {
+					command: "node",
+					exposure: "hidden",
+					toolExposure: { run: "codemode-deferred" },
+				},
+			},
+		});
+
+		expect(loadConfiguredMcpServers(undefined, { agentDir })).toEqual([
+			"hidden_with_direct",
+			"hidden_with_codemode",
+		]);
+	});
+
+	test("rejects invalid transport shapes (type: \"sse\", both command and url, neither, blank command/url) and rejects auth in project .pi/mcp.json", () => {
+		const agentDir = makeTempFolder("pi-mcp-transport-global-");
+		const projectRoot = makeTempFolder("pi-mcp-transport-proj-");
+
+		writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"sse-server": { type: "sse", url: "https://example.com/sse" },
+				"both-command-and-url": { command: "node", url: "https://example.com/mcp" },
+				"neither-command-nor-url": { args: ["--help"] },
+				"blank-command": { command: "   " },
+				"blank-url": { url: "   " },
+				"stdio-with-url": { type: "stdio", url: "https://example.com/mcp" },
+				"http-with-command": { type: "http", command: "node" },
+				"global-with-auth": { type: "http", url: "https://example.com/mcp", auth: { type: "oauth" } },
+			},
+		});
+		writeProjectMcpConfig(projectRoot, {
+			mcpServers: {
+				"project-with-auth": { type: "http", url: "https://example.com/mcp", auth: { type: "oauth" } },
+				"project-valid": { type: "http", url: "https://example.com/mcp" },
+			},
+		});
+
+		expect(loadConfiguredMcpServers(projectRoot, { agentDir, projectTrusted: true })).toEqual([
+			"global_with_auth",
+			"project_valid",
+		]);
+	});
+
+	test("keeps the first server when dash vs underscore names collide (\"my-server\" vs \"my_server\") and includes extension-registered servers (registeredServers) unless shadowed by mcp.json", () => {
+		const agentDir = makeTempFolder("pi-mcp-collision-");
+		const projectRoot = makeTempFolder("pi-mcp-collision-proj-");
+
+		writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"my-server": { command: "node", disabled: true },
+				"my_server": { command: "node", enabled: true },
+				"first-wins": { command: "node", enabled: true },
+				"first_wins": { command: "node", disabled: true },
+			},
+		});
+		writeProjectMcpConfig(projectRoot, {
+			mcpServers: {
+				"first_wins": { disabled: true },
+			},
+		});
+
+		const servers = loadConfiguredMcpServers(projectRoot, {
+			agentDir,
+			projectTrusted: true,
+			registeredServers: [
+				{ name: "my-server", config: { command: "node" } },
+				{ name: "ext-bare" },
+				{ name: "ext-web", config: { type: "streamable-http", url: "https://example.com/mcp" } },
+				{ name: "ext-disabled", config: { command: "node", disabled: true } },
+				{ name: "ext-invalid", config: { type: "sse", url: "https://example.com/sse" } },
+			],
+		});
+
+		expect(servers).toEqual(["first_wins", "ext_bare", "ext_web"]);
+	});
+
+	test("reuses cached file contents when mtime is unchanged and refreshes after reloadAll()", () => {
+		const agentDir = makeTempFolder("pi-mcp-cache-");
+		const fixedTime = new Date(2026, 0, 1, 12, 0, 0);
+		const mcpPath = writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"first-server": { command: "node" },
+			},
+		});
+		fs.utimesSync(mcpPath, fixedTime, fixedTime);
+
+		expect(loadConfiguredMcpServers(undefined, { agentDir })).toEqual(["first_server"]);
+
+		// Overwrite file content and restore the exact same mtime.
+		writeGlobalMcpConfig(agentDir, {
+			mcpServers: {
+				"second-server": { command: "node" },
+			},
+		});
+		fs.utimesSync(mcpPath, fixedTime, fixedTime);
+
+		expect(loadConfiguredMcpServers(undefined, { agentDir })).toEqual(["first_server"]);
+
+		reloadAll();
+		expect(loadConfiguredMcpServers(undefined, { agentDir })).toEqual(["second_server"]);
 	});
 });

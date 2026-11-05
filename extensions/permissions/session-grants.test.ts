@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import * as path from "node:path";
 import { createSessionGrants, grantKey, SESSION_CHOICE_DENY_FEEDBACK, SESSION_CHOICES } from "./session-grants.ts";
 
 describe("session grants", () => {
@@ -55,7 +56,7 @@ describe("directory grants", () => {
 		g.add("bash", "rm -rf /", "x");
 		g.addDirectory("read", "/a/b/", "x");
 		expect(g.hasDirectory("read", "/a/b/f")).toBeDefined();
-		expect(g.list().find((x) => x.scope === "directory")?.target).toBe("/a/b");
+		expect(g.list().find((x) => x.scope === "directory")?.target).toBe(path.normalize("/a/b"));
 		expect(g.size).toBe(2);
 		expect(g.clear()).toBe(2);
 		expect(g.size).toBe(0);

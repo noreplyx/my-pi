@@ -27,6 +27,7 @@ import {
 	validateConfig,
 	type ValidatedConfig,
 } from "./schema.ts";
+import { normalizeMcpServerName } from "./validate.ts";
 
 export interface EvalResult {
 	action: PermissionAction;
@@ -130,7 +131,8 @@ function readJsonFile(filePath: string): { value: unknown; error?: string } {
 		return { value: undefined, error: `cannot read: ${e?.message ?? e}` };
 	}
 	try {
-		return { value: JSON.parse(stripJsonComments(text)) };
+		const withoutBom = text.replace(/^\uFEFF/, "");
+		return { value: JSON.parse(stripJsonComments(withoutBom)) };
 	} catch (e: any) {
 		return { value: undefined, error: `invalid JSON: ${e?.message ?? e}` };
 	}
@@ -762,6 +764,192 @@ export function reloadAll(): void {
 	agentCache.key = "";
 	agentCache.entry = null;
 	agentScanCache.clear();
+	mcpFileCache.clear();
+}
+
+// ---------------------------------------------------------------------------
+// MCP server configuration discovery (user + trusted project + extensions)
+// ---------------------------------------------------------------------------
+
+const mcpFileCache = new Map<string, { mtimeMs: number; parsed: unknown }>();
+
+const MCP_SERVER_NAME_RE = /^[A-Za-z0-9_-]+$/;
+const MCP_OVERRIDE_KEYS = new Set(["enabled", "disabled", "exposure", "toolExposure"]);
+const MCP_REACHABLE_EXPOSURES = new Set(["codemode", "codemode-deferred", "deferred", "direct"]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readCachedMcpFile(filePath: string): unknown {
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(filePath);
+		if (!stat.isFile()) {
+			mcpFileCache.delete(filePath);
+			return null;
+		}
+	} catch {
+		mcpFileCache.delete(filePath);
+		return null;
+	}
+	const prev = mcpFileCache.get(filePath);
+	if (prev && prev.mtimeMs === stat.mtimeMs) return prev.parsed;
+	const { value, error } = readJsonFile(filePath);
+	const parsed = error ? null : value;
+	mcpFileCache.set(filePath, { mtimeMs: stat.mtimeMs, parsed });
+	return parsed;
+}
+
+function isMcpOverride(entry: Record<string, unknown>): boolean {
+	if (entry.command !== undefined || entry.url !== undefined || entry.type !== undefined) return false;
+	const keys = Object.keys(entry);
+	if (keys.length === 0) return false;
+	return keys.every((k) => MCP_OVERRIDE_KEYS.has(k));
+}
+
+function isValidMcpTransport(entry: Record<string, unknown>, scope: "global" | "project" | "extension"): boolean {
+	if (entry.type === "sse") return false;
+	if (scope === "project" && entry.auth !== undefined) return false;
+	const hasCommand = entry.command !== undefined;
+	const hasUrl = entry.url !== undefined;
+	if (hasCommand && hasUrl) return false;
+	if (hasCommand) {
+		return (
+			typeof entry.command === "string" &&
+			entry.command.trim().length > 0 &&
+			(entry.type === undefined || entry.type === "stdio")
+		);
+	}
+	if (hasUrl) {
+		return (
+			typeof entry.url === "string" &&
+			entry.url.trim().length > 0 &&
+			(entry.type === undefined || entry.type === "http" || entry.type === "streamable-http")
+		);
+	}
+	return false;
+}
+
+function isMcpServerEnabled(config: Record<string, unknown>): boolean {
+	if (config.enabled === false || config.disabled === true) return false;
+	if (config.enabled !== undefined && typeof config.enabled !== "boolean") return false;
+	if (config.disabled !== undefined && typeof config.disabled !== "boolean") return false;
+	if (config.exposure === "hidden") {
+		if (!isPlainObject(config.toolExposure)) return false;
+		return Object.values(config.toolExposure).some(
+			(v) => typeof v === "string" && MCP_REACHABLE_EXPOSURES.has(v),
+		);
+	}
+	return true;
+}
+
+function findNearestProjectMcpFile(cwd: string, globalMcpPath: string): string | null {
+	const globalCanonical = canonicalAbs(globalMcpPath);
+	let dir = cwd;
+	while (true) {
+		const candidate = path.join(dir, CONFIG_DIR_NAME, "mcp.json");
+		try {
+			if (fs.statSync(candidate).isFile() && canonicalAbs(candidate) !== globalCanonical) {
+				return candidate;
+			}
+		} catch {
+			// keep walking up
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+
+export interface LoadConfiguredMcpOptions {
+	agentDir?: string;
+	projectTrusted?: boolean;
+	registeredServers?: ReadonlyArray<{ name: string; config?: unknown }>;
+}
+
+/** Discover configured, enabled MCP server namespaces (`-` → `_`, lowercased)
+ *  across global `mcp.json`, trusted project `.pi/mcp.json`, and runtime
+ *  extension registrations. Never throws. */
+export function loadConfiguredMcpServers(cwd?: string, options?: LoadConfiguredMcpOptions): string[] {
+	try {
+		const agentDir = options?.agentDir?.trim() || getAgentDir();
+		const projectTrusted = options?.projectTrusted ?? true;
+		const serversByNamespace = new Map<string, { rawName: string; config: Record<string, unknown> }>();
+
+		// 1. Global mcp.json
+		const globalMcpPath = path.join(agentDir, "mcp.json");
+		const globalParsed = readCachedMcpFile(globalMcpPath);
+		if (isPlainObject(globalParsed) && isPlainObject(globalParsed.mcpServers)) {
+			for (const [name, rawEntry] of Object.entries(globalParsed.mcpServers)) {
+				if (!MCP_SERVER_NAME_RE.test(name) || !isPlainObject(rawEntry)) continue;
+				const namespace = normalizeMcpServerName(name);
+				if (!namespace) continue;
+				const existing = serversByNamespace.get(namespace);
+				if (existing && existing.rawName !== name) continue;
+				if (!isValidMcpTransport(rawEntry, "global")) continue;
+				serversByNamespace.set(namespace, { rawName: name, config: { ...rawEntry } });
+			}
+		}
+
+		// 2. Nearest project .pi/mcp.json (only when cwd is provided and project is trusted)
+		const trimmedCwd = cwd?.trim() ?? "";
+		if (trimmedCwd && projectTrusted) {
+			const projectMcpPath = findNearestProjectMcpFile(trimmedCwd, globalMcpPath);
+			if (projectMcpPath) {
+				const projectParsed = readCachedMcpFile(projectMcpPath);
+				if (isPlainObject(projectParsed) && isPlainObject(projectParsed.mcpServers)) {
+					for (const [name, rawEntry] of Object.entries(projectParsed.mcpServers)) {
+						if (!MCP_SERVER_NAME_RE.test(name) || !isPlainObject(rawEntry)) continue;
+						const namespace = normalizeMcpServerName(name);
+						if (!namespace) continue;
+						const existing = serversByNamespace.get(namespace);
+						if (isMcpOverride(rawEntry)) {
+							if (!existing || existing.rawName !== name) continue;
+							const merged: Record<string, unknown> = { ...existing.config, ...rawEntry };
+							if (rawEntry.enabled === true && rawEntry.disabled === undefined) {
+								delete merged.disabled;
+							}
+							if (rawEntry.disabled === true && rawEntry.enabled === undefined) {
+								delete merged.enabled;
+							}
+							serversByNamespace.set(namespace, { rawName: name, config: merged });
+							continue;
+						}
+						if (existing && existing.rawName !== name) continue;
+						if (!isValidMcpTransport(rawEntry, "project")) continue;
+						serversByNamespace.set(namespace, { rawName: name, config: { ...rawEntry } });
+					}
+				}
+			}
+		}
+
+		// 3. Extension-registered servers (file-configured servers take precedence)
+		if (Array.isArray(options?.registeredServers)) {
+			for (const reg of options.registeredServers) {
+				if (!reg || typeof reg.name !== "string" || !MCP_SERVER_NAME_RE.test(reg.name)) continue;
+				const namespace = normalizeMcpServerName(reg.name);
+				if (!namespace || serversByNamespace.has(namespace)) continue;
+				let configObj: Record<string, unknown> = {};
+				if (reg.config !== undefined) {
+					if (!isPlainObject(reg.config) || !isValidMcpTransport(reg.config, "extension")) continue;
+					configObj = { ...reg.config };
+				}
+				serversByNamespace.set(namespace, { rawName: reg.name, config: configObj });
+			}
+		}
+
+		// 4. Filter enabled / reachable servers and return deduplicated normalized names
+		const enabledNamespaces: string[] = [];
+		for (const [namespace, entry] of serversByNamespace.entries()) {
+			if (isMcpServerEnabled(entry.config)) {
+				enabledNamespaces.push(namespace);
+			}
+		}
+		return enabledNamespaces;
+	} catch {
+		return [];
+	}
 }
 
 // ---------------------------------------------------------------------------

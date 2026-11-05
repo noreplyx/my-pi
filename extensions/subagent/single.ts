@@ -32,6 +32,7 @@ import { AUTO_APPROVE_ENV, isAutoApproveEnabled } from "../auto-approve/state.ts
 import { isFireAndForgetMethod, isForwardedMethod, withQuestionLock } from "./questions.ts";
 import type { DispatchDefaults, ParentUI, RunSingleAgentOptions, SingleResult, SwarmCtx } from "./types.ts";
 import {
+	DEFAULT_CODEMODE_MAX_WORKERS,
 	KILL_GRACE_MS,
 	MAX_MESSAGES,
 	MAX_SWARM_DEPTH,
@@ -254,6 +255,8 @@ export async function runSingleAgent(
 			const childExtra: Record<string, string> = {
 				PI_AGENT_NAME: agent.name,
 				PI_AGENT_FILE: agent.filePath,
+				PI_CODEMODE_MAX_WORKERS: process.env.PI_CODEMODE_MAX_WORKERS || DEFAULT_CODEMODE_MAX_WORKERS,
+				PI_SKIP_VERSION_CHECK: "1",
 			};
 			// Auto-approve inheritance: the child boots a fresh runtime whose
 			// in-memory toggle defaults OFF — pass it explicitly so delegated

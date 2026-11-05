@@ -9,11 +9,12 @@
 
 export const MAX_PARALLEL_TASKS = 8;
 export const MAX_CONCURRENCY = 4;
+export const DEFAULT_CODEMODE_MAX_WORKERS = "8";
 /** Hierarchical swarm caps (user-confirmed defaults). */
 export const MAX_SWARM_DEPTH = 3;
 export const MAX_SWARM_TOTAL = 8;
-/** Default per-subagent wall-clock budget (5 min); hard ceiling (30 min). */
-export const TIMEOUT_DEFAULT_MS = 5 * 60 * 1000;
+/** Default per-subagent wall-clock budget (30 min); hard ceiling (30 min). */
+export const TIMEOUT_DEFAULT_MS = 30 * 60 * 1000;
 export const TIMEOUT_MAX_MS = 30 * 60 * 1000;
 /** Grace between SIGTERM and SIGKILL for child process groups. */
 export const KILL_GRACE_MS = 5000;
@@ -30,7 +31,7 @@ export const SWARM_ENV_RUN = "PI_SWARM_RUN";
 export const SWARM_ENV_ID = "PI_SWARM_ID";
 export const SWARM_ENV_DEPTH = "PI_SUBAGENT_DEPTH";
 /** Tools a swarm worker needs for blackboard + recursion. Merged, never removed. */
-export const SWARM_REQUIRED_TOOLS = ["subagent", "read", "write", "bash"];
+export const SWARM_REQUIRED_TOOLS = ["subagent", "read", "write", "bash", "codemode"];
 /** Run IDs are fs-safe timestamps: swarm-YYYYMMDD-HHMMSS-xxxx, forks append -rN */
 export const SWARM_RUN_ID_RE = /^swarm-\d{8}-\d{6}-[a-z0-9]{4}(?:-r\d+)?$/;
 export const SWARM_WORKER_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -333,6 +334,46 @@ const PASSTHROUGH_EXACT = new Set([
 	"CLICOLOR_FORCE",
 	"PAGER",
 	"EDITOR",
+	// Windows system & shell resolution
+	"SYSTEMROOT",
+	"SYSTEMDRIVE",
+	"WINDIR",
+	"COMSPEC",
+	"PATHEXT",
+	"PROGRAMFILES",
+	"PROGRAMFILES(X86)",
+	"PROGRAMW6432",
+	"COMMONPROGRAMFILES",
+	"COMMONPROGRAMFILES(X86)",
+	"COMMONPROGRAMW6432",
+	"PROGRAMDATA",
+	// Windows user profile & app data (os.homedir(), git, dotnet/NuGet/MSBuild)
+	"USERPROFILE",
+	"HOMEDRIVE",
+	"HOMEPATH",
+	"USERNAME",
+	"APPDATA",
+	"LOCALAPPDATA",
+	// Windows OS/CPU metadata (MSBuild/native toolchains)
+	"OS",
+	"NUMBER_OF_PROCESSORS",
+	"PROCESSOR_ARCHITECTURE",
+	"PROCESSOR_ARCHITEW6432",
+	"PROCESSOR_IDENTIFIER",
+	"PROCESSOR_LEVEL",
+	"PROCESSOR_REVISION",
+	// .NET & Pi config directory passthrough
+	"DOTNET_ROOT",
+	"DOTNET_ROOT(X86)",
+	"DOTNET_CLI_HOME",
+	"DOTNET_CLI_TELEMETRY_OPTOUT",
+	"DOTNET_NOLOGO",
+	"MSBUILDSDKSPATH",
+	"PI_CODING_AGENT_DIR",
+	"PI_CODEMODE_MAX_WORKERS",
+	"PI_SKIP_VERSION_CHECK",
+	"PI_OFFLINE",
+	"PI_CACHE_RETENTION",
 ]);
 
 export function buildChildEnv(
@@ -342,7 +383,8 @@ export function buildChildEnv(
 	const out: Record<string, string> = {};
 	for (const [k, v] of Object.entries(parentEnv)) {
 		if (v === undefined) continue;
-		if (PASSTHROUGH_EXACT.has(k) || k.startsWith("LC_")) out[k] = v;
+		const upperKey = k.toUpperCase();
+		if (PASSTHROUGH_EXACT.has(upperKey) || upperKey.startsWith("LC_")) out[k] = v;
 	}
 	for (const [k, v] of Object.entries(extra)) out[k] = v;
 	return out;

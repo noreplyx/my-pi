@@ -9,7 +9,7 @@ import { Type } from "typebox";
 import type { AgentScope } from "./agents.ts";
 
 export const TimeoutMsSchema = Type.Optional(
-	Type.Number({ description: "Wall-clock budget in ms (default 300000, max 1800000)" }),
+	Type.Number({ description: "Wall-clock budget in ms (default 1800000, max 1800000)" }),
 );
 
 export const RetrySchema = Type.Optional(

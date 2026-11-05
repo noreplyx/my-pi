@@ -13,6 +13,26 @@ import type { ValidatedConfig } from "./schema.ts";
 
 export type DiagnosticSeverity = "error" | "warning" | "info";
 
+/** Sentinel tool suffix synthesized for each configured, enabled MCP server
+ *  before its tools are registered in `pi.getAllTools()`. */
+export const MCP_CONFIGURED_TOOL_SUFFIX = "__mcp_configured__";
+
+/** Normalize an MCP server name (`-` → `_`, lowercased, stripping any leading `mcp__`)
+ *  to match Pi's runtime tool naming (`mcp__<server>__<tool>`). Returns `""` if invalid. */
+export function normalizeMcpServerName(serverName: string): string {
+	const trimmed = serverName.trim().replace(/^mcp__/i, "");
+	if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) return "";
+	return trimmed.replace(/-/g, "_").toLowerCase();
+}
+
+/** Build a synthetic tool placeholder (`mcp__<normalized_server>____mcp_configured__`)
+ *  for a configured MCP server name, or `null` when `serverName` is invalid. */
+export function syntheticMcpToolName(serverName: string): string | null {
+	const normalized = normalizeMcpServerName(serverName);
+	if (!normalized) return null;
+	return `mcp__${normalized}__${MCP_CONFIGURED_TOOL_SUFFIX}`;
+}
+
 export interface Diagnostic {
 	severity: DiagnosticSeverity;
 	location: string;
@@ -80,6 +100,11 @@ export interface ValidateOptions {
 	activeFileLabel?: string | null;
 	/** When true, run the R2 unknown-tool block only for the active file (skip entirely when null). */
 	scopeUnknownToolCheckToActive?: boolean;
+	/** Configured, enabled MCP server names (e.g. `["ado", "my-server"]`).
+	 *  When `knownTools` is non-empty, each server is normalized (`-` → `_`)
+	 *  and represented by a synthetic tool placeholder for R2 glob matching
+	 *  unless real tools for `mcp__<server>__*` are already present in `knownTools`. */
+	knownMcpServers?: string[];
 	/** @deprecated Use `activeFileLabel` instead. Kept for compatibility. */
 	activeLabel?: string | null;
 	/** @deprecated Use `scopeUnknownToolCheckToActive` instead. Kept for compatibility. */
@@ -100,6 +125,26 @@ function validateRules(
 	const r2ScopingEnabled = opts?.scopeUnknownToolCheckToActive ?? opts?.scopeR2ToActive ?? false;
 	const activeAgentLabel = opts?.activeFileLabel?.trim() || opts?.activeLabel?.trim() || null;
 	const unknownToolCheckInScope = !r2ScopingEnabled ? true : activeAgentLabel ? isActiveAgentFile(label, activeAgentLabel) : false;
+	const syntheticSuffixLower = `__${MCP_CONFIGURED_TOOL_SUFFIX}`;
+	const knownToolsLower =
+		knownTools.length > 0 && unknownToolCheckInScope ? knownTools.map((t) => t.toLowerCase()) : [];
+	const syntheticMcpToolsLower: string[] = [];
+	if (knownTools.length > 0 && unknownToolCheckInScope && opts?.knownMcpServers?.length) {
+		const seenNorm = new Set<string>();
+		for (const server of opts.knownMcpServers) {
+			if (typeof server !== "string") continue;
+			const norm = normalizeMcpServerName(server);
+			if (!norm || seenNorm.has(norm)) continue;
+			seenNorm.add(norm);
+			const prefix = `mcp__${norm}__`;
+			const alreadyConnected = knownToolsLower.some(
+				(t) => t.startsWith(prefix) && !t.endsWith(syntheticSuffixLower),
+			);
+			if (!alreadyConnected) {
+				syntheticMcpToolsLower.push(`${prefix}${MCP_CONFIGURED_TOOL_SUFFIX}`);
+			}
+		}
+	}
 
 	// Surface schema errors (bad action / bad match type / bad tool).
 	for (const e of validated.errors) {
@@ -143,16 +188,23 @@ function validateRules(
 		if (knownTools.length > 0) {
 			if (unknownToolCheckInScope) {
 				const toolMayBeRegex = isRegexPattern(r.tool) !== null;
-				const matchesKnown =
-					toolMayBeRegex ||
-					knownTools.some((t) => {
-						if (!hasGlobChars(r.tool)) return toolLower === t.toLowerCase();
+				let matchesKnown = toolMayBeRegex;
+				if (!matchesKnown) {
+					if (!hasGlobChars(r.tool)) {
+						matchesKnown = knownToolsLower.some(
+							(t) => !t.endsWith(syntheticSuffixLower) && toolLower === t,
+						);
+					} else {
 						try {
-							return globToRegExp(toolLower).test(t.toLowerCase());
+							const globRx = globToRegExp(toolLower);
+							matchesKnown =
+								knownToolsLower.some((t) => globRx.test(t)) ||
+								syntheticMcpToolsLower.some((t) => globRx.test(t));
 						} catch {
-							return false;
+							matchesKnown = false;
 						}
-					});
+					}
+				}
 				if (!matchesKnown) {
 					diags.push({
 						severity: "warning",

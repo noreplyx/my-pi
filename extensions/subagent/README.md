@@ -67,7 +67,7 @@ lock per run — titles are prefixed `[parallel …]`,
 
 Common: `retry {attempts (default 2), backoffMs (default 1000)}`, `totalTimeoutMs` (whole-operation
 budget, default unset = unbounded; parallel/swarm recommend max + 60s),
-`timeoutMs` per agent (default 300000, max 1800000). Timeout kills the
+`timeoutMs` per agent (default 1800000, max 1800000). Timeout kills the
 process group (SIGTERM → SIGKILL after 5s) and returns partial output with
 `errorCode: "timeout"`.
 

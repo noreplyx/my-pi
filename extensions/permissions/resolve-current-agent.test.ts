@@ -1,9 +1,26 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveActiveAgentFileLabel, resolveActiveAgentLabel } from "./index.ts";
-import { loadAllAgentFiles } from "./loader.ts";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+try {
+	await import("@earendil-works/pi-coding-agent");
+} catch {
+	const releasesRoot = fileURLToPath(new URL("../../install/releases", import.meta.url));
+	const versions = fs.existsSync(releasesRoot) ? fs.readdirSync(releasesRoot).sort().reverse() : [];
+	for (const version of versions) {
+		const candidate = path.join(releasesRoot, version, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js");
+		if (fs.existsSync(candidate)) {
+			const mod = await import(pathToFileURL(candidate).href);
+			mock.module("@earendil-works/pi-coding-agent", () => mod);
+			break;
+		}
+	}
+}
+
+const { resolveActiveAgentFileLabel, resolveActiveAgentLabel } = await import("./index.ts");
+const { loadAllAgentFiles } = await import("./loader.ts");
 import { matchToolName } from "./matcher.ts";
 import { collectDiagnostics, type FileReport } from "./validate.ts";
 

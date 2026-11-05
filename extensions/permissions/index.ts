@@ -17,7 +17,7 @@
 
 import * as path from "node:path";
 import { getAgentDir, withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { buildTargets, describeCall, describeStatus, evaluate, loadAllAgentFiles, reloadAll, resolveGrantDir, resolveGrantPath, warnStalePermissionsFileEnv } from "./loader.ts";
+import { buildTargets, describeCall, describeStatus, evaluate, loadAllAgentFiles, loadConfiguredMcpServers, reloadAll, resolveGrantDir, resolveGrantPath, warnStalePermissionsFileEnv } from "./loader.ts";
 import { matchToolName } from "./matcher.ts";
 import { isAutoApproveEnabled } from "../auto-approve/state.ts";
 import { createSessionGrants, SESSION_CHOICE_DENY_FEEDBACK, SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICES } from "./session-grants.ts";
@@ -123,6 +123,26 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function knownMcpServerNames(cwd: string, projectTrusted: boolean): string[] {
+		try {
+			const registered =
+				typeof (pi as { getMcpServers?: () => ReadonlyArray<{ name: string; config?: unknown }> }).getMcpServers === "function"
+					? (pi as { getMcpServers: () => ReadonlyArray<{ name: string; config?: unknown }> }).getMcpServers()
+					: [];
+			return loadConfiguredMcpServers(cwd, { projectTrusted, registeredServers: registered });
+		} catch {
+			return [];
+		}
+	}
+
+	function isTrustedProject(ctx: { isProjectTrusted?: () => boolean }): boolean {
+		try {
+			return typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : true;
+		} catch {
+			return false;
+		}
+	}
+
 	// Tools observed in real calls. Unknown-tool warnings (R2) are provisional —
 	// MCP/custom tools can register after startup — so a warning retracts as soon
 	// as its pattern matches an actually-invoked tool. Bounded: tool names are few
@@ -154,10 +174,14 @@ export default function (pi: ExtensionAPI) {
 	/** Single scoped-diagnostics pipeline (R2 unknown-tool scoped to the
 	 *  active agent file; all other rules global; retracted warnings
 	 *  filtered). Shared by session_start and permissions-status. */
-	function getScopedDiagnostics(cwd: string): Diagnostic[] {
+	function getScopedDiagnostics(cwd: string, projectTrusted = true): Diagnostic[] {
 		const reports = gatherFileReports(cwd);
 		return withoutRetracted(
-			collectDiagnostics(reports, knownToolNames(), { scopeUnknownToolCheckToActive: true, activeFileLabel: resolveActiveAgentFileLabel(reports) }),
+			collectDiagnostics(reports, knownToolNames(), {
+				scopeUnknownToolCheckToActive: true,
+				activeFileLabel: resolveActiveAgentFileLabel(reports),
+				knownMcpServers: knownMcpServerNames(cwd, projectTrusted),
+			}),
 		);
 	}
 
@@ -169,7 +193,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			reloadAll();
 			const staleEnv = warnStalePermissionsFileEnv();
-			const diags = getScopedDiagnostics(ctx.cwd);
+			const diags = getScopedDiagnostics(ctx.cwd, isTrustedProject(ctx));
 			if (staleEnv) {
 				diags.push({ severity: "warning", location: "PI_PERMISSIONS_FILE", message: staleEnv });
 			}
@@ -328,7 +352,7 @@ export default function (pi: ExtensionAPI) {
 				...s.agentErrors.map((e) => `  ! ${e}`),
 				`Targets: bash→command, read/write/edit/ls→path, find/grep→path:pattern, other→JSON args.`,
 			];
-			const diags = getScopedDiagnostics(ctx.cwd);
+			const diags = getScopedDiagnostics(ctx.cwd, isTrustedProject(ctx));
 			if (diags.length > 0) {
 				lines.push(`--- validation (${diags.length}) ---`);
 				for (const d of diags.slice(0, 20)) lines.push(`${d.severity}  ${d.location}: ${d.message}`);

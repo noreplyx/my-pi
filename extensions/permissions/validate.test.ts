@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { baseNameOf, collectDiagnostics, isActiveAgentFile, type FileReport } from "./validate.ts";
+import {
+	baseNameOf,
+	collectDiagnostics,
+	isActiveAgentFile,
+	MCP_CONFIGURED_TOOL_SUFFIX,
+	normalizeMcpServerName,
+	syntheticMcpToolName,
+	type FileReport,
+} from "./validate.ts";
 
 function report(
 	label: string,
@@ -255,5 +263,132 @@ describe("recognising the current agent file", () => {
 	test("reads the file name out of a windows drive path", () => {
 		expect(baseNameOf("C:\\proj\\agents\\reviewer.md")).toBe("reviewer.md");
 		expect(baseNameOf("agents/reviewer.md")).toBe("reviewer.md");
+	});
+});
+
+describe("normalizing server names and building placeholder tool names", () => {
+	test("converts dashes to underscores, lowercases letters, and strips a leading server prefix", () => {
+		expect(normalizeMcpServerName("My-Server")).toBe("my_server");
+		expect(normalizeMcpServerName("mcp__My-Server")).toBe("my_server");
+		expect(normalizeMcpServerName("  MCP__Ado-Prod  ")).toBe("ado_prod");
+	});
+
+	test("rejects blank, punctuation-heavy, or prefix-only names", () => {
+		for (const invalidName of ["", "   ", "mcp__", "bad/name", "my server"]) {
+			expect(normalizeMcpServerName(invalidName)).toBe("");
+			expect(syntheticMcpToolName(invalidName)).toBeNull();
+		}
+	});
+
+	test("builds a placeholder tool name for a valid server name", () => {
+		expect(syntheticMcpToolName("my-server")).toBe(`mcp__my_server__${MCP_CONFIGURED_TOOL_SUFFIX}`);
+		expect(syntheticMcpToolName("my-server")).toBe("mcp__my_server____mcp_configured__");
+		expect(syntheticMcpToolName("mcp__My-Server")).toBe("mcp__my_server____mcp_configured__");
+	});
+});
+
+describe("unknown-tool warnings with configured servers", () => {
+	const unknownToolDiagnostics = (diags: { tag?: { kind: string; pattern: string } }[]) =>
+		diags.filter((d) => d.tag?.kind === "unknown-tool");
+
+	test("accepts a wildcard rule for a configured server before any of its tools connect", () => {
+		const diags = collectDiagnostics(
+			[
+				report("agents/reviewer.md", [
+					{ tool: "mcp__ado__*", action: "allow" },
+					{ tool: "mcp__my_server__*", action: "ask" },
+					{ tool: "mcp__*", action: "ask" },
+				]),
+			],
+			["read", "bash"],
+			{
+				scopeUnknownToolCheckToActive: true,
+				activeFileLabel: "agents/reviewer.md",
+				knownMcpServers: ["ado", "my-server"],
+			},
+		);
+		expect(unknownToolDiagnostics(diags)).toEqual([]);
+	});
+
+	test("still warns when an exact tool name is used for a server whose tools have not connected yet", () => {
+		const diags = collectDiagnostics(
+			[
+				report("agents/reviewer.md", [
+					{ tool: "mcp__ado__get_work_item", action: "allow" },
+					{ tool: "mcp__ado", action: "allow" },
+					{ tool: "mcp__ado____mcp_configured__", action: "allow" },
+				]),
+			],
+			["read", "bash"],
+			{
+				scopeUnknownToolCheckToActive: true,
+				activeFileLabel: "agents/reviewer.md",
+				knownMcpServers: ["ado"],
+			},
+		);
+		const warnings = unknownToolDiagnostics(diags);
+		expect(warnings.map((d) => d.tag?.pattern)).toEqual([
+			"mcp__ado__get_work_item",
+			"mcp__ado",
+			"mcp__ado____mcp_configured__",
+		]);
+	});
+
+	test("uses real connected tools instead of the placeholder once the server is already connected", () => {
+		const diags = collectDiagnostics(
+			[
+				report("agents/reviewer.md", [
+					{ tool: "mcp__ado__get_*", action: "allow" },
+					{ tool: "mcp__ado__nonexistent_*", action: "allow" },
+				]),
+			],
+			["read", "bash", "mcp__ado__get_work_item"],
+			{
+				scopeUnknownToolCheckToActive: true,
+				activeFileLabel: "agents/reviewer.md",
+				knownMcpServers: ["ado"],
+			},
+		);
+		const warnings = unknownToolDiagnostics(diags);
+		expect(warnings.map((d) => d.tag?.pattern)).toEqual(["mcp__ado__nonexistent_*"]);
+	});
+
+	test("warns on a wildcard rule for an unconfigured server", () => {
+		const diags = collectDiagnostics(
+			[report("agents/reviewer.md", [{ tool: "mcp__unconfigured__*", action: "ask" }])],
+			["read", "bash"],
+			{
+				scopeUnknownToolCheckToActive: true,
+				activeFileLabel: "agents/reviewer.md",
+				knownMcpServers: ["ado"],
+			},
+		);
+		const warnings = unknownToolDiagnostics(diags);
+		expect(warnings.length).toBe(1);
+		expect(warnings[0].tag).toEqual({ kind: "unknown-tool", pattern: "mcp__unconfigured__*" });
+	});
+
+	test("ignores duplicate or invalid entries in knownMcpServers and skips R2 when knownTools is empty or file is out of active scope", () => {
+		const files = [
+			report("agents/reviewer.md", [{ tool: "mcp__ado__*", action: "allow" }]),
+			report("agents/deployer.md", [{ tool: "mcp__unconfigured__*", action: "ask" }]),
+		];
+		const scopedDiags = collectDiagnostics(files, ["read", "bash"], {
+			scopeUnknownToolCheckToActive: true,
+			activeFileLabel: "agents/reviewer.md",
+			knownMcpServers: ["ado", "ADO", "mcp__ado", "", "   ", "bad/name"],
+		});
+		expect(unknownToolDiagnostics(scopedDiags)).toEqual([]);
+
+		const emptyToolsDiags = collectDiagnostics(
+			[report("agents/reviewer.md", [{ tool: "mcp__unconfigured__*", action: "ask" }])],
+			[],
+			{
+				scopeUnknownToolCheckToActive: true,
+				activeFileLabel: "agents/reviewer.md",
+				knownMcpServers: ["ado"],
+			},
+		);
+		expect(unknownToolDiagnostics(emptyToolsDiags)).toEqual([]);
 	});
 });

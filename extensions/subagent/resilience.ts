@@ -5,7 +5,7 @@
  * (parallel/swarm) use runWithRetry to get the agreed default:
  * retry once on any failure.
  */
-import type { SubagentErrorCode } from "./utils.ts";
+import { TIMEOUT_DEFAULT_MS, type SubagentErrorCode } from "./utils.ts";
 
 export interface RetryOptions {
 	/** Max attempts total (1 = no retry). Default 2 (retry once). */
@@ -101,6 +101,6 @@ export function totalDeadline(totalTimeoutMs: number | undefined, now = Date.now
 
 /** Recommended total budget when the caller did not set one (docs only, not applied). */
 export function recommendedTotalTimeout(perTaskMs: number[], mode: "parallel" | "swarm"): number {
-	if (perTaskMs.length === 0) return 300000;
+	if (perTaskMs.length === 0) return TIMEOUT_DEFAULT_MS;
 	return Math.max(...perTaskMs) + 60000;
 }

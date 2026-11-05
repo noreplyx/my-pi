@@ -1,7 +1,7 @@
 ---
 name: code-test-designer
 description: "Designs test cases (read-only, never implements) - distinct from code-test-implementor which writes test files"
-tools: [read, grep, bash]
+tools: [read, grep, bash, codemode, sql_reader]
 permissions:
   defaultAction: deny
   rules:
@@ -21,6 +21,10 @@ permissions:
     - { tool: bash, match: "re:^(npx|bunx)\\s+((eslint|biome|tsc)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: read, action: allow }
     - { tool: grep, action: allow }
+    - { tool: codemode, action: allow }
+    - { tool: sql_reader, action: allow }
+    - { tool: "re:^mcp__ado__.*(_write|_create_branch|_run|_upload|_link|_upsert_page)$", action: deny }
+    - { tool: "mcp__ado__*", action: allow }
 ---
 
 You design tests. You NEVER touch files — no writing, editing, or deleting. Read-only analysis and test design only.
@@ -47,3 +51,9 @@ All test-case, test-scenario, function, table, class, and variable names in your
    - HTTP tests: request/response example (method, path, headers, body, expected status/body).
    - Unit tests: parameter/return example (inputs → expected output).
 4. Priority order for execution (which cases matter most if time is limited).
+
+## Fast context gathering
+
+- Batch multi-file reads, `grep` searches, `tools.sql_reader(...)` queries, and `git diff`/`git status` checks in one `codemode` script via `await Promise.allSettled([...])` instead of sequential tool turns.
+- Use direct `read`, `grep`, `sql_reader`, or `bash` when inspecting a single file, running a single DB check, or running one command.
+- Do not reference `ALL_TOOLS` or `searchTools()` inside `codemode` unless querying an MCP server.

@@ -1,10 +1,27 @@
 /** Dialog-branch tests for the permissions extension (mocked ExtensionAPI + ctx.ui). */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import factory from "./index.ts";
-import { reloadAll } from "./loader.ts";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+try {
+	await import("@earendil-works/pi-coding-agent");
+} catch {
+	const releasesRoot = fileURLToPath(new URL("../../install/releases", import.meta.url));
+	const versions = fs.existsSync(releasesRoot) ? fs.readdirSync(releasesRoot).sort().reverse() : [];
+	for (const version of versions) {
+		const candidate = path.join(releasesRoot, version, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js");
+		if (fs.existsSync(candidate)) {
+			const mod = await import(pathToFileURL(candidate).href);
+			mock.module("@earendil-works/pi-coding-agent", () => mod);
+			break;
+		}
+	}
+}
+
+const { default: factory } = await import("./index.ts");
+const { reloadAll } = await import("./loader.ts");
 
 let tmpDirs: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
@@ -20,7 +37,7 @@ function useAskAgent(): void {
 }
 
 beforeEach(() => {
-	for (const k of ["PI_AGENT_NAME", "PI_AGENT_FILE", "PI_AUTO_APPROVE"]) {
+	for (const k of ["PI_AGENT_NAME", "PI_AGENT_FILE", "PI_AUTO_APPROVE", "PI_CODING_AGENT_DIR"]) {
 		savedEnv[k] = process.env[k];
 		delete process.env[k];
 	}
@@ -29,7 +46,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	for (const k of ["PI_AGENT_NAME", "PI_AGENT_FILE", "PI_AUTO_APPROVE"]) {
+	for (const k of ["PI_AGENT_NAME", "PI_AGENT_FILE", "PI_AUTO_APPROVE", "PI_CODING_AGENT_DIR"]) {
 		if (savedEnv[k] === undefined) delete process.env[k];
 		else process.env[k] = savedEnv[k];
 	}
@@ -284,5 +301,155 @@ describe("permission dialog", () => {
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain("Denied by user");
 		expect(result?.reason).not.toContain("Feedback:");
+	});
+});
+
+describe("startup validation and status command with configured MCP servers", () => {
+	function setupIsolatedAgentEnv(rules: Array<{ tool: string; match?: string; action: string }>) {
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-perm-agentdir-"));
+		const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-perm-workdir-"));
+		tmpDirs.push(agentDir, workdir);
+
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		delete process.env.PI_AGENT_NAME;
+		delete process.env.PI_AGENT_FILE;
+
+		const agentsFolder = path.join(agentDir, "agents");
+		fs.mkdirSync(agentsFolder, { recursive: true });
+		const mainFile = path.join(agentsFolder, "main.md");
+		fs.writeFileSync(
+			mainFile,
+			`---\nname: main\npermissions: ${JSON.stringify({ defaultAction: "ask", rules })}\n---\nbody\n`,
+			"utf-8",
+		);
+		reloadAll();
+		return { agentDir, workdir };
+	}
+
+	function setupExtension(registeredServers?: ReadonlyArray<{ name: string; config?: unknown }>) {
+		const handlers = new Map<string, (event: any, ctx: any) => any>();
+		const commands = new Map<string, { description: string; handler: (args: string, ctx: any) => Promise<void> }>();
+		const pi: any = {
+			on: (event: string, handler: any) => {
+				handlers.set(event, handler);
+				return () => {};
+			},
+			registerCommand: (name: string, spec: any) => {
+				commands.set(name, spec);
+			},
+			getAllTools: () => [{ name: "bash" }, { name: "write" }, { name: "read" }],
+			...(registeredServers !== undefined ? { getMcpServers: () => registeredServers } : {}),
+		};
+		(factory as any)(pi);
+		return {
+			sessionStart: handlers.get("session_start")!,
+			statusCommand: commands.get("permissions-status")!.handler,
+		};
+	}
+
+	test("stays quiet on session_start when mcp__ado__* is backed by pi.getMcpServers() or mcp.json", async () => {
+		const { agentDir, workdir } = setupIsolatedAgentEnv([{ tool: "mcp__ado__*", action: "allow" }]);
+
+		// 1. Configured via pi.getMcpServers()
+		const extFromRuntime = setupExtension([{ name: "ado", config: { command: "npx" } }]);
+		const runtimeNotices: Array<{ message: string; level?: string }> = [];
+		const { ctx: runtimeCtx } = makeCtx(
+			{ cwd: workdir },
+			{ notify: (message: string, level?: string) => runtimeNotices.push({ message, level }) },
+		);
+		await extFromRuntime.sessionStart({ reason: "startup" }, runtimeCtx);
+		expect(runtimeNotices).toEqual([]);
+
+		// 2. Configured via global mcp.json
+		fs.writeFileSync(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { ado: { command: "npx" } } }),
+			"utf-8",
+		);
+		const extFromFile = setupExtension();
+		const fileNotices: Array<{ message: string; level?: string }> = [];
+		const { ctx: fileCtx } = makeCtx(
+			{ cwd: workdir },
+			{ notify: (message: string, level?: string) => fileNotices.push({ message, level }) },
+		);
+		await extFromFile.sessionStart({ reason: "startup" }, fileCtx);
+		expect(fileNotices).toEqual([]);
+	});
+
+	test("warns on session_start for mcp__typo__* or when a project-only server is in an untrusted project", async () => {
+		const { agentDir, workdir } = setupIsolatedAgentEnv([
+			{ tool: "mcp__ado__*", action: "allow" },
+			{ tool: "mcp__typo__*", action: "ask" },
+		]);
+		fs.writeFileSync(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { ado: { command: "npx" } } }),
+			"utf-8",
+		);
+
+		const ext = setupExtension();
+		const typoNotices: Array<{ message: string; level?: string }> = [];
+		const { ctx: typoCtx } = makeCtx(
+			{ cwd: workdir },
+			{ notify: (message: string, level?: string) => typoNotices.push({ message, level }) },
+		);
+		await ext.sessionStart({ reason: "startup" }, typoCtx);
+		expect(typoNotices.length).toBe(1);
+		expect(typoNotices[0].level).toBe("warning");
+		expect(typoNotices[0].message).toContain("mcp__typo__*");
+		expect(typoNotices[0].message).not.toContain("mcp__ado__*");
+
+		// Project-only server in an untrusted project warns, but stays quiet when trusted.
+		const { workdir: projWorkdir } = setupIsolatedAgentEnv([{ tool: "mcp__proj_only__*", action: "allow" }]);
+		const projPiDir = path.join(projWorkdir, ".pi");
+		fs.mkdirSync(projPiDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(projPiDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { "proj-only": { command: "node" } } }),
+			"utf-8",
+		);
+
+		const untrustedNotices: Array<{ message: string; level?: string }> = [];
+		const { ctx: untrustedCtx } = makeCtx(
+			{ cwd: projWorkdir, isProjectTrusted: () => false },
+			{ notify: (message: string, level?: string) => untrustedNotices.push({ message, level }) },
+		);
+		await ext.sessionStart({ reason: "startup" }, untrustedCtx);
+		expect(untrustedNotices.length).toBe(1);
+		expect(untrustedNotices[0].message).toContain("mcp__proj_only__*");
+
+		const trustedNotices: Array<{ message: string; level?: string }> = [];
+		const { ctx: trustedCtx } = makeCtx(
+			{ cwd: projWorkdir, isProjectTrusted: () => true },
+			{ notify: (message: string, level?: string) => trustedNotices.push({ message, level }) },
+		);
+		await ext.sessionStart({ reason: "reload" }, trustedCtx);
+		expect(trustedNotices).toEqual([]);
+	});
+
+	test("omits unknown-tool warnings for configured servers and reports unconfigured ones in /permissions-status", async () => {
+		const { agentDir, workdir } = setupIsolatedAgentEnv([
+			{ tool: "mcp__ado__*", action: "allow" },
+			{ tool: "mcp__unconfigured__*", action: "ask" },
+		]);
+		fs.writeFileSync(
+			path.join(agentDir, "mcp.json"),
+			JSON.stringify({ mcpServers: { ado: { command: "npx" } } }),
+			"utf-8",
+		);
+
+		const { statusCommand } = setupExtension();
+		const notices: Array<{ message: string; level?: string }> = [];
+		const { ctx } = makeCtx(
+			{ cwd: workdir, isProjectTrusted: () => true },
+			{ notify: (message: string, level?: string) => notices.push({ message, level }) },
+		);
+
+		await statusCommand("", ctx);
+		expect(notices.length).toBe(1);
+		expect(notices[0].level).toBe("info");
+		expect(notices[0].message).toContain("--- validation (1) ---");
+		expect(notices[0].message).toContain("mcp__unconfigured__*");
+		expect(notices[0].message).not.toContain("mcp__ado__*");
 	});
 });
