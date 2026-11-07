@@ -33,3 +33,7 @@ Thumbs.db
 node_modules/
 node_modules
 package-lock.json
+
+# Session diff spool & workspace trust state
+session-diff/spool/
+trust.json
