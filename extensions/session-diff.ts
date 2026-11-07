@@ -17,6 +17,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	Key,
+	isKeyRelease,
+	isKeyRepeat,
 	matchesKey,
 	replaceControlCharacters,
 	truncateToWidth,
@@ -24,9 +26,10 @@ import {
 	wrapTextWithAnsi,
 	type Component,
 	type Focusable,
-	type OverlayHandle,
 	type OverlayOptions,
 	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 
 // ============================================================================
@@ -42,9 +45,96 @@ export const CONTEXT_LINES = 3;
 export const MIN_SIDE_BY_SIDE_WIDTH = 80;
 export const TAB_REPLACEMENT = "    "; // 4 spaces
 export const SPOOL_MAX_AGE_MS = 2 * 60 * 60 * 1000; // 2 hours
+export const OVERLAY_OPEN_CLOSE_GUARD_MS = 400;
+export const OVERLAY_OPEN_ESCAPE_GUARD_MS = 180;
+export const SHORTCUT_REPEAT_BURST_GAP_MS = 220;
+export const MOUSE_WHEEL_SCROLL_LINES = 3;
+export const ENABLE_MOUSE_TRACKING_SEQ = "\x1b[?1000h\x1b[?1006h";
+export const DISABLE_MOUSE_TRACKING_SEQ = "\x1b[?1006l\x1b[?1000l";
 
-function isSessionDiffShortcut(data: string): boolean {
+export interface ParsedMouseWheelEvent {
+	direction: -1 | 1;
+	alt: boolean;
+	shift: boolean;
+	ctrl: boolean;
+}
+
+export function parseMouseWheelInput(
+	data: string,
+): ParsedMouseWheelEvent | "mouse-other" | undefined {
+	if (!data.startsWith("\x1b[")) {
+		return undefined;
+	}
+
+	// SGR extended mouse mode: \x1b[<Cb;Cx;CyM or \x1b[<Cb;Cx;Cym
+	const sgrMatch = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
+	if (sgrMatch) {
+		if (sgrMatch[4] === "m") {
+			return "mouse-other";
+		}
+		const button = Number.parseInt(sgrMatch[1], 10);
+		if ((button & 64) !== 0) {
+			const directionBits = button & 3;
+			if (directionBits === 0 || directionBits === 1) {
+				return {
+					direction: directionBits === 0 ? -1 : 1,
+					shift: (button & 4) !== 0,
+					alt: (button & 8) !== 0,
+					ctrl: (button & 16) !== 0,
+				};
+			}
+		}
+		return "mouse-other";
+	}
+
+	// X10 / normal mouse mode: \x1b[MCbCxCy (6 bytes)
+	if (data.length === 6 && data.startsWith("\x1b[M")) {
+		const button = data.charCodeAt(3) - 32;
+		if ((button & 64) !== 0) {
+			const directionBits = button & 3;
+			if (directionBits === 0 || directionBits === 1) {
+				return {
+					direction: directionBits === 0 ? -1 : 1,
+					shift: (button & 4) !== 0,
+					alt: (button & 8) !== 0,
+					ctrl: (button & 16) !== 0,
+				};
+			}
+		}
+		return "mouse-other";
+	}
+
+	// URXVT mouse mode: \x1b[Cb;Cx;CyM
+	const urxvtMatch = data.match(/^\x1b\[(\d+);(\d+);(\d+)M$/);
+	if (urxvtMatch) {
+		const rawButton = Number.parseInt(urxvtMatch[1], 10);
+		const button = rawButton >= 32 ? rawButton - 32 : rawButton;
+		if ((button & 64) !== 0) {
+			const directionBits = button & 3;
+			if (directionBits === 0 || directionBits === 1) {
+				return {
+					direction: directionBits === 0 ? -1 : 1,
+					shift: (button & 4) !== 0,
+					alt: (button & 8) !== 0,
+					ctrl: (button & 16) !== 0,
+				};
+			}
+		}
+		return "mouse-other";
+	}
+
+	return undefined;
+}
+
+export function matchesSessionDiffShortcutKey(data: string): boolean {
 	return matchesKey(data, SESSION_DIFF_SHORTCUT) || matchesKey(data, "ctrl+alt+d");
+}
+
+export function isSessionDiffShortcut(data: string): boolean {
+	if (isKeyRelease(data) || isKeyRepeat(data)) {
+		return false;
+	}
+	return matchesSessionDiffShortcutKey(data);
 }
 
 export interface BaselineSnapshotEntry {
@@ -906,6 +996,9 @@ export class SessionDiffOverlay implements Component, Focusable {
 	private renderCache = new Map<string, CachedRenderBody>();
 	private isRefreshing = false;
 	private closed = false;
+	private mountedAt = Date.now();
+	private hasRenderedOnce = false;
+	private lastShortcutInputAt = 0;
 
 	constructor(
 		private readonly tui: TUI,
@@ -916,9 +1009,25 @@ export class SessionDiffOverlay implements Component, Focusable {
 		initialFileIndex: number,
 		private readonly onClose: () => void,
 		private readonly onRefresh?: () => Promise<TrackedFileState[]>,
+		private readonly onShortcutInput?: () => void,
+		private readonly onFirstRender?: () => void,
+		private readonly onDispose?: () => void,
 	) {
 		this.currentFileIndex = Math.max(0, Math.min(initialFileIndex, Math.max(0, diffs.length - 1)));
 		this.pickerIndex = this.currentFileIndex;
+	}
+
+	public markMounted(): void {
+		const now = Date.now();
+		this.mountedAt = now;
+		this.lastShortcutInputAt = now;
+	}
+
+	public isWithinOpenGuard(
+		guardMs = OVERLAY_OPEN_CLOSE_GUARD_MS,
+		now = Date.now(),
+	): boolean {
+		return !this.hasRenderedOnce || now - this.mountedAt < guardMs;
 	}
 
 	public invalidate(): void {
@@ -928,11 +1037,13 @@ export class SessionDiffOverlay implements Component, Focusable {
 	public dispose(): void {
 		this.renderCache.clear();
 		this.closed = true;
+		this.onDispose?.();
 	}
 
 	public close(): void {
 		if (this.closed) return;
 		this.closed = true;
+		this.onDispose?.();
 		this.onClose();
 	}
 
@@ -943,11 +1054,69 @@ export class SessionDiffOverlay implements Component, Focusable {
 		return this.layoutMode;
 	}
 
-	private getViewportHeight(effectiveLayout: LayoutMode): number {
+	private getViewportHeight(
+		effectiveLayout: LayoutMode = this.getEffectiveLayoutMode(this.tui.terminal?.columns ?? 100),
+	): number {
 		const termRows = this.tui.terminal?.rows ?? 32;
 		// Chrome rows: top border (1) + header (1) + subheader/divider (1-2) + footer sep (1) + footer (1) + bottom border (1)
 		const chromeLines = effectiveLayout === "split" && !this.pickerOpen ? 7 : 6;
 		return Math.max(8, Math.floor(termRows * 0.88) - chromeLines);
+	}
+
+	private scrollBy(delta: number): void {
+		this.scrollOffset = Math.max(0, this.scrollOffset + delta);
+		this.tui.requestRender();
+	}
+
+	private movePickerBy(delta: number, wrap = false): void {
+		if (this.diffs.length === 0) return;
+		if (wrap) {
+			this.pickerIndex =
+				(((this.pickerIndex + delta) % this.diffs.length) + this.diffs.length) %
+				this.diffs.length;
+		} else {
+			this.pickerIndex = Math.max(
+				0,
+				Math.min(this.diffs.length - 1, this.pickerIndex + delta),
+			);
+		}
+
+		const viewportHeight = this.getViewportHeight();
+		const selectedLineIdx = this.pickerIndex + 2;
+		if (this.pickerIndex === 0 && this.scrollOffset > 0 && selectedLineIdx <= this.scrollOffset + 2) {
+			this.scrollOffset = 0;
+		} else if (selectedLineIdx < this.scrollOffset) {
+			this.scrollOffset = selectedLineIdx;
+		} else if (selectedLineIdx >= this.scrollOffset + viewportHeight) {
+			this.scrollOffset = selectedLineIdx - viewportHeight + 1;
+		}
+
+		this.tui.requestRender();
+	}
+
+	public handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (this.closed) {
+			return { handled: true, render: false };
+		}
+
+		if (event.type === "wheel") {
+			const rawDelta = event.wheelDelta ?? 0;
+			if (rawDelta === 0) {
+				return { handled: true, render: false };
+			}
+			if (this.pickerOpen) {
+				this.movePickerBy(rawDelta > 0 ? 1 : -1, false);
+				return { handled: true };
+			}
+			const scrollDelta =
+				Math.abs(rawDelta) > 1
+					? rawDelta
+					: Math.sign(rawDelta) * MOUSE_WHEEL_SCROLL_LINES;
+			this.scrollBy(scrollDelta);
+			return { handled: true };
+		}
+
+		return { handled: true, render: false };
 	}
 
 	private getActiveDiff(): ComputedFileDiff | undefined {
@@ -1315,6 +1484,11 @@ export class SessionDiffOverlay implements Component, Focusable {
 	}
 
 	public render(width: number): string[] {
+		if (!this.hasRenderedOnce) {
+			this.hasRenderedOnce = true;
+			this.mountedAt = Date.now();
+			this.onFirstRender?.();
+		}
 		const w = Math.max(20, width);
 		const innerW = Math.max(1, w - 2);
 		const effectiveLayout = this.getEffectiveLayoutMode(w);
@@ -1539,28 +1713,54 @@ export class SessionDiffOverlay implements Component, Focusable {
 	}
 
 	public handleInput(data: string): void {
-		if (this.closed) return;
+		if (this.closed || isKeyRelease(data)) return;
 
-		// Global toggle shortcut closes the overlay
-		if (isSessionDiffShortcut(data)) {
-			this.close();
+		const mouseParsed = parseMouseWheelInput(data);
+		if (mouseParsed === "mouse-other") {
+			return;
+		}
+		if (mouseParsed) {
+			if (this.pickerOpen) {
+				this.movePickerBy(mouseParsed.direction, false);
+				return;
+			}
+			const step = mouseParsed.alt
+				? MOUSE_WHEEL_SCROLL_LINES * 3
+				: MOUSE_WHEEL_SCROLL_LINES;
+			this.scrollBy(mouseParsed.direction * step);
+			return;
+		}
+
+		// Global toggle shortcut closes the overlay outside repeat-burst and post-mount guard windows
+		if (matchesSessionDiffShortcutKey(data)) {
+			if (isKeyRepeat(data)) {
+				return;
+			}
+			if (this.onShortcutInput) {
+				this.onShortcutInput();
+				return;
+			}
+			const now = Date.now();
+			const isRepeatBurst =
+				now - this.lastShortcutInputAt < SHORTCUT_REPEAT_BURST_GAP_MS;
+			this.lastShortcutInputAt = now;
+			if (
+				!isRepeatBurst &&
+				!this.isWithinOpenGuard(OVERLAY_OPEN_CLOSE_GUARD_MS, now)
+			) {
+				this.close();
+			}
 			return;
 		}
 
 		// File Picker drawer navigation
 		if (this.pickerOpen) {
 			if (matchesKey(data, "up") || data === "k") {
-				if (this.diffs.length > 0) {
-					this.pickerIndex = (this.pickerIndex - 1 + this.diffs.length) % this.diffs.length;
-					this.tui.requestRender();
-				}
+				this.movePickerBy(-1, true);
 				return;
 			}
 			if (matchesKey(data, "down") || data === "j") {
-				if (this.diffs.length > 0) {
-					this.pickerIndex = (this.pickerIndex + 1) % this.diffs.length;
-					this.tui.requestRender();
-				}
+				this.movePickerBy(1, true);
 				return;
 			}
 			if (matchesKey(data, "enter") || matchesKey(data, "return")) {
@@ -1571,8 +1771,10 @@ export class SessionDiffOverlay implements Component, Focusable {
 				return;
 			}
 			if (matchesKey(data, "escape") || data === "p" || data === "q") {
-				this.pickerOpen = false;
-				this.tui.requestRender();
+				if (!isKeyRepeat(data)) {
+					this.pickerOpen = false;
+					this.tui.requestRender();
+				}
 				return;
 			}
 			return;
@@ -1584,7 +1786,12 @@ export class SessionDiffOverlay implements Component, Focusable {
 			data === "q" ||
 			matchesKey(data, "ctrl+c")
 		) {
-			this.close();
+			if (
+				!isKeyRepeat(data) &&
+				!this.isWithinOpenGuard(OVERLAY_OPEN_ESCAPE_GUARD_MS)
+			) {
+				this.close();
+			}
 			return;
 		}
 
@@ -1592,23 +1799,19 @@ export class SessionDiffOverlay implements Component, Focusable {
 		const pageStep = Math.max(4, Math.floor(this.getViewportHeight(effectiveLayout) * 0.8));
 
 		if (matchesKey(data, "down") || data === "j") {
-			this.scrollOffset += 1;
-			this.tui.requestRender();
+			this.scrollBy(1);
 			return;
 		}
 		if (matchesKey(data, "up") || data === "k") {
-			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
-			this.tui.requestRender();
+			this.scrollBy(-1);
 			return;
 		}
 		if (matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d")) {
-			this.scrollOffset += pageStep;
-			this.tui.requestRender();
+			this.scrollBy(pageStep);
 			return;
 		}
 		if (matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u")) {
-			this.scrollOffset = Math.max(0, this.scrollOffset - pageStep);
-			this.tui.requestRender();
+			this.scrollBy(-pageStep);
 			return;
 		}
 		if (matchesKey(data, "home") || data === "g") {
@@ -1642,10 +1845,12 @@ export class SessionDiffOverlay implements Component, Focusable {
 			return;
 		}
 		if (data === "p") {
-			this.pickerIndex = this.currentFileIndex;
-			this.pickerOpen = true;
-			this.scrollOffset = 0;
-			this.tui.requestRender();
+			if (!isKeyRepeat(data)) {
+				this.pickerIndex = this.currentFileIndex;
+				this.pickerOpen = true;
+				this.scrollOffset = 0;
+				this.tui.requestRender();
+			}
 			return;
 		}
 		if (data === "f") {
@@ -2248,9 +2453,61 @@ export default function sessionDiffExtension(pi: ExtensionAPI): void {
 	const consumedSpoolIds = new Set<string>();
 
 	let latestContext: ExtensionContext | undefined;
-	let activeOverlayHandle: OverlayHandle | undefined;
 	let activeOverlayInstance: SessionDiffOverlay | undefined;
+	let activeOverlayTui: TUI | undefined;
+	let mouseTrackingEnabledByOverlay = false;
+	let isOpeningOverlay = false;
+	let lastShortcutEventAt = 0;
+	let lastSyncedLeafId: string | null | undefined = undefined;
 	let unsubscribeTerminalInput: (() => void) | undefined;
+
+	const onProcessExitRestoreMouse = (): void => {
+		if (!mouseTrackingEnabledByOverlay) {
+			return;
+		}
+		mouseTrackingEnabledByOverlay = false;
+		try {
+			process.stdout.write(DISABLE_MOUSE_TRACKING_SEQ);
+		} catch {
+			// Ignore write errors during process teardown
+		}
+	};
+
+	function enableOverlayMouseTracking(tui: TUI): void {
+		activeOverlayTui = tui;
+		if (tui.mode === "fullscreen" || mouseTrackingEnabledByOverlay) {
+			return;
+		}
+		try {
+			tui.terminal?.write?.(ENABLE_MOUSE_TRACKING_SEQ);
+			mouseTrackingEnabledByOverlay = true;
+			process.once("exit", onProcessExitRestoreMouse);
+		} catch {
+			// Ignore terminal write errors
+		}
+	}
+
+	function disableOverlayMouseTracking(tui?: TUI): void {
+		process.off("exit", onProcessExitRestoreMouse);
+		const targetTui = tui ?? activeOverlayTui;
+		activeOverlayTui = undefined;
+		if (!mouseTrackingEnabledByOverlay) {
+			return;
+		}
+		mouseTrackingEnabledByOverlay = false;
+		if (targetTui?.mode === "fullscreen") {
+			return;
+		}
+		try {
+			if (targetTui?.terminal?.write) {
+				targetTui.terminal.write(DISABLE_MOUSE_TRACKING_SEQ);
+			} else {
+				process.stdout.write(DISABLE_MOUSE_TRACKING_SEQ);
+			}
+		} catch {
+			// Ignore terminal write errors
+		}
+	}
 
 	function cleanupTerminalInputListener(): void {
 		if (unsubscribeTerminalInput) {
@@ -2626,9 +2883,66 @@ export default function sessionDiffExtension(pi: ExtensionAPI): void {
 	async function syncSessionDiffState(
 		ctx: ExtensionContext,
 		clearPending: boolean,
+		forceFullRescan = false,
 	): Promise<void> {
+		latestContext = ctx;
+		if (clearPending) {
+			lastSyncedLeafId = undefined;
+		}
+
+		const currentLeafId = ctx.sessionManager?.getLeafId?.() ?? null;
+		const canUseFastPath =
+			!clearPending &&
+			!forceFullRescan &&
+			trackedFiles.size > 0 &&
+			pendingSubagents.size === 0 &&
+			lastSyncedLeafId !== undefined &&
+			currentLeafId === lastSyncedLeafId;
+
+		if (canUseFastPath) {
+			if (isSubagentChildProcess(ctx)) {
+				return;
+			}
+			const candidates = await readCandidateSpoolRecords();
+			const hasUnconsumedSpool = candidates.some(
+				(item) => !consumedSpoolIds.has(item.record.id),
+			);
+			if (!hasUnconsumedSpool) {
+				return;
+			}
+		}
+
 		reconstructState(ctx, clearPending);
 		await ingestSubagentChanges(ctx);
+		lastSyncedLeafId = ctx.sessionManager?.getLeafId?.() ?? null;
+	}
+
+	function handleShortcutTrigger(ctx: ExtensionContext): void {
+		const prevShortcutAt = lastShortcutEventAt;
+		const now = Date.now();
+		lastShortcutEventAt = now;
+		const isRepeatBurst = now - prevShortcutAt < SHORTCUT_REPEAT_BURST_GAP_MS;
+
+		if (isOpeningOverlay) {
+			return;
+		}
+
+		if (activeOverlayInstance) {
+			if (
+				isRepeatBurst ||
+				activeOverlayInstance.isWithinOpenGuard(OVERLAY_OPEN_CLOSE_GUARD_MS, now)
+			) {
+				return;
+			}
+			activeOverlayInstance.close();
+			return;
+		}
+
+		if (isRepeatBurst) {
+			return;
+		}
+
+		void openDiffViewer(latestContext ?? ctx);
 	}
 
 	function attachTerminalShortcutInterceptor(ctx: ExtensionContext): void {
@@ -2637,12 +2951,11 @@ export default function sessionDiffExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		unsubscribeTerminalInput = ctx.ui.onTerminalInput((data: string) => {
-			if (isSessionDiffShortcut(data)) {
-				if (activeOverlayInstance) {
-					activeOverlayInstance.close();
-				} else if (latestContext) {
-					void openDiffViewer(latestContext);
+			if (matchesSessionDiffShortcutKey(data)) {
+				if (isKeyRelease(data) || isKeyRepeat(data)) {
+					return { consume: true };
 				}
+				handleShortcutTrigger(latestContext ?? ctx);
 				return { consume: true };
 			}
 			return undefined;
@@ -2660,63 +2973,68 @@ export default function sessionDiffExtension(pi: ExtensionAPI): void {
 
 		// Toggle/close if already open
 		if (activeOverlayInstance) {
+			if (
+				activeOverlayInstance.isWithinOpenGuard(OVERLAY_OPEN_CLOSE_GUARD_MS)
+			) {
+				return;
+			}
 			activeOverlayInstance.close();
 			return;
 		}
-		if (activeOverlayHandle) {
-			activeOverlayHandle.hide();
-			activeOverlayHandle = undefined;
+		if (isOpeningOverlay) {
 			return;
 		}
 
-		await syncSessionDiffState(ctx, false);
+		isOpeningOverlay = true;
+		try {
+			await syncSessionDiffState(ctx, false);
 
-		if (trackedFiles.size === 0) {
-			ctx.ui.notify("No files modified by edit/write in this session branch yet.", "info");
-			return;
-		}
+			if (trackedFiles.size === 0) {
+				ctx.ui.notify("No files modified by edit/write in this session branch yet.", "info");
+				return;
+			}
 
-		const states = Array.from(trackedFiles.values());
-		let initialIndex = 0;
+			const states = Array.from(trackedFiles.values());
+			let initialIndex = 0;
 
-		if (initialFilter && initialFilter.trim().length > 0) {
-			const needle = initialFilter.trim();
-			const needleLower = needle.toLowerCase();
-			const exactIdx = states.findIndex(
-				(s) => s.relPath.toLowerCase() === needleLower,
-			);
-			if (exactIdx >= 0) {
-				initialIndex = exactIdx;
-			} else {
-				const subIdx = states.findIndex((s) =>
-					s.relPath.toLowerCase().includes(needleLower),
+			if (initialFilter && initialFilter.trim().length > 0) {
+				const needle = initialFilter.trim();
+				const needleLower = needle.toLowerCase();
+				const exactIdx = states.findIndex(
+					(s) => s.relPath.toLowerCase() === needleLower,
 				);
-				if (subIdx >= 0) {
-					initialIndex = subIdx;
+				if (exactIdx >= 0) {
+					initialIndex = exactIdx;
 				} else {
-					ctx.ui.notify(
-						`No tracked file matches "${needle}". Showing ${states[0].relPath}.`,
-						"warning",
+					const subIdx = states.findIndex((s) =>
+						s.relPath.toLowerCase().includes(needleLower),
 					);
+					if (subIdx >= 0) {
+						initialIndex = subIdx;
+					} else {
+						ctx.ui.notify(
+							`No tracked file matches "${needle}". Showing ${states[0].relPath}.`,
+							"warning",
+						);
+					}
 				}
 			}
-		}
 
-		const initialDiffs = await Promise.all(
-			states.map((st) => computeFileDiff(st, ctx.cwd)),
-		);
+			const initialDiffs = await Promise.all(
+				states.map((st) => computeFileDiff(st, ctx.cwd)),
+			);
 
-		const overlayOptions: OverlayOptions = {
-			anchor: "center",
-			width: "96%",
-			minWidth: 44,
-			maxHeight: "92%",
-			margin: 1,
-		};
+			const overlayOptions: OverlayOptions = {
+				anchor: "center",
+				width: "96%",
+				minWidth: 44,
+				maxHeight: "92%",
+				margin: 1,
+			};
 
-		try {
 			await ctx.ui.custom<void>(
 				(tui, theme, _keybindings, done) => {
+					enableOverlayMouseTracking(tui);
 					const overlay = new SessionDiffOverlay(
 						tui,
 						theme,
@@ -2725,13 +3043,24 @@ export default function sessionDiffExtension(pi: ExtensionAPI): void {
 						initialDiffs,
 						initialIndex,
 						() => {
+							disableOverlayMouseTracking(tui);
 							activeOverlayInstance = undefined;
-							activeOverlayHandle = undefined;
+							isOpeningOverlay = false;
 							done(undefined);
 						},
 						async () => {
-							await syncSessionDiffState(ctx, false);
+							await syncSessionDiffState(ctx, false, true);
 							return Array.from(trackedFiles.values());
+						},
+						() => {
+							handleShortcutTrigger(latestContext ?? ctx);
+						},
+						() => {
+							isOpeningOverlay = false;
+							lastShortcutEventAt = Date.now();
+						},
+						() => {
+							disableOverlayMouseTracking(tui);
 						},
 					);
 					activeOverlayInstance = overlay;
@@ -2740,14 +3069,17 @@ export default function sessionDiffExtension(pi: ExtensionAPI): void {
 				{
 					overlay: true,
 					overlayOptions: () => overlayOptions,
-					onHandle: (handle) => {
-						activeOverlayHandle = handle;
+					onHandle: () => {
+						activeOverlayInstance?.markMounted();
+						isOpeningOverlay = false;
+						lastShortcutEventAt = Date.now();
 					},
 				},
 			);
 		} finally {
+			disableOverlayMouseTracking();
+			isOpeningOverlay = false;
 			activeOverlayInstance = undefined;
-			activeOverlayHandle = undefined;
 		}
 	}
 
@@ -2901,8 +3233,11 @@ export default function sessionDiffExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async () => {
 		cleanupTerminalInputListener();
+		disableOverlayMouseTracking();
 		activeOverlayInstance = undefined;
-		activeOverlayHandle = undefined;
+		isOpeningOverlay = false;
+		lastShortcutEventAt = 0;
+		lastSyncedLeafId = undefined;
 	});
 
 	// Slash Command `/diff`
@@ -2931,7 +3266,7 @@ export default function sessionDiffExtension(pi: ExtensionAPI): void {
 	pi.registerShortcut(SESSION_DIFF_SHORTCUT, {
 		description: "Open session side-by-side diff viewer",
 		handler: async (ctx: ExtensionContext) => {
-			await openDiffViewer(ctx);
+			handleShortcutTrigger(ctx);
 		},
 	});
 }
