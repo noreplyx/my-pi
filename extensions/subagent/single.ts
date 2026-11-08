@@ -278,7 +278,8 @@ export async function runSingleAgent(
 				cwd: resolvedCwd,
 				shell: false,
 				stdio: ["pipe", "pipe", "pipe"],
-				detached: true,
+				detached: process.platform !== "win32",
+				windowsHide: true,
 				env: buildChildEnv(process.env, childExtra),
 			});
 			let stdoutBuffer = "";

@@ -86,6 +86,7 @@ export class LspClient {
 			cwd: this.options.rootPath,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
+			windowsHide: true,
 		});
 		this.proc = proc;
 		proc.stdin?.on("error", (err) => {
