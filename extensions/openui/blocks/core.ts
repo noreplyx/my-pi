@@ -202,40 +202,57 @@ export function answerBar(choices: Choice[], state: WState, title: string, width
 export function tabs(el: El, width: number, ctx: Ctx, path: string): Block {
 	const items: El[] = el.props.items ?? [];
 	if (!items.length) return blank(width, 0);
-	const rawSel = isSafeKey(path) ? ctx.state.tab[path] ?? 0 : 0;
-	const sel = Math.min(Math.max(0, rawSel), items.length - 1);
+	const rawSel = isSafeKey(path) ? ctx.state.tab[path] : undefined;
+	const sel = rawSel === undefined || rawSel < 0 ? -1 : Math.min(rawSel, items.length - 1);
+	const allLabel = "All";
 	let labels = items.map((it) => truncateText(String(it.props.label ?? ""), 22));
-	const need = () => labels.reduce((a, l) => a + textWidth(l) + 4, 0);
+	const need = () => textWidth(allLabel) + 4 + labels.reduce((a, l) => a + textWidth(l) + 4, 0);
 	let cap = 22;
 	while (need() > width && cap > 4) labels = items.map((it) => truncateText(String(it.props.label ?? ""), --cap));
 	const l0: ReturnType<typeof textCells> = [];
 	const l1: typeof l0 = [];
 	const l2: typeof l0 = [];
 	const targets: Target[] = [];
-	labels.forEach((lab, i) => {
-		const iw = textWidth(lab) + 2;
-		const on = i === sel;
+	const addPill = (shownLabel: string, fullLabel: string, index: number) => {
+		const iw = textWidth(shownLabel) + 2;
+		const on = index === sel;
 		const role = on ? "tab.on" : "tab.off";
 		const x0 = l1.length;
 		if (on) {
 			l0.push(cell("╭", role), ...Array.from({ length: iw }, () => cell("─", role)), cell("╮", role));
-			l1.push(cell("│", role), cell(" ", role), ...textCells(lab, "tab.label"), cell(" ", role), cell("│", role));
+			l1.push(cell("│", role), cell(" ", role), ...textCells(shownLabel, "tab.label"), cell(" ", role), cell("│", role));
 			l2.push(cell("╯", role), ...Array.from({ length: iw }, () => cell(" ")), cell("╰", role));
 		} else {
 			l0.push(...Array.from({ length: iw + 2 }, () => cell(" ")));
-			l1.push(cell(" "), cell(" "), ...textCells(lab, role), cell(" "), cell(" "));
+			l1.push(cell(" "), cell(" "), ...textCells(shownLabel, role), cell(" "), cell(" "));
 			l2.push(...Array.from({ length: iw + 2 }, () => cell("─", "tab.rule")));
 		}
-		targets.push({ id: `tab:${path}:${i}`, kind: "tab", rect: { x: x0, y: 1, w: iw + 2, h: 1 }, label: String(items[i].props.label ?? "") });
-	});
+		targets.push({ id: `tab:${path}:${index}`, kind: "tab", rect: { x: x0, y: 1, w: iw + 2, h: 1 }, label: fullLabel });
+	};
+	addPill(allLabel, allLabel, -1);
+	labels.forEach((lab, i) => addPill(lab, String(items[i].props.label ?? ""), i));
 	while (l2.length < width) l2.push(cell("─", "tab.rule"));
 	const strip = fromRows(width, [l0, l1, l2], targets);
-	ctx.tabs.push(String(items[sel].props.label ?? ""));
 	let content: Block;
-	try {
-		content = stack({ type: "Stack", props: { children: items[sel].props.content ?? [], gap: "m" }, line: el.line }, width, ctx, `${path}.t${sel}`);
-	} finally {
-		ctx.tabs.pop();
+	if (sel === -1) {
+		const sections = items.map((item, i) => {
+			const tabLabel = String(item.props.label ?? "");
+			ctx.tabs.push(tabLabel);
+			try {
+				const inner = stack({ type: "Stack", props: { children: item.props.content ?? [], gap: "m" }, line: item.line ?? el.line }, Math.max(4, width - 4), ctx, `${path}.t${i}`);
+				return boxed(inner, { role: "card", title: tabLabel, titleRole: "card.title" });
+			} finally {
+				ctx.tabs.pop();
+			}
+		});
+		content = vstack(sections, 1, width);
+	} else {
+		ctx.tabs.push(String(items[sel].props.label ?? ""));
+		try {
+			content = stack({ type: "Stack", props: { children: items[sel].props.content ?? [], gap: "m" }, line: el.line }, width, ctx, `${path}.t${sel}`);
+		} finally {
+			ctx.tabs.pop();
+		}
 	}
 	return vstack([strip, vstack([blank(width, 0), content], 0, width)], 0, width);
 }
@@ -245,8 +262,9 @@ export function faq(el: El, width: number, ctx: Ctx, path: string): Block {
 	const out: Block[] = [];
 	items.forEach((it, i) => {
 		const id = `faq:${path}:${i}`;
-		if (isSafeKey(id) && ctx.state.faq[id] === undefined) ctx.state.faq[id] = !!el.props.firstOpen && i === 0;
-		const open = isSafeKey(id) ? !!ctx.state.faq[id] : false;
+		const defaultOpen = el.props.firstOpen === false ? i === 0 : true;
+		if (isSafeKey(id) && ctx.state.faq[id] === undefined) ctx.state.faq[id] = defaultOpen;
+		const open = isSafeKey(id) ? !!ctx.state.faq[id] : defaultOpen;
 		const qRows = wrapRuns([{ t: String(it.props.question ?? ""), role: "faq.q" }], width - 2);
 		const head = fromRows(
 			width,

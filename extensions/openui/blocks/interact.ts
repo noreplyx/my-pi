@@ -159,8 +159,11 @@ export function activate(t: Target, state: WState, env: Env): boolean {
 			const k = lastColon(t.id);
 			const path = t.id.slice(4, k);
 			const i = Number(t.id.slice(k + 1));
-			if (!isSafeKey(path) || state.tab[path] === i) return false;
-			state.tab[path] = i;
+			if (!isSafeKey(path)) return false;
+			const cur = state.tab[path] ?? -1;
+			const next = i === -1 || cur === i ? -1 : i;
+			if (next === cur) return false;
+			state.tab[path] = next;
 			state.tip = null;
 			state.confirming = null;
 			return true;

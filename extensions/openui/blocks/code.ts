@@ -1,4 +1,5 @@
-import { textWidth, truncateText, type Cell } from "../diagram/canvas.ts";
+import { textWidth, type Cell } from "../diagram/canvas.ts";
+import { LIMITS } from "../lang/library.ts";
 import type { Block, Target } from "./types.ts";
 import { boxed, cell, fromRows, textCells, vstack } from "./util.ts";
 
@@ -74,13 +75,27 @@ function highlightLine(line: string, lang: string | null): Cell[] {
 	return out;
 }
 
+function wrapHighlightedCells(highlighted: Cell[], width: number): Cell[][] {
+	const safeWidth = Math.max(1, width);
+	if (highlighted.length <= safeWidth) return [highlighted];
+	const wrapped: Cell[][] = [];
+	let offset = 0;
+	while (offset < highlighted.length) {
+		let end = Math.min(highlighted.length, offset + safeWidth);
+		if (end < highlighted.length && highlighted[end].ch === "" && end - 1 > offset) {
+			end--;
+		}
+		wrapped.push(highlighted.slice(offset, end));
+		offset = end;
+		while (offset < highlighted.length && highlighted[offset].ch === "") offset++;
+	}
+	return wrapped;
+}
+
 export function codeInner(code: string, lang: string | undefined, width: number): Block {
 	const l = normLang(lang);
-	const lines = String(code ?? "").replace(/\t/g, "  ").replace(/\n$/, "").split("\n").slice(0, 200);
-	const rows = lines.map((ln) => {
-		const tw = textWidth(ln);
-		return highlightLine(tw > width ? truncateText(ln, width) : ln, l);
-	});
+	const lines = String(code ?? "").replace(/\t/g, "  ").replace(/\n$/, "").split("\n").slice(0, LIMITS.codeLines);
+	const rows = lines.flatMap((ln) => wrapHighlightedCells(highlightLine(ln, l), width));
 	return fromRows(width, rows);
 }
 

@@ -49,7 +49,7 @@ export const LIMITS = {
 	/** characters in one string, unless the argument says otherwise */
 	string: 2_000,
 	/** characters in one table cell */
-	cell: 300,
+	cell: 1_000,
 	text: 8_000,
 	markdown: 30_000,
 	code: 30_000,
@@ -105,12 +105,12 @@ export const SPECS: CompSpec[] = [
 	{ name: "Text", params: [p("text", S, false, LIMITS.text), p("variant", e("title", "heading", "body", "muted", "code"), true)], desc: "A line or paragraph of text (default body)." },
 	{ name: "Card", params: [p("children", kids), p("title", S, true)], desc: "Bordered panel with an optional title." },
 	{ name: "Metric", params: [p("label", S), p("value", S), p("delta", S, true), p("tone", e("good", "warn", "bad", "neutral"), true), p("tooltips", tips, true)], desc: "KPI tile. value and delta are strings. tone colours the delta." },
-	{ name: "Table", params: [p("columns", { arr: S, max: LIMITS.tableCols }), p("rows", { arr: { arr: "cell", max: LIMITS.tableCols }, max: LIMITS.tableRows }), p("tooltips", tips, true)], desc: "Data table. rows is an array of rows, each the same length as columns (strings or numbers)." },
+	{ name: "Table", params: [p("columns", { arr: S, max: LIMITS.tableCols }), p("rows", { arr: { arr: "cell", max: LIMITS.tableCols }, max: LIMITS.tableRows }), p("tooltips", tips, true)], desc: "Data table. rows is an array of rows, each the same length as columns (strings or numbers). Cells wrap across lines (\\n supported)." },
 	{ name: "BarChart", params: [p("labels", { arr: S, max: LIMITS.bars }), p("values", { arr: "number", max: LIMITS.bars }), p("title", S, true), p("unit", S, true), p("tooltips", tips, true)], desc: "Bar chart of one series. labels and values are parallel arrays. unit is a suffix such as %." },
 	{ name: "Callout", params: [p("text", S), p("tone", e("info", "success", "warn", "error"), true)], desc: "Highlighted note." },
 	{ name: "Button", params: [p("label", S), p("action", "action", true)], desc: "Clickable button. Without an action it sends its label to the assistant." },
 	{ name: "TabItem", helper: true, params: [p("label", S), p("content", kids)], desc: "One tab. Only valid inside Tabs." },
-	{ name: "Tabs", params: [p("items", { arr: { comp: ["TabItem"] }, min: 1, max: LIMITS.tabs })], desc: "Tabbed container." },
+	{ name: "Tabs", params: [p("items", { arr: { comp: ["TabItem"] }, min: 1, max: LIMITS.tabs })], desc: "Tabbed container. Shows all sections stacked by default and filters when a tab is clicked." },
 	{ name: "Markdown", params: [p("text", S, false, LIMITS.markdown)], desc: "Rich text from markdown: headings, **bold**, *italic*, `code`, lists, > quotes, tables, fenced code, ---. A line that is only ![alt](path \"caption\") draws a picture (a local file or data: URI, as for Image)." },
 	{ name: "CodeBlock", params: [p("code", S, false, LIMITS.code), p("language", S, true), p("title", S, true)], desc: "Syntax highlighted code. language: python|js|ts|bash|sql|yaml|json|go|rust (others unhighlighted). Click copies it." },
 	{ name: "Image", params: [p("src", S, false, LIMITS.src), p("alt", S, true), p("caption", S, true), p("tooltips", tips, true)], desc: "An image. A terminal grid cannot hold bitmaps, so it is drawn as a labelled frame with the file name and size." },
@@ -122,7 +122,7 @@ export const SPECS: CompSpec[] = [
 	{ name: "GeoPoint", helper: true, params: [p("label", S), p("lat", "number"), p("lon", "number"), p("tone", e("good", "warn", "bad", "info", "neutral"), true)], desc: "Map pin in decimal degrees." },
 	{ name: "GeoMap", params: [p("points", { arr: { comp: ["GeoPoint"] }, min: 1, max: LIMITS.geoPoints }), p("links", { arr: { arr: S }, max: LIMITS.links }, true), p("title", S, true), p("tooltips", tips, true)], desc: "Offline world map (coarse coastlines) zoomed to fit the pins. links are [labelA, labelB] pairs drawn dashed." },
 	{ name: "FaqItem", helper: true, params: [p("question", S), p("answer", S, false, LIMITS.answer)], desc: "One Q&A entry (answer is markdown). Only valid inside Faq." },
-	{ name: "Faq", params: [p("items", { arr: { comp: ["FaqItem"] }, min: 1, max: LIMITS.faq }), p("firstOpen", "boolean", true)], desc: "Collapsible Q&A list." },
+	{ name: "Faq", params: [p("items", { arr: { comp: ["FaqItem"] }, min: 1, max: LIMITS.faq }), p("firstOpen", "boolean", true)], desc: "Collapsible Q&A list. Items open by default unless firstOpen is false." },
 	{ name: "Choice", params: [p("question", S, false, LIMITS.question), p("options", { arr: S, min: 2, max: LIMITS.choiceOptions }), p("hint", S, true), p("multiple", "boolean", true), p("other", "boolean", true)], desc: "A question for the USER. Answers are staged and sent together as ONE message when the user presses Send answers. multiple (4th argument) true allows several options. other (5th argument, default true) adds an Other... row where the user types their own answer; false hides it." },
 	{ name: "Series", helper: true, params: [p("category", S), p("values", { arr: "number", max: LIMITS.points })], desc: "One data series: name and numbers parallel to the chart labels." },
 	{ name: "LineChart", params: [p("labels", { arr: S, max: LIMITS.points }), p("series", { arr: { comp: ["Series"] }, min: 1, max: LIMITS.series }), p("variant", e("linear", "natural", "step"), true), p("xLabel", S, true), p("yLabel", S, true), p("height", "number", true), p("tooltips", tips, true)], desc: "Line chart over categories, several series. variant natural (smooth, default), linear or step." },
@@ -365,7 +365,7 @@ function compileProgram(source: string): Compiled {
 						if (d.k !== "str" && d.k !== "num") return bad("a string or a number");
 						if (d.k === "str") {
 							tooLong(d.v, LIMITS.cell, ctx, d.line);
-							return stripControl(d.v, false);
+							return stripControl(d.v, true);
 						}
 						return d.v;
 					case "any":
@@ -655,7 +655,7 @@ export function reference(): string {
 3. Arguments are POSITIONAL. Write Metric("CPU", "38%", "+2%", "good"), never delta: "+2%". Skip an optional argument in the middle with null.
 4. Every name except root must be referenced by another statement, or it is an error (it would not render). References may be used before they are defined.
 5. Helper components (TabItem, DagNode, Entity, Relation, Series, GeoPoint, FaqItem, Infra*, Seq*, Tooltip) belong only in their parent's argument.
-6. The widget is drawn in a terminal of about 100 columns: keep labels short, tables under about 12 rows.
+6. The widget is drawn in a terminal of about 100 columns: table cells wrap across multiple lines (\\n supported), and narrow columns keep their natural width while prose columns share the remaining width.
 
 ## Components
 ${SPECS.map(sig).join("\n")}
@@ -667,7 +667,7 @@ An element that has a tooltip shows a small ◆ on it. Hovering shows the hint; 
 hint is the short text shown on hover (140 characters). detail (800), code (40 lines) and link (http/https) open in a panel when the element is clicked.
 
 ## Limits
-A widget over a limit is not drawn, and the error says which. Source ${LIMITS.source / 1000} KB, ${LIMITS.elements} components, ${LIMITS.depth} levels of nesting, ${LIMITS.children} children per Stack or Card, ${LIMITS.tabs} tabs. Text ${LIMITS.text} characters, Markdown ${LIMITS.markdown}, any other string ${LIMITS.string}, a table cell ${LIMITS.cell}. Table ${LIMITS.tableRows} rows by ${LIMITS.tableCols} columns. BarChart ${LIMITS.bars} bars. LineChart and AreaChart ${LIMITS.points} points and ${LIMITS.series} series. RadarChart ${LIMITS.axes} axes. Dag ${LIMITS.dagNodes} nodes and ${LIMITS.dagEdges} edges. Erd ${LIMITS.entities} entities, ${LIMITS.fields} fields each, ${LIMITS.relations} relations. InfraMap ${LIMITS.infraNodes} nodes and ${LIMITS.infraLinks} links. GeoMap ${LIMITS.geoPoints} points and ${LIMITS.links} links. Faq ${LIMITS.faq} items. Pictures ${LIMITS.images} (Image components and markdown picture lines together). CodeBlock ${LIMITS.codeLines} lines. Choices ${LIMITS.choices} per widget, a question ${LIMITS.question} characters, an option ${LIMITS.option}, ${LIMITS.choiceOptions} options, the user's Other answer ${LIMITS.other}. A SequenceDiagram ${LIMITS.steps} steps. Prefer far less: the reader sees one terminal screen.
+A widget over a limit is not drawn, and the error says which. Source ${LIMITS.source / 1000} KB, ${LIMITS.elements} components, ${LIMITS.depth} levels of nesting, ${LIMITS.children} children per Stack or Card, ${LIMITS.tabs} tabs. Text ${LIMITS.text} characters, Markdown ${LIMITS.markdown}, any other string ${LIMITS.string}, a table cell ${LIMITS.cell}. Table ${LIMITS.tableRows} rows by ${LIMITS.tableCols} columns. BarChart ${LIMITS.bars} bars. LineChart and AreaChart ${LIMITS.points} points and ${LIMITS.series} series. RadarChart ${LIMITS.axes} axes. Dag ${LIMITS.dagNodes} nodes and ${LIMITS.dagEdges} edges. Erd ${LIMITS.entities} entities, ${LIMITS.fields} fields each, ${LIMITS.relations} relations. InfraMap ${LIMITS.infraNodes} nodes and ${LIMITS.infraLinks} links. GeoMap ${LIMITS.geoPoints} points and ${LIMITS.links} links. Faq ${LIMITS.faq} items. Pictures ${LIMITS.images} (Image components and markdown picture lines together). CodeBlock ${LIMITS.codeLines} lines. Choices ${LIMITS.choices} per widget, a question ${LIMITS.question} characters, an option ${LIMITS.option}, ${LIMITS.choiceOptions} options, the user's Other answer ${LIMITS.other}. A SequenceDiagram ${LIMITS.steps} steps. Hybrid presentation: use the widget for visual/interactive structure (architecture/dependency diagrams, KPI Metric tiles, summary Tables, Choice questionnaires, and action Buttons) and follow the widget with full detailed Markdown prose when presenting specifications, step-by-step plans, test designs, or code reviews.
 
 ## Actions
 Button("Restart", @ToAssistant("Restart the vllm service")) sends that text to the assistant as the user's next turn (500 characters at most). A Button without an action sends its label. Several steps: Action([@ToAssistant("...")]). Do not use @OpenUrl: put links in a Text.

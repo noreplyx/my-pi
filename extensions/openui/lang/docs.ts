@@ -113,17 +113,17 @@ b = Metric("p95 latency", "180 ms", "+22 ms", "warn")`,
 	},
 	Table: {
 		group: "Data",
-		summary: "A table with a header row. Columns that hold only numbers are right-aligned.",
+		summary: "A table with a header row, smart column sizing, and multi-line wrapped cells. Columns that hold only numbers are right-aligned.",
 		shots: [
-			{ file: "table", caption: "Numbers right-aligned, long text truncated with an ellipsis" },
+			{ file: "table", caption: "Numbers right-aligned, narrow columns protected, wide prose cells wrapped across lines" },
 			{ file: "table-tooltip", caption: "Hovering the row with a tooltip shows its hint in a bubble" },
 			{ file: "table-panel", caption: "Clicking it, or pressing Enter, opens the detail panel" },
 		],
-		use: ["Comparing a handful of items across several fields.", "A list of results with a status column."],
-		avoid: "More than about 12 rows: summarise, or split across Tabs.",
+		use: ["Comparing items across several fields.", "A summary table of steps, findings or metrics with status and prose columns."],
+		avoid: "Cramming full multi-paragraph specifications into cells: keep the table as a structured summary and put the full specification in Markdown prose below the widget.",
 		args: {
 			"Table.columns": "The header strings.",
-			"Table.rows": "An array of rows. Each row has exactly one cell per column, a string or a number. A mismatch is a validation error that names the row.",
+			"Table.rows": "An array of rows. Each row has exactly one cell per column, a string (up to 1000 characters, `\\n` supported) or a number. A mismatch is a validation error that names the row.",
 			"Table.tooltips": "Targets: `row:3` (1-based, not counting the header), `col:status`, or `cell:3.status`. Duplicate header names make `col:` and `cell:` ambiguous.",
 		},
 		example: `root = Stack([t])
@@ -131,24 +131,24 @@ t = Table(["Node", "State", "GPU %"], [["spark-1", "serving", 91], ["spark-2", "
 tip = Tooltip("row:2", "Rebooting for a driver update")`,
 		interaction: ["A tooltip target shows a `◆` in the cell padding after its text.", "Hover, or Tab to the row, for the bubble; click or Enter for the panel."],
 		tips: [
-			"When the table is wider than the terminal the widest columns shrink first, to a minimum of 3 characters.",
-			"A table that still does not fit becomes a scrollable window; moving focus to a target scrolls it into view.",
+			"When the table is wider than the terminal, compact columns (<= 14 chars, such as IDs, step numbers, status or metrics) keep their natural width while wider prose columns share the remaining width proportionally and word-wrap across lines.",
+			"A table that still does not fit on a narrow terminal becomes a scrollable window; moving focus to a target scrolls it into view.",
 		],
 		related: ["Markdown", "Metric", "Tooltip"],
 	},
 	Tabs: {
 		group: "Interactive",
-		summary: "A strip of tab labels over the content of the selected tab.",
+		summary: "A strip of tab labels (`All` plus each tab) over the tab sections. Shows all sections stacked by default and filters to one tab when clicked.",
 		helpers: ["TabItem"],
 		shots: [
-			{ file: "tabs", caption: "The first tab is open when the widget is drawn" },
+			{ file: "tabs", caption: "All tab sections are shown stacked when the widget is drawn, with interactive pills to filter" },
 			{ file: "tabs-nodes", caption: "After clicking Nodes" },
 		],
-		use: ["Alternate views of one subject: overview, nodes, notes.", "The same snippet in several languages."],
-		avoid: "Steps that must be read in order, or content the reader must see at once: a tab that is not selected is hidden.",
+		use: ["Multi-section views of one subject: overview, nodes, notes.", "Grouping related sections that can be read together or isolated by clicking a tab."],
+		avoid: "Deeply nested tab hierarchies when simple Cards suffice.",
 		args: {
-			"Tabs.items": "One TabItem per tab. The first is open at the start.",
-			"TabItem.label": "The text in the strip. Cut to 22 characters, and shorter when the strip does not fit.",
+			"Tabs.items": "One TabItem per tab. All tabs are shown stacked in titled cards at the start; clicking a tab filters to it.",
+			"TabItem.label": "The text in the strip and section card header. Cut to 22 characters in the strip, and shorter when the strip does not fit.",
 			"TabItem.content": "The components in the tab. Wrap them in a single Stack: `[panel]`.",
 		},
 		example: `root = Stack([tabs])
@@ -159,8 +159,8 @@ m1 = Metric("Nodes up", "4 / 4", "healthy", "good")
 m2 = Metric("Queue", "12", "-3", "good")
 b = TabItem("Nodes", [tbl])
 tbl = Table(["Node", "State"], [["spark-1", "serving"], ["spark-2", "serving"]])`,
-		interaction: ["Click a tab, or Tab to it and press Enter. Clicking only switches the view; nothing is sent to the assistant.", "Tabs nest, and each remembers its own selection."],
-		tips: ["You cannot start on another tab: put the most useful one first.", "Every TabItem and everything in it must be reachable from `root`, like any other variable."],
+		interaction: ["Click a tab (or Tab to it and press Enter) to isolate that section; click `All` or re-click the active tab to return to the stacked all-sections view. Nothing is sent to the assistant.", "Tabs nest, and each remembers its own selection."],
+		tips: ["All sections are visible immediately when drawn, so no content is hidden behind an unclicked tab.", "Every TabItem and everything in it must be reachable from `root`, like any other variable."],
 		related: ["Card", "Stack"],
 	},
 	Button: {
@@ -227,13 +227,13 @@ q3 = Choice("Clear the cache on db?", ["Yes", "No"], null, null, false)`,
 	},
 	Faq: {
 		group: "Interactive",
-		summary: "A list of questions that expand to show their answers.",
+		summary: "A list of questions and answers, expanded by default and collapsible on click.",
 		helpers: ["FaqItem"],
-		shots: [{ file: "faq", caption: "The first answer is open" }],
-		use: ["Reference material the reader opens on demand."],
+		shots: [{ file: "faq", caption: "Answers are open by default and toggle when clicked" }],
+		use: ["Q&A entries and collapsible reference material."],
 		args: {
 			"Faq.items": "One FaqItem per question.",
-			"Faq.firstOpen": "`true` opens the first answer at the start.",
+			"Faq.firstOpen": "Omitted or `true` opens all answers at the start; `false` opens only the first answer and collapses the rest.",
 			"FaqItem.question": "The heading.",
 			"FaqItem.answer": "Markdown: lists, bold, code and tables all work.",
 		},
@@ -242,7 +242,7 @@ f = Faq([a, b], true)
 a = FaqItem("What does draining do?", "It stops **new** requests.\\n\\n1. queue pauses\\n2. running requests finish")
 b = FaqItem("How do I undo it?", "Run \`uncordon\`.")`,
 		interaction: ["Click a question, or Tab to it and press Enter, to open or close it. Each item toggles on its own."],
-		tips: ["Open answers push the content below them down."],
+		tips: ["All answers are open by default unless `firstOpen` is set to `false`."],
 		related: ["Markdown", "Tabs"],
 	},
 	Markdown: {
@@ -269,18 +269,18 @@ m = Markdown("# Notes\\n\\nThis adds **streaming** and \`--fast\` mode.\\n\\n- f
 	},
 	CodeBlock: {
 		group: "Rich content",
-		summary: "Syntax-highlighted code in a frame, with a copy button.",
+		summary: "Syntax-highlighted code in a frame, with soft line wrapping and a copy button.",
 		shots: [{ file: "code", caption: "Highlighting for JavaScript, SQL, YAML, JSON, bash, Go and Rust" }],
 		use: ["Commands to run, config to paste, a query."],
 		args: {
-			"CodeBlock.code": "The source. Use `\\n` for new lines. Tabs become two spaces; more than 200 lines are cut.",
+			"CodeBlock.code": "The source. Use `\\n` for new lines. Tabs become two spaces; up to 400 lines.",
 			"CodeBlock.language": "`python`, `js` (also ts, jsx, tsx), `bash` (sh, zsh), `sql`, `yaml`, `json`, `go` or `rust`. Anything else is shown plain.",
 			"CodeBlock.title": "A file name or caption in the top border, shown with the language.",
 		},
 		example: `root = Stack([c])
 c = CodeBlock("kubectl rollout restart deploy/api\\nkubectl rollout status deploy/api", "bash", "restart.sh")`,
 		interaction: ["Click `[copy]` (or Tab to it and press Enter) to put the exact code on the clipboard with an OSC 52 escape. The label changes to `✓ copied` for two seconds."],
-		tips: ["Long lines are cut with an ellipsis, not wrapped, so the code stays aligned. The copy still has the full line.", "The clipboard needs a terminal that accepts OSC 52 (most modern ones do)."],
+		tips: ["Lines wider than the frame soft-wrap onto continuation rows so no characters are cut. Clicking `[copy]` copies the original unwrapped source.", "The clipboard needs a terminal that accepts OSC 52 (most modern ones do)."],
 		related: ["Markdown"],
 	},
 	Image: {

@@ -84,9 +84,9 @@ export default function (pi: ExtensionAPI) {
 			"Draw an interactive widget in the terminal: dashboards, tables, charts (bar, line, area, pie, radar), diagrams (DAG, ER, infrastructure map, sequence), maps, tabs, buttons and choices. Pass OpenUI Lang as `source`. Call with reference=true once to get the component signatures. A Button click sends its text back to you as the user's next message (after user confirmation). Choice answers are staged and arrive together as one message when the user presses Send answers.",
 		promptSnippet: "render_widget: draw an interactive terminal widget (dashboards, charts, diagrams) from OpenUI Lang",
 		promptGuidelines: [
-			"Prefer render_widget over long Markdown tables, lists, or ASCII diagrams whenever presenting execution plans, specifications, architecture/dependency graphs (Dag, Erd, InfraMap, SequenceDiagram), code review findings, test matrices, database/ADO query results, or multi-section reports (Tabs/Card).",
+			"Use render_widget for the visual/interactive overview: architecture & dependency diagrams (Dag, Erd, InfraMap, SequenceDiagram), KPI Metric tiles, high-level summary Tables, Choice questionnaires, and workflow Buttons.",
 			"Before the first render_widget call in a session, call render_widget with reference=true to read the component signatures. Never guess a signature.",
-			"After render_widget succeeds, reply with at most one short sentence. Do not repeat the widget's data in prose.",
+			"When presenting specifications, execution plans, test designs, code reviews, or technical analyses, follow `render_widget` with the full, detailed Markdown prose (complete specification, step-by-step plan with file paths/verification/risks, test scenarios, or review findings) so no details are lost. Only keep prose to 1–2 sentences when the widget alone already shows the complete answer (e.g. a simple chart, metric tile, or Choice prompt).",
 			"If render_widget returns errors, fix exactly the errors listed and call it again with the full corrected source.",
 			"Use plain text, not a widget, for a single value or a short answer. One widget per reply: use Tabs or Card to organise sections.",
 			"A Button click arrives as your next user message: act on it, then render a NEW widget if needed. Choice answers arrive together as ONE message after the user presses Send answers, so ask all your questions in one widget (a Card or Tabs), then act on the answers.",
@@ -109,7 +109,7 @@ export default function (pi: ExtensionAPI) {
 			const noPics = hasImage && getCapabilities().images !== "kitty";
 			const note = [...c.warnings, ...(noPics ? ["this terminal cannot show pictures, so each Image is drawn as a labelled frame with its file details"] : [])];
 			const noteText = note.length ? ` Notes: ${note.join("; ")}.` : "";
-			return { content: [{ type: "text" as const, text: `Widget drawn. The user can see and click it in the terminal; do not repeat its contents.${noteText}` }], details: { kind: "widget", source: params.source } };
+			return { content: [{ type: "text" as const, text: `Widget drawn in the terminal.${noteText} If you are presenting a specification, execution plan, test design, code review, or multi-step analysis, now write the full detailed Markdown below the widget so no file paths, code snippets, rationale, or edge cases are omitted. For simple self-contained widgets (a single chart, KPI dashboard, or Choice prompt), a brief reply suffices.` }], details: { kind: "widget", source: params.source } };
 		},
 		renderCall(args: any, theme: any) {
 			const n = typeof args?.source === "string" ? args.source.split("\n").length : 0;
