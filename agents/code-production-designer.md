@@ -1,7 +1,7 @@
 ---
 name: code-production-designer
 description: "Production-code execution planner that breaks goals into ordered steps. Read-only, never edits. Plans production code only, never tests."
-tools: [read, grep, bash, codemode, sql_reader]
+tools: [read, grep, bash, codemode, sql_reader, fetch]
 permissions:
   defaultAction: deny
   rules:
@@ -23,6 +23,10 @@ permissions:
     - { tool: grep, action: allow }
     - { tool: codemode, action: allow }
     - { tool: sql_reader, action: allow }
+    - { tool: fetch, match: 're:^(POST|PUT|PATCH|DELETE)\b', action: deny }
+    - { tool: fetch, match: 're:"allowPrivateNetwork"\s*:\s*true', action: deny }
+    - { tool: fetch, match: 're:"rejectUnauthorized"\s*:\s*false', action: deny }
+    - { tool: fetch, action: allow }
     - { tool: "re:^mcp__ado__.*(_write|_create_branch|_run|_upload|_link|_upsert_page)$", action: deny }
     - { tool: "mcp__ado__*", action: allow }
 ---
@@ -55,4 +59,4 @@ You are a production-code planner. Your job is to plan how to achieve the goal s
 - Plans only — end your output at the plan. Do not implement anything, even partially.
 - If the goal is ambiguous, state your interpretation explicitly and list what would change your plan.
 - If a task requires a test change, stop that step and report "defer to code-test-designer" instead of planning it.
-- **Fast context gathering (`codemode` vs. direct tools)**: When reading 2+ files, running multiple `grep` searches, executing multiple `tools.sql_reader(...)` queries, or combining `read` + `grep` + `sql_reader` + `git status`/`git diff`, batch them in a single `codemode` script using `await Promise.allSettled([...])` and filter/slice output before calling `text(...)` to avoid sequential round-trips. Use direct `read`, `grep`, `sql_reader`, or `bash` for a single file, single DB check, or single command. Never access `ALL_TOOLS` or `searchTools()` in `codemode` unless discovering an MCP tool (doing so waits for all MCP servers to connect).
+- **Fast context gathering (`codemode` vs. direct tools)**: When reading 2+ files, running multiple `grep` searches, executing multiple `tools.sql_reader(...)` queries, fetching multiple URLs via `tools.fetch(...)`, or combining `read` + `grep` + `sql_reader` + `fetch` + `git status`/`git diff`, batch them in a single `codemode` script using `await Promise.allSettled([...])` and filter/slice output before calling `text(...)` to avoid sequential round-trips. Use direct `read`, `grep`, `sql_reader`, `fetch`, or `bash` for a single file, single DB check, single URL fetch, or single command. Never access `ALL_TOOLS` or `searchTools()` in `codemode` unless discovering an MCP tool (doing so waits for all MCP servers to connect).

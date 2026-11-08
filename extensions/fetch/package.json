@@ -1,0 +1,6 @@
+{
+  "name": "pi-fetch",
+  "version": "1.0.0",
+  "description": "Full-featured HTTP/HTTPS fetch extension for Pi with SSRF protection, secret redaction, multi-format processing, and permission controls",
+  "type": "module"
+}

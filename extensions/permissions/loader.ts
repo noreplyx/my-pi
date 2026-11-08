@@ -28,6 +28,7 @@ import {
 	type ValidatedConfig,
 } from "./schema.ts";
 import { normalizeMcpServerName } from "./validate.ts";
+import { redactFetchArgsSummary, resolveRedactedRequestUrl } from "../fetch/redaction.ts";
 
 export interface EvalResult {
 	action: PermissionAction;
@@ -379,6 +380,17 @@ export function buildTargets(toolName: string, input: Record<string, unknown>, c
 		if (targetPath === null) return pattern ? [pattern, ""] : [""];
 		return [pattern ? `${targetPath}:${pattern}` : targetPath, targetPath, pattern].filter(Boolean);
 	}
+	if (lower === "fetch") {
+		const method = (asString(input.method) ?? "GET").trim().toUpperCase() || "GET";
+		const redactedUrl = resolveRedactedRequestUrl(input.url, input.query);
+		const redactedInput = redactFetchArgsSummary(input);
+		const primary = redactedUrl ? `${method} ${redactedUrl}` : method;
+		try {
+			return [primary, JSON.stringify(redactedInput)];
+		} catch {
+			return [primary];
+		}
+	}
 	try {
 		const json = JSON.stringify(input);
 		return [json];
@@ -457,6 +469,24 @@ export function describeCall(toolName: string, input: Record<string, unknown>, c
 	}
 	if (lower === "subagent") {
 		return `${toolName} ${describeSubagent(input)}`;
+	}
+	if (lower === "fetch") {
+		const method = (asString(input.method) ?? "GET").trim().toUpperCase() || "GET";
+		const redactedUrl = resolveRedactedRequestUrl(input.url, input.query);
+		const flags: string[] = [];
+		if (input.allowPrivateNetwork === true) flags.push("private-net");
+		if (
+			typeof input.tls === "object" &&
+			input.tls !== null &&
+			(input.tls as Record<string, unknown>).rejectUnauthorized === false
+		) {
+			flags.push("insecure-tls");
+		}
+		const flagSuffix = flags.length > 0 ? ` [${flags.join(", ")}]` : "";
+		return truncate(
+			`${toolName} ${method}${redactedUrl ? ` ${redactedUrl}` : " (no url)"}${flagSuffix}`,
+			120,
+		);
 	}
 	return `${toolName} ${compactArgs(input)}`;
 }

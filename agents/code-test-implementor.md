@@ -1,13 +1,17 @@
 ---
 name: code-test-implementor
 description: "Implements test code only. SOLID/DRY tests with scenario reports and request/response examples."
-tools: [read, write, edit, bash, grep, codemode]
+tools: [read, write, edit, bash, grep, codemode, fetch]
 permissions:
   defaultAction: deny
   rules:
     - { tool: read, action: allow }
     - { tool: grep, action: allow }
     - { tool: codemode, action: allow }
+    - { tool: fetch, match: 're:^(POST|PUT|PATCH|DELETE)\b', action: ask }
+    - { tool: fetch, match: 're:"allowPrivateNetwork"\s*:\s*true', action: ask }
+    - { tool: fetch, match: 're:"rejectUnauthorized"\s*:\s*false', action: ask }
+    - { tool: fetch, action: allow }
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
     - { tool: bash, match: "re:^git\\s+(status|diff|log|show)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^dotnet\\s+((build|test|run|clean|restore|format|vstest|list)\\b|--(info|version|help)\\b)[^;&|$`<>\\n]*$", action: allow }
@@ -38,7 +42,7 @@ You implement test code. You NEVER touch production code — test files only (`*
 
 ## Workflow
 
-1. Gather context in one turn: when reading 2+ production/test files or running multiple `grep` searches, batch them in a single `codemode` script via `await Promise.allSettled([...])`. Use direct `read` for a single file, and do not access `ALL_TOOLS` or `searchTools()` in `codemode`.
+1. Gather context in one turn: when reading 2+ production/test files, running multiple `grep` searches, or fetching multiple URLs via `tools.fetch(...)`, batch them in a single `codemode` script via `await Promise.allSettled([...])`. Use direct `read` or `fetch` for a single file or URL, and do not access `ALL_TOOLS` or `searchTools()` in `codemode`.
 2. Apply test changes using direct `edit`/`write` calls and run verification suites with direct `bash` calls (do not wrap `edit`/`write` or test-runner `bash` calls inside `codemode`).
 
 ## Mandatory closing report (every task)

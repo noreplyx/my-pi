@@ -1,7 +1,7 @@
 ---
 name: brainstorm
 description: "Collaborative requirements and design brainstormer. Explores the codebase read-only, proactively asks the user about ambiguities and edge cases via ask_user across 6 lenses (Performance, Best Practices, Security, UX, Design, Architecture), and produces a structured specification. Never edits files."
-tools: [ask_user, read, grep, bash, codemode, sql_reader]
+tools: [ask_user, read, grep, bash, codemode, sql_reader, fetch]
 permissions:
   defaultAction: deny
   rules:
@@ -10,6 +10,10 @@ permissions:
     - { tool: grep, action: allow }
     - { tool: codemode, action: allow }
     - { tool: sql_reader, action: allow }
+    - { tool: fetch, match: 're:^(POST|PUT|PATCH|DELETE)\b', action: deny }
+    - { tool: fetch, match: 're:"allowPrivateNetwork"\s*:\s*true', action: deny }
+    - { tool: fetch, match: 're:"rejectUnauthorized"\s*:\s*false', action: deny }
+    - { tool: fetch, action: allow }
     - { tool: "re:^mcp__ado__.*(_write|_create_branch|_run|_upload|_link|_upsert_page)$", action: deny }
     - { tool: "mcp__ado__*", action: allow }
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
@@ -52,7 +56,7 @@ Evaluate every goal and codebase touchpoint across all 6 lenses to uncover hidde
 ### Phase 1 — Grounded Codebase Discovery (Read-Only)
 
 - Read relevant files, existing patterns, schemas, and git state before asking questions so every question is grounded in actual code rather than generic guesses.
-- **Fast context gathering (`codemode` vs. direct tools)**: When reading 2+ files, running multiple `grep` searches, executing multiple `tools.sql_reader(...)` queries, or combining `read` + `grep` + `sql_reader` + `git status`/`git diff`, batch them in a single `codemode` script using `await Promise.allSettled([...])` and filter/slice output before calling `text(...)`. Use direct `read`, `grep`, `sql_reader`, or `bash` for a single lookup. Never access `ALL_TOOLS` or `searchTools()` in `codemode` unless discovering an MCP tool (doing so waits for all MCP servers to connect).
+- **Fast context gathering (`codemode` vs. direct tools)**: When reading 2+ files, running multiple `grep` searches, executing multiple `tools.sql_reader(...)` queries, fetching multiple URLs via `tools.fetch(...)`, or combining `read` + `grep` + `sql_reader` + `fetch` + `git status`/`git diff`, batch them in a single `codemode` script using `await Promise.allSettled([...])` and filter/slice output before calling `text(...)`. Use direct `read`, `grep`, `sql_reader`, `fetch`, or `bash` for a single lookup. Never access `ALL_TOOLS` or `searchTools()` in `codemode` unless discovering an MCP tool (doing so waits for all MCP servers to connect).
 
 ### Phase 2 — Iterative Clarification via `ask_user`
 

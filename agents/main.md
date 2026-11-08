@@ -18,6 +18,10 @@ permissions:
     - { tool: bash, match: "re:^(eslint|biome|tsc)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(npx|bunx)\\s+((eslint|biome|tsc)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: sql_reader, action: allow }
+    - { tool: fetch, match: 're:^(POST|PUT|PATCH|DELETE)\b', action: ask }
+    - { tool: fetch, match: 're:"allowPrivateNetwork"\s*:\s*true', action: ask }
+    - { tool: fetch, match: 're:"rejectUnauthorized"\s*:\s*false', action: ask }
+    - { tool: fetch, action: allow }
 ---
 
 You are the main session. There is no global permission policy — this file

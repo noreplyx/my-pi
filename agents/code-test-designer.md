@@ -1,7 +1,7 @@
 ---
 name: code-test-designer
 description: "Designs test cases (read-only, never implements) - distinct from code-test-implementor which writes test files"
-tools: [read, grep, bash, codemode, sql_reader]
+tools: [read, grep, bash, codemode, sql_reader, fetch]
 permissions:
   defaultAction: deny
   rules:
@@ -23,6 +23,10 @@ permissions:
     - { tool: grep, action: allow }
     - { tool: codemode, action: allow }
     - { tool: sql_reader, action: allow }
+    - { tool: fetch, match: 're:^(POST|PUT|PATCH|DELETE)\b', action: deny }
+    - { tool: fetch, match: 're:"allowPrivateNetwork"\s*:\s*true', action: deny }
+    - { tool: fetch, match: 're:"rejectUnauthorized"\s*:\s*false', action: deny }
+    - { tool: fetch, action: allow }
     - { tool: "re:^mcp__ado__.*(_write|_create_branch|_run|_upload|_link|_upsert_page)$", action: deny }
     - { tool: "mcp__ado__*", action: allow }
 ---
@@ -54,6 +58,6 @@ All test-case, test-scenario, function, table, class, and variable names in your
 
 ## Fast context gathering
 
-- Batch multi-file reads, `grep` searches, `tools.sql_reader(...)` queries, and `git diff`/`git status` checks in one `codemode` script via `await Promise.allSettled([...])` instead of sequential tool turns.
-- Use direct `read`, `grep`, `sql_reader`, or `bash` when inspecting a single file, running a single DB check, or running one command.
+- Batch multi-file reads, `grep` searches, `tools.sql_reader(...)` queries, `tools.fetch(...)` HTTP lookups, and `git diff`/`git status` checks in one `codemode` script via `await Promise.allSettled([...])` instead of sequential tool turns.
+- Use direct `read`, `grep`, `sql_reader`, `fetch`, or `bash` when inspecting a single file, running a single DB check, fetching a single URL, or running one command.
 - Do not reference `ALL_TOOLS` or `searchTools()` inside `codemode` unless querying an MCP server.
