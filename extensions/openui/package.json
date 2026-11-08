@@ -1,0 +1,12 @@
+{
+  "name": "openui",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Locally owned, zero-runtime-dependency, security-hardened Generative TUI extension for Pi (OpenUI Lang).",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
