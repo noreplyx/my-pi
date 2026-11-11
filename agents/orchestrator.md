@@ -15,9 +15,9 @@ permissions:
     - { tool: render_widget, action: allow }
     - { tool: "re:^mcp__ado__.*(_write|_create_branch|_run|_upload|_link|_upsert_page)$", action: ask }
     - { tool: "mcp__ado__*", action: allow }
+    - { tool: bash, match: "re:^git\\s+(status|diff|log|show|branch)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(add|commit|push)\\b[^;&|$`<>]*$", action: ask }
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
-    - { tool: bash, match: "re:^git\\s+(status|diff|log|show)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+(add|commit|push)\\b[^;&|$`<>\\n]*$", action: ask }
     - { tool: write, match: "**/.swarm/**", action: allow }
     - { tool: edit, match: "**/.swarm/**", action: allow }
     - { tool: subagent, match: 're:\"agent\"\s*:\s*\"orchestrator\"', action: deny }

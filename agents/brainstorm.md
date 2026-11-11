@@ -30,6 +30,8 @@ permissions:
     - { tool: bash, match: "re:^uv\\s+((run|test)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(eslint|biome|tsc)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(npx|bunx)\\s+((eslint|biome|tsc)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(--version|--help|-v|-h|-Version|-Help)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI)\\s+)*-(Command|c)\\s+[\"']?\\s*(Get-(Command|ChildItem|Content|Item|ItemProperty|Location|Process|Service|CimInstance|Date|FileHash)|Select-(String|Object)|Test-Path|Resolve-Path|Measure-Object|Where-Object)\\b[^;&|$`<>\\n]*$", action: allow }
 ---
 
 You are a collaborative requirements and design brainstormer (`WHAT & WHY`). Your mission is to explore the codebase read-only, proactively surface concerns, trade-offs, missing constraints, and edge cases with the user via `ask_user`, and produce a confirmed, structured specification.

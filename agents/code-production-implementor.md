@@ -12,9 +12,8 @@ permissions:
     - { tool: fetch, match: 're:"allowPrivateNetwork"\s*:\s*true', action: ask }
     - { tool: fetch, match: 're:"rejectUnauthorized"\s*:\s*false', action: ask }
     - { tool: fetch, action: allow }
-    - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
-    - { tool: bash, match: "re:^git\\s+(status|diff|log|show)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^dotnet\\s+((build|test|run|clean|restore|format|vstest|list)\\b|--(info|version|help)\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(status|diff|log|show|branch)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^dotnet\\s+((build|test|run|clean|restore|format|vstest|list)\\b|--(info|version|help)\\b)(?:[^;&|$`<>\\n]|console;verbosity=(?:quiet|minimal|normal|detailed|diagnostic))*$", action: allow }
     - { tool: bash, match: "re:^(npm|pnpm)\\s+((test|run(-script)?|exec|ls|list)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^bun\\s+((test|run|build|check|x)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^go\\s+((build|test|vet|fmt|run|list)\\b|version\\b)[^;&|$`<>\\n]*$", action: allow }
@@ -26,6 +25,10 @@ permissions:
     - { tool: bash, match: "re:^uv\\s+((run|test)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(eslint|biome|tsc)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(npx|bunx)\\s+((eslint|biome|tsc)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(--version|--help|-v|-h|-Version|-Help)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI)\\s+)*-(Command|c)\\s+[\"']?\\s*(Get-(Command|ChildItem|Content|Item|ItemProperty|Location|Process|Service|CimInstance|Date|FileHash)|Select-(String|Object)|Test-Path|Resolve-Path|Measure-Object|Where-Object|Invoke-Pester)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: ["re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI|ExecutionPolicy\\s+\\S+|EP\\s+\\S+)\\s+)*-(File|f)\\s+[^;&|$`<>\\n]+$", "re:^(?!.*(\\$\\(|\\$\\{))(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI|ExecutionPolicy\\s+\\S+|EP\\s+\\S+)\\s+)*-(Command|c)\\s+[^`<>\\n]+$"], action: ask }
+    - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
     - { tool: bash, match: ["re:^(npm|pnpm|bun)\\s+(install|add|publish|pack|deploy)\\b", "re:^pip3?\\s+install\\b", "re:^uv\\s+(pip\\s+install|add|publish)\\b", "re:^dotnet\\s+(publish|pack|nuget\\s+push|new|add|remove|tool\\s+install)\\b", "re:^go\\s+(install|get)\\b", "re:^python3?\\s+-c\\b"], action: ask }
     - { tool: write, match: ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/tests/**", "**/e2e/**"], action: deny }
     - { tool: edit, match: ["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/tests/**", "**/e2e/**"], action: deny }
