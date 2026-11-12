@@ -6,7 +6,7 @@
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { findMissingBinaries, loadLspConfig, SUPPORTED_LANGUAGES, type SupportedLanguage } from "./config.js";
+import { DEFAULT_CONFIG, findMissingBinaries, loadLspConfig, SUPPORTED_LANGUAGES, type SupportedLanguage } from "./config.js";
 import { LspManager } from "./manager.js";
 import { registerLspTools } from "./tools.js";
 
@@ -26,9 +26,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const dir = extensionDir();
 	// Cwd is not final during factory; re-resolve on session_start.
 	// Single manager + single tool registration (reload-safe; no spawn here).
-	const initial = await loadLspConfig(dir, process.cwd());
-	const manager = new LspManager(initial.config);
-	if (initial.warnings.length > 0) console.warn(`LSP config warnings: ${initial.warnings.join("; ")}`);
+	const manager = new LspManager(structuredClone(DEFAULT_CONFIG));
 	let cwd = process.cwd();
 
 	registerLspTools(pi, manager, () => cwd);
@@ -88,12 +86,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				`LSP: ${SUPPORTED_LANGUAGES.filter((l) => config.servers[l].enabled).join(",") || "off"}`,
 			);
 		}
-		if (sources.length > 0) {
-			ctx.ui.notify(`LSP config: ${sources.join(", ")}`, "info");
-		}
-		for (const w of warnings) ctx.ui.notify(w, "warning");
-		if (config.autoStart) {
-			ctx.ui.notify("LSP autoStart is on — servers start on first tool use (lazy).", "info");
+		if (ctx.hasUI) {
+			if (sources.length > 0) {
+				ctx.ui.notify(`LSP config: ${sources.join(", ")}`, "info");
+			}
+			for (const w of warnings) ctx.ui.notify(w, "warning");
+			if (config.autoStart) {
+				ctx.ui.notify("LSP autoStart is on — servers start on first tool use (lazy).", "info");
+			}
 		}
 	});
 

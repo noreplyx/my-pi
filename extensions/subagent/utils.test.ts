@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+	CHILD_RPC_STATIC_FLAGS,
 	MAX_SWARM_DEPTH,
 	TIMEOUT_DEFAULT_MS,
 	TIMEOUT_MAX_MS,
+	agentUsesMcp,
 	aggregateUsage,
 	appendBounded,
 	buildChildEnv,
+	buildChildProcessArgs,
 	clampTimeoutMs,
 	emptyUsage,
 	ensureSwarmTools,
@@ -231,8 +234,9 @@ describe("swarm guards", () => {
 	});
 
 	test("swarm tools merge without dupes", () => {
-		expect(ensureSwarmTools(["read"])).toEqual(["read", "subagent", "write", "bash"]);
-		expect(ensureSwarmTools(undefined)).toEqual(["subagent", "read", "write", "bash"]);
+		expect(ensureSwarmTools(["read"])).toEqual(["read", "subagent", "write", "bash", "codemode"]);
+		expect(ensureSwarmTools(["read", "subagent"])).toEqual(["read", "subagent", "write", "bash", "codemode"]);
+		expect(ensureSwarmTools(undefined)).toEqual(["subagent", "read", "write", "bash", "codemode"]);
 	});
 
 	test("swarm message round-trips, bad lines null", () => {
@@ -340,5 +344,182 @@ describe("mapWithConcurrencyLimit abort", () => {
 			(n) => `skipped-${n}`,
 		);
 		expect(out).toEqual(["done-1", "done-2", "skipped-3", "skipped-4", "skipped-5"]);
+	});
+});
+
+describe("detecting whether an agent requires MCP servers (agentUsesMcp)", () => {
+	test("returns false when tools, frontmatter permissions, and prompt body have no MCP references", () => {
+		expect(
+			agentUsesMcp(
+				["read", "write", "bash", "codemode"],
+				{
+					name: "coder",
+					permissions: {
+						defaultAction: "deny",
+						rules: [{ tool: "read", action: "allow" }],
+					},
+				},
+				"You are a software engineer who edits TypeScript files.",
+			),
+		).toBe(false);
+		expect(agentUsesMcp(undefined, {}, undefined)).toBe(false);
+	});
+
+	test("returns true when any declared tool starts with mcp__ (case-insensitive and whitespace-trimmed)", () => {
+		expect(agentUsesMcp(["read", "mcp__ado__get_work_item"], {})).toBe(true);
+		expect(agentUsesMcp(["  MCP__GitHub__search_issues  "], {})).toBe(true);
+	});
+
+	test("returns true when frontmatter permissions is a non-empty external file path string (fail-open)", () => {
+		expect(agentUsesMcp(["read"], { permissions: "./permissions/custom.json" })).toBe(true);
+		expect(agentUsesMcp(["read"], { permissions: "   " })).toBe(false);
+	});
+
+	test("returns true when frontmatter permission rules reference mcp__ in a string or array tool matcher", () => {
+		expect(
+			agentUsesMcp(["read"], {
+				permissions: {
+					rules: [{ tool: "re:^mcp__ado__", action: "allow" }],
+				},
+			}),
+		).toBe(true);
+
+		expect(
+			agentUsesMcp(["read"], {
+				permissions: {
+					rules: [{ tool: ["read", "MCP__slack__post_message"], action: "allow" }],
+				},
+			}),
+		).toBe(true);
+
+		expect(
+			agentUsesMcp(["read"], {
+				permissions: {
+					rules: [{ tool: ["read", "bash"], action: "allow" }],
+				},
+			}),
+		).toBe(false);
+	});
+
+	test("returns true when the agent system prompt body mentions mcp__", () => {
+		expect(agentUsesMcp(["read", "codemode"], {}, "Use mcp__ado tools inside codemode scripts.")).toBe(true);
+		expect(agentUsesMcp(["read"], {}, "Query MCP__JIRA for ticket metadata.")).toBe(true);
+	});
+
+	test("ignores malformed or non-object entries in frontmatter permissions.rules without throwing", () => {
+		expect(
+			agentUsesMcp(["read"], {
+				permissions: {
+					rules: [null, undefined, 42, "invalid-rule", { tool: 123 }, { tool: [null, 99, "read"] }],
+				},
+			}),
+		).toBe(false);
+		expect(agentUsesMcp(["read"], { permissions: ["array-instead-of-object"] })).toBe(false);
+		expect(agentUsesMcp(["read"], { permissions: { rules: "not-an-array" } })).toBe(false);
+	});
+});
+
+describe("building child process command-line flags (buildChildProcessArgs)", () => {
+	test("always includes --mode rpc, --no-session, and all static startup optimization flags", () => {
+		const args = buildChildProcessArgs({
+			inheritsDispatchConfig: false,
+			usesMcp: true,
+		});
+		expect(args.slice(0, 3 + CHILD_RPC_STATIC_FLAGS.length)).toEqual([
+			"--mode",
+			"rpc",
+			"--no-session",
+			...CHILD_RPC_STATIC_FLAGS,
+		]);
+		expect(CHILD_RPC_STATIC_FLAGS).toEqual(["--no-themes", "--no-skills", "--no-prompt-templates", "--offline"]);
+	});
+
+	test("appends --no-mcp when usesMcp is false and omits --no-mcp when usesMcp is true", () => {
+		const withoutMcp = buildChildProcessArgs({
+			inheritsDispatchConfig: false,
+			usesMcp: false,
+		});
+		const withMcp = buildChildProcessArgs({
+			inheritsDispatchConfig: false,
+			usesMcp: true,
+		});
+		expect(withoutMcp).toContain("--no-mcp");
+		expect(withMcp).not.toContain("--no-mcp");
+	});
+
+	test("inherits --thinking only when inheritsDispatchConfig is true and thinkingLevel is provided", () => {
+		const inherited = buildChildProcessArgs({
+			inheritsDispatchConfig: true,
+			thinkingLevel: "high",
+			usesMcp: false,
+		});
+		const notInherited = buildChildProcessArgs({
+			inheritsDispatchConfig: false,
+			thinkingLevel: "high",
+			usesMcp: false,
+		});
+		const missingLevel = buildChildProcessArgs({
+			inheritsDispatchConfig: true,
+			thinkingLevel: undefined,
+			usesMcp: false,
+		});
+		expect(inherited).toContain("--thinking");
+		expect(inherited[inherited.indexOf("--thinking") + 1]).toBe("high");
+		expect(notInherited).not.toContain("--thinking");
+		expect(missingLevel).not.toContain("--thinking");
+	});
+
+	test("passes --model when a model is resolved from either agent frontmatter or parent dispatch config", () => {
+		const withModel = buildChildProcessArgs({
+			model: "anthropic/claude-sonnet-4-5",
+			inheritsDispatchConfig: false,
+			usesMcp: false,
+		});
+		const withoutModel = buildChildProcessArgs({
+			model: undefined,
+			inheritsDispatchConfig: true,
+			usesMcp: false,
+		});
+		expect(withModel).toContain("--model");
+		expect(withModel[withModel.indexOf("--model") + 1]).toBe("anthropic/claude-sonnet-4-5");
+		expect(withoutModel).not.toContain("--model");
+	});
+
+	test("joins effectiveTools with commas for --tools and omits --tools when empty or undefined", () => {
+		const withTools = buildChildProcessArgs({
+			effectiveTools: ["read", "edit", "bash"],
+			inheritsDispatchConfig: false,
+			usesMcp: false,
+		});
+		const emptyTools = buildChildProcessArgs({
+			effectiveTools: [],
+			inheritsDispatchConfig: false,
+			usesMcp: false,
+		});
+		const undefinedTools = buildChildProcessArgs({
+			effectiveTools: undefined,
+			inheritsDispatchConfig: false,
+			usesMcp: false,
+		});
+		expect(withTools).toContain("--tools");
+		expect(withTools[withTools.indexOf("--tools") + 1]).toBe("read,edit,bash");
+		expect(emptyTools).not.toContain("--tools");
+		expect(undefinedTools).not.toContain("--tools");
+	});
+
+	test("appends --append-system-prompt when a temporary prompt file path is provided", () => {
+		const promptPath = "/tmp/pi-subagent-123/prompt-coder.md";
+		const withPrompt = buildChildProcessArgs({
+			appendSystemPromptPath: promptPath,
+			inheritsDispatchConfig: false,
+			usesMcp: false,
+		});
+		const withoutPrompt = buildChildProcessArgs({
+			appendSystemPromptPath: undefined,
+			inheritsDispatchConfig: false,
+			usesMcp: false,
+		});
+		expect(withPrompt.slice(-2)).toEqual(["--append-system-prompt", promptPath]);
+		expect(withoutPrompt).not.toContain("--append-system-prompt");
 	});
 });

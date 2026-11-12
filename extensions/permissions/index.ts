@@ -193,6 +193,13 @@ export default function (pi: ExtensionAPI) {
 		try {
 			reloadAll();
 			const staleEnv = warnStalePermissionsFileEnv();
+			if (!ctx.hasUI) {
+				if (staleEnv) {
+					// stderr only — never stdout (would corrupt --mode json / --mode rpc)
+					console.warn(formatStartupReport([{ severity: "warning", location: "PI_PERMISSIONS_FILE", message: staleEnv }]));
+				}
+				return;
+			}
 			const diags = getScopedDiagnostics(ctx.cwd, isTrustedProject(ctx));
 			if (staleEnv) {
 				diags.push({ severity: "warning", location: "PI_PERMISSIONS_FILE", message: staleEnv });
@@ -200,8 +207,7 @@ export default function (pi: ExtensionAPI) {
 			if (diags.length === 0) return;
 			const text = formatStartupReport(diags);
 			const level = diags.some((d) => d.severity === "error") ? "error" : "warning";
-			if (ctx.hasUI) ctx.ui.notify(text, level);
-			else console.warn(text); // stderr only — never stdout (would corrupt --mode json)
+			ctx.ui.notify(text, level);
 		} catch {
 			// validation must never break startup
 		}

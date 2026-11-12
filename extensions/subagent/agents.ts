@@ -18,6 +18,7 @@ import {
 	MAX_AGENT_FILE_BYTES,
 	MAX_DESCRIPTION_CHARS,
 	MAX_SYSTEM_PROMPT_CHARS,
+	agentUsesMcp,
 	isValidAgentName,
 	normalizeAgentName,
 	parseToolList,
@@ -38,6 +39,8 @@ export interface AgentConfig {
 	 *  (see permissions/loader.ts) — this flag is discovery-time metadata only
 	 *  for warnings/previews. Agent permissions beat global, including global deny. */
 	hasPermissionsBlock: boolean;
+	/** True when the agent uses MCP tools/rules/references; false enables `--no-mcp` on child spawn. */
+	usesMcp: boolean;
 }
 
 export interface AgentDiscoveryResult {
@@ -180,6 +183,7 @@ function loadAgentsFromDir(
 			source,
 			filePath,
 			hasPermissionsBlock: frontmatter.permissions !== undefined,
+			usesMcp: agentUsesMcp(parsedTools.tools, frontmatter, systemPrompt),
 		});
 	}
 

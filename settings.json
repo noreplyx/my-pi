@@ -1,8 +1,7 @@
 {
-  "lastChangelogVersion": "1.5.0",
+  "lastChangelogVersion": "1.5.2",
   "defaultProvider": "google",
   "defaultModel": "gemini-4-argon",
-  "defaultAgent": "orchestrator",
   "deviceId": "14b82d2c-3f2c-4496-b8c2-bf194529c54c",
   "shellPath": "C:\\Program Files\\Git\\bin\\bash.exe",
   "defaultTools": [
@@ -17,5 +16,6 @@
   "enableInstallTelemetry": false,
   "extensions": [
     "-builtin:llama.cpp"
-  ]
+  ],
+  "defaultAgent": "orchestrator"
 }

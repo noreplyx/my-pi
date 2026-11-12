@@ -51,6 +51,8 @@ export const MAX_AGENT_FILE_BYTES = 64 * 1024;
 export const MAX_SYSTEM_PROMPT_CHARS = 32 * 1024;
 /** Max description length kept per agent. */
 export const MAX_DESCRIPTION_CHARS = 2000;
+/** Static flags passed to every child `pi --mode rpc` spawn to skip unused TUI/network subsystems. */
+export const CHILD_RPC_STATIC_FLAGS = ["--no-themes", "--no-skills", "--no-prompt-templates", "--offline"] as const;
 
 /** Sentinel for "task still running" in parallel placeholder results. */
 export const RESULT_RUNNING = -1;
@@ -305,6 +307,84 @@ export function parseToolList(
 	const { tools, dropped } = validateToolList(value);
 	if (Array.isArray(value) || typeof value === "string") return { tools, dropped };
 	return { invalid: true, dropped };
+}
+
+/**
+ * Determine whether an agent needs MCP server discovery/connections.
+ *
+ * Returns `true` when:
+ * - any declared tool in `tools` starts with `mcp__` (case-insensitive),
+ * - `rawFrontmatter.permissions` is a string (external permissions file reference — fail open for MCP availability),
+ * - `rawFrontmatter.permissions` is an object whose `rules` array has any rule with `tool` containing `mcp__`,
+ * - `body` references `mcp__`.
+ */
+export function agentUsesMcp(
+	tools: readonly string[] | undefined,
+	rawFrontmatter: Record<string, unknown>,
+	body?: string,
+): boolean {
+	if (tools?.some((t) => typeof t === "string" && t.trim().toLowerCase().startsWith("mcp__"))) {
+		return true;
+	}
+	const perms = rawFrontmatter.permissions;
+	if (typeof perms === "string" && perms.trim().length > 0) {
+		return true;
+	}
+	if (perms && typeof perms === "object" && !Array.isArray(perms)) {
+		const rules = (perms as { rules?: unknown }).rules;
+		if (Array.isArray(rules)) {
+			for (const rule of rules) {
+				if (!rule || typeof rule !== "object") continue;
+				const ruleTool = (rule as { tool?: unknown }).tool;
+				if (typeof ruleTool === "string" && ruleTool.toLowerCase().includes("mcp__")) {
+					return true;
+				}
+				if (
+					Array.isArray(ruleTool) &&
+					ruleTool.some((t) => typeof t === "string" && t.toLowerCase().includes("mcp__"))
+				) {
+					return true;
+				}
+			}
+		}
+	}
+	if (typeof body === "string" && body.toLowerCase().includes("mcp__")) {
+		return true;
+	}
+	return false;
+}
+
+export interface BuildChildProcessArgsOptions {
+	model?: string;
+	thinkingLevel?: string;
+	inheritsDispatchConfig: boolean;
+	effectiveTools?: string[];
+	usesMcp: boolean;
+	appendSystemPromptPath?: string;
+}
+
+/**
+ * Construct CLI arguments for a child `pi --mode rpc` process.
+ * Preserves 100% dynamic `model` and `thinking` inheritance from parent dispatch config.
+ */
+export function buildChildProcessArgs(opts: BuildChildProcessArgsOptions): string[] {
+	const args: string[] = ["--mode", "rpc", "--no-session", ...CHILD_RPC_STATIC_FLAGS];
+	if (opts.usesMcp === false) {
+		args.push("--no-mcp");
+	}
+	if (opts.model) {
+		args.push("--model", opts.model);
+	}
+	if (opts.inheritsDispatchConfig && opts.thinkingLevel) {
+		args.push("--thinking", opts.thinkingLevel);
+	}
+	if (opts.effectiveTools && opts.effectiveTools.length > 0) {
+		args.push("--tools", opts.effectiveTools.join(","));
+	}
+	if (opts.appendSystemPromptPath) {
+		args.push("--append-system-prompt", opts.appendSystemPromptPath);
+	}
+	return args;
 }
 
 /**

@@ -45,6 +45,7 @@ import {
 	SWARM_ENV_RUN,
 	appendBounded,
 	buildChildEnv,
+	buildChildProcessArgs,
 	clampTimeoutMs,
 	emptyUsage,
 	ensureSwarmTools,
@@ -178,7 +179,6 @@ export async function runSingleAgent(
 		resolvedCwd = candidate;
 	}
 
-	const args: string[] = ["--mode", "rpc", "--no-session"];
 	const inheritsDispatchConfig = !agent.model;
 	const modelCheck = validateModelString(agent.model);
 	const dispatchModelCheck: { model?: string; error?: string } = agent.model
@@ -192,10 +192,6 @@ export async function runSingleAgent(
 		};
 	}
 	const model = modelCheck.model ?? dispatchModelCheck.model;
-	if (model) args.push("--model", model);
-	if (inheritsDispatchConfig && dispatchDefaults.thinkingLevel) {
-		args.push("--thinking", dispatchDefaults.thinkingLevel);
-	}
 	const toolCheck = validateToolList(agent.tools);
 	if (toolCheck.dropped.length > 0) {
 		return {
@@ -207,9 +203,9 @@ export async function runSingleAgent(
 		};
 	}
 	const effectiveTools = swarmCtx ? ensureSwarmTools(toolCheck.tools) : toolCheck.tools;
-	if (effectiveTools && effectiveTools.length > 0) args.push("--tools", effectiveTools.join(","));
 
 	let tmpPromptDir: string | null = null;
+	let tmpPromptPath: string | undefined;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -240,8 +236,16 @@ export async function runSingleAgent(
 		if (agent.systemPrompt.trim()) {
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
 			tmpPromptDir = tmp.dir;
-			args.push("--append-system-prompt", tmp.filePath);
+			tmpPromptPath = tmp.filePath;
 		}
+		const args = buildChildProcessArgs({
+			model,
+			thinkingLevel: dispatchDefaults.thinkingLevel,
+			inheritsDispatchConfig,
+			effectiveTools,
+			usesMcp: agent.usesMcp !== false && !swarmCtx,
+			appendSystemPromptPath: tmpPromptPath,
+		});
 
 		const fullTask = swarmCtx
 			? `Task: ${task}${swarmProtocolSnippet(swarmCtx.swarmDir, swarmCtx.agentId, swarmCtx.runId, swarmCtx.depth)}`
@@ -257,6 +261,7 @@ export async function runSingleAgent(
 				PI_AGENT_FILE: agent.filePath,
 				PI_CODEMODE_MAX_WORKERS: process.env.PI_CODEMODE_MAX_WORKERS || DEFAULT_CODEMODE_MAX_WORKERS,
 				PI_SKIP_VERSION_CHECK: "1",
+				PI_OFFLINE: process.env.PI_OFFLINE || "1",
 			};
 			// Auto-approve inheritance: the child boots a fresh runtime whose
 			// in-memory toggle defaults OFF — pass it explicitly so delegated
@@ -286,21 +291,11 @@ export async function runSingleAgent(
 			let stdoutTruncated = false;
 			let stderrTruncated = false;
 			let settled = false;
-			let resolveOnce = (code: number) => {
+			const resolveOnce = (code: number) => {
 				if (settled) return;
 				settled = true;
 				resolve(code);
 			};
-			// Reassign to guard double-resolve from close + settled paths.
-			resolveOnce = ((orig: (code: number) => void) => {
-				let done = false;
-				return (code: number) => {
-					if (done) return;
-					done = true;
-					settled = true;
-					orig(code);
-				};
-			})(resolve);
 
 			const pushMessage = (msg: Message) => {
 				if (currentResult.messages.length >= MAX_MESSAGES) return;

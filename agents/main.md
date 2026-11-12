@@ -8,18 +8,21 @@ permissions:
     - { tool: bash, match: "re:^dotnet\\s+((build|test|run|clean|restore|format|vstest|list)\\b|--(info|version|help)\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(npm|pnpm)\\s+((test|run(-script)?|exec|ls|list)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^bun\\s+((test|run|build|check|x)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^node\\s+(--experimental-strip-types\\s+)?(-c|--check)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^go\\s+((build|test|vet|fmt|run|list)\\b|version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^cargo\\s+((check|build|test|clippy|fmt)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^python3?\\s+--version[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^python3?\\s+-m\\s+(pytest|unittest|mypy|ruff|black|flake8)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^python3?\\s+-m\\s+(pytest|unittest|mypy|pyright|ruff|black|flake8|py_compile|compileall)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^python3?\\s+[^;&|$`<>\\n]*\\.py\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^(pytest|ruff|mypy|black|flake8)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(pytest|ruff|mypy|pyright|black|flake8)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^pip3?\\s+(list|show|check|freeze)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^uv\\s+((run|test)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^(eslint|biome|tsc)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^(npx|bunx)\\s+((eslint|biome|tsc)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(eslint|biome|tsc|pyright)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(npx|bunx)\\s+((eslint|biome|tsc|pyright)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(--version|--help|-v|-h|-Version|-Help)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI)\\s+)*-(Command|c)\\s+[\"']?\\s*(Get-(Command|ChildItem|Content|Item|ItemProperty|Location|Process|Service|CimInstance|Date|FileHash)|Select-(String|Object)|Test-Path|Resolve-Path|Measure-Object|Where-Object)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: sql_reader, action: allow }
+    - { tool: "re:^lsp_(diagnostics|definition|references|hover|document_symbols|workspace_symbols)$", action: allow }
     - { tool: fetch, match: 're:^(POST|PUT|PATCH|DELETE)\b', action: ask }
     - { tool: fetch, match: 're:"allowPrivateNetwork"\s*:\s*true', action: ask }
     - { tool: fetch, match: 're:"rejectUnauthorized"\s*:\s*false', action: ask }

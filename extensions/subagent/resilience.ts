@@ -12,7 +12,7 @@ export interface RetryOptions {
 	attempts?: number;
 	/** Base backoff between attempts in ms. Default 1000, doubled per retry. */
 	backoffMs?: number;
-	/** Which error codes are retryable. Default: all failure codes. */
+	/** Which error codes are retryable. Default: DEFAULT_RETRYABLE_CODES (["spawn-failed", "non-zero"]). Callers can pass explicit retryOn codes (e.g. ALL_FAILURE_CODES) if desired. */
 	retryOn?: SubagentErrorCode[];
 	/** AbortSignal to stop waiting between retries. */
 	signal?: AbortSignal;
@@ -24,7 +24,8 @@ export const DEFAULT_RETRY_ATTEMPTS = 2;
 export const DEFAULT_RETRY_BACKOFF_MS = 1000;
 /** Upper bound for retry backoff (30s): delay = min(backoffMs * 2^(attempt-1), MAX). */
 export const MAX_RETRY_BACKOFF_MS = 30_000;
-const ALL_FAILURE_CODES: SubagentErrorCode[] = ["timeout", "spawn-failed", "non-zero", "setup-error", "aborted", "budget-exceeded"];
+export const DEFAULT_RETRYABLE_CODES: SubagentErrorCode[] = ["spawn-failed", "non-zero"];
+export const ALL_FAILURE_CODES: SubagentErrorCode[] = ["timeout", "spawn-failed", "non-zero", "setup-error", "aborted", "budget-exceeded"];
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -56,7 +57,7 @@ async function sleepAbortable(
 
 function isRetryable(code: SubagentErrorCode, retryOn: SubagentErrorCode[] | undefined): boolean {
 	if (code === "ok") return false;
-	return (retryOn ?? ALL_FAILURE_CODES).includes(code);
+	return (retryOn ?? DEFAULT_RETRYABLE_CODES).includes(code);
 }
 
 export interface RetryableResult {

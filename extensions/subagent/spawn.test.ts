@@ -2,7 +2,9 @@ import { describe, expect, mock, test } from "bun:test";
 import * as realChildProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as os from "node:os";
+import * as path from "node:path";
 import { clearAutoApprove, setAutoApprove } from "../auto-approve/state.ts";
+import { CHILD_RPC_STATIC_FLAGS } from "./utils.ts";
 
 interface FakeProc extends EventEmitter {
 	stdout: EventEmitter;
@@ -14,10 +16,12 @@ interface FakeProc extends EventEmitter {
 }
 
 let behavior: ((proc: FakeProc) => void) | null = null;
+let lastSpawnArgs: string[] = [];
 let lastSpawnOpts: { env?: Record<string, string> } | null = null;
 const allSpawnEnvs: Array<Record<string, string> | undefined> = [];
 
 const spawnMock = mock((_cmd: string, _args: string[], _opts: unknown) => {
+	lastSpawnArgs = [..._args];
 	lastSpawnOpts = _opts as { env?: Record<string, string> };
 	allSpawnEnvs.push(lastSpawnOpts.env);
 	const proc = new EventEmitter() as FakeProc;
@@ -52,6 +56,7 @@ const agents: any[] = [
 		source: "user",
 		filePath: "/tmp/coder.md",
 		hasPermissionsBlock: false,
+		usesMcp: false,
 	},
 ];
 
@@ -277,5 +282,97 @@ describe("runSingleAgent process lifecycle (mocked spawn)", () => {
 		} finally {
 			clearAutoApprove();
 		}
+	});
+
+	test("spawns child pi process with static optimization flags, --no-mcp for non-MCP agents, and PI_OFFLINE=1", async () => {
+		behavior = (proc) => {
+			proc.stdout.emit("data", msgLine("optimized"));
+			setTimeout(() => proc.emit("close", 0), 5);
+		};
+		lastSpawnArgs = [];
+		lastSpawnOpts = null;
+
+		const result = await runSingleAgent(
+			os.tmpdir(),
+			{},
+			agents,
+			"coder",
+			"verify flags",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			makeDetails,
+		);
+
+		expect(result.errorCode).toBe("ok");
+		for (const flag of CHILD_RPC_STATIC_FLAGS) {
+			expect(lastSpawnArgs).toContain(flag);
+		}
+		expect(lastSpawnArgs).toContain("--no-mcp");
+		expect(lastSpawnOpts?.env?.PI_OFFLINE).toBe("1");
+		expect(lastSpawnOpts?.env?.PI_SKIP_VERSION_CHECK).toBe("1");
+	});
+
+	test("omits --no-mcp when spawning a single agent that uses MCP tools, but forces --no-mcp in swarm mode", async () => {
+		const mcpAgents: any[] = [
+			{
+				name: "mcp-specialist",
+				description: "agent with MCP access",
+				tools: ["read", "mcp__ado__get_build"],
+				model: undefined,
+				systemPrompt: "",
+				source: "user",
+				filePath: "/tmp/mcp-specialist.md",
+				hasPermissionsBlock: false,
+				usesMcp: true,
+			},
+		];
+		behavior = (proc) => {
+			proc.stdout.emit("data", msgLine("done"));
+			setTimeout(() => proc.emit("close", 0), 5);
+		};
+
+		lastSpawnArgs = [];
+		await runSingleAgent(
+			os.tmpdir(),
+			{},
+			mcpAgents,
+			"mcp-specialist",
+			"query ado",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			makeDetails,
+		);
+		for (const flag of CHILD_RPC_STATIC_FLAGS) {
+			expect(lastSpawnArgs).toContain(flag);
+		}
+		expect(lastSpawnArgs).not.toContain("--no-mcp");
+
+		lastSpawnArgs = [];
+		await runSingleAgent(
+			os.tmpdir(),
+			{},
+			mcpAgents,
+			"mcp-specialist",
+			"swarm worker task",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			makeDetails,
+			{
+				runId: "swarm-20260329-120000-abcd",
+				swarmDir: path.join(os.tmpdir(), ".swarm-test"),
+				agentId: "worker-1",
+				depth: 1,
+			},
+		);
+		expect(lastSpawnArgs).toContain("--no-mcp");
+		const toolsFlagIndex = lastSpawnArgs.indexOf("--tools");
+		expect(toolsFlagIndex).toBeGreaterThan(-1);
+		expect(lastSpawnArgs[toolsFlagIndex + 1]).toBe("read,mcp__ado__get_build,subagent,write,bash,codemode");
 	});
 });

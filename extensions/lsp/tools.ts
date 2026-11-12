@@ -335,32 +335,24 @@ export function registerLspTools(pi: ExtensionAPI, manager: LspManager, getCwd: 
 		}),
 		async execute(_id, params, signal) {
 			try {
-				const { client } = await withClient(params.language, params.file, signal);
-				// Ensure the requested file is open so its diagnostics arrive.
+				const { client, uri } = await withClient(params.language, params.file, signal);
+				// withClient already reads params.file and calls client.ensureOpen(abs, text).
 				if (params.file) {
-					const cwd = getCwd();
-					const abs = await resolveFile(cwd, params.file);
-					let text: string;
-					try {
-						text = await fs.readFile(abs, "utf8");
-					} catch (err) {
-						return errResult(`Cannot read file ${abs}: ${err instanceof Error ? err.message : String(err)}`, { tool: "lsp_diagnostics" });
-					}
-					await client.ensureOpen(abs, text);
-					// Poll for publishDiagnostics up to ~2s; cache returns immediately otherwise.
+					// Poll for publishDiagnostics up to ~2s; exits immediately once publishDiagnostics arrives.
 					const deadline = Date.now() + 2000;
 					for (;;) {
 						if (signal?.aborted) throw new Error("aborted");
-						const pending = client.getDiagnostics(pathToUri(abs));
-						if (pending.length > 0) break;
+						const ready =
+							typeof (client as { hasDiagnostics?: (u: string) => boolean }).hasDiagnostics === "function"
+								? client.hasDiagnostics(uri) || client.getDiagnostics(uri).length > 0
+								: client.getDiagnostics(uri).length > 0;
+						if (ready) break;
 						if (Date.now() >= deadline) break;
 						await new Promise((r) => setTimeout(r, 50));
 					}
 					if (signal?.aborted) throw new Error("aborted");
 				}
-				const targetUri = params.file
-					? pathToUri(await resolveFile(getCwd(), params.file))
-					: undefined;
+				const targetUri = params.file ? uri : undefined;
 				const raw = client.getDiagnostics(targetUri).slice(0, MAX_ITEMS);
 				const mapped = raw.map((d) => {
 					const one = toOneBased(d.range.start.line, d.range.start.character);

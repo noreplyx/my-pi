@@ -56,6 +56,7 @@ export class LspClient {
 	private stderrTail = "";
 	private readonly openFiles = new Map<string, { version: number; languageId: string; text: string }>();
 	private readonly diagnostics = new Map<string, Diagnostic[]>();
+	private readonly diagnosticsSeq = new Map<string, number>();
 
 	constructor(options: LspClientOptions) {
 		this.options = options;
@@ -133,6 +134,7 @@ export class LspClient {
 			if (msg.method === "textDocument/publishDiagnostics") {
 				const params = msg.params as { uri?: string; diagnostics?: Diagnostic[] } | undefined;
 				if (params?.uri) {
+					this.diagnosticsSeq.set(params.uri, (this.diagnosticsSeq.get(params.uri) ?? 0) + 1);
 					this.diagnostics.set(params.uri, params.diagnostics ?? []);
 					this.options.onDiagnostics?.(params.uri, params.diagnostics ?? []);
 				}
@@ -216,6 +218,8 @@ export class LspClient {
 		const existing = this.openFiles.get(uri);
 		if (!existing) {
 			this.openFiles.set(uri, { version: 1, languageId: this.languageIdFor(filePath), text });
+			this.diagnostics.delete(uri);
+			this.diagnosticsSeq.set(uri, 0);
 			this.sendNotification("textDocument/didOpen", {
 				textDocument: {
 					uri,
@@ -228,7 +232,9 @@ export class LspClient {
 		}
 		if (existing.text !== text) {
 			const version = existing.version + 1;
-		this.openFiles.set(uri, { version, languageId: this.languageIdFor(filePath), text });
+			this.openFiles.set(uri, { version, languageId: this.languageIdFor(filePath), text });
+			this.diagnostics.delete(uri);
+			this.diagnosticsSeq.set(uri, 0);
 			this.sendNotification("textDocument/didChange", {
 				textDocument: { uri, version },
 				contentChanges: [{ text }],
@@ -243,6 +249,8 @@ export class LspClient {
 		const existing = this.openFiles.get(uri);
 		const version = (existing?.version ?? 0) + 1;
 		this.openFiles.set(uri, { version, languageId: this.languageIdFor(filePath), text });
+		this.diagnostics.delete(uri);
+		this.diagnosticsSeq.set(uri, 0);
 		this.sendNotification("textDocument/didChange", {
 			textDocument: { uri, version },
 			contentChanges: [{ text }],
@@ -253,6 +261,8 @@ export class LspClient {
 		await this.ensureInitialized();
 		const uri = pathToUri(filePath);
 		this.openFiles.delete(uri);
+		this.diagnostics.delete(uri);
+		this.diagnosticsSeq.delete(uri);
 		this.sendNotification("textDocument/didClose", { textDocument: { uri } });
 	}
 
@@ -292,6 +302,10 @@ export class LspClient {
 
 	workspaceSymbol(query: string, signal?: AbortSignal): Promise<unknown> {
 		return this.sendRequest("workspace/symbol", { query }, signal);
+	}
+
+	hasDiagnostics(uri: string): boolean {
+		return (this.diagnosticsSeq.get(uri) ?? 0) > 0;
 	}
 
 	getDiagnostics(uri?: string): Diagnostic[] {
