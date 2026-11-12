@@ -12,7 +12,6 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   type DnsLookupFunction,
   ensureFetchAuthorized,
-  isMutatingMethod,
   redactHeaders,
   redactUrl,
   sanitizeHeadersForRedirect,
@@ -48,15 +47,6 @@ function hasHeaderCaseInsensitive(headers: Record<string, string>, targetName: s
   return Object.keys(headers).some((headerName) => headerName.toLowerCase() === lower);
 }
 
-function deleteHeaderCaseInsensitive(headers: Record<string, string>, targetName: string): void {
-  const lower = targetName.toLowerCase();
-  for (const headerName of Object.keys(headers)) {
-    if (headerName.toLowerCase() === lower) {
-      delete headers[headerName];
-    }
-  }
-}
-
 /**
  * Normalize and validate the HTTP method.
  */
@@ -72,7 +62,8 @@ export function normalizeHttpMethod(rawMethod?: string): { ok: boolean; method?:
 }
 
 /**
- * Validate and serialize request payload (`body`, `json`, or `form`) and set default `Content-Type` header.
+ * Reject any request payload (`body`, `json`, or `form`) — safe-fetch is read-only —
+ * and set the default `User-Agent` header.
  */
 export function prepareRequestPayload(
   method: HttpMethod,
@@ -88,7 +79,7 @@ export function prepareRequestPayload(
   }
 
   if (!hasHeaderCaseInsensitive(headers, "user-agent")) {
-    headers["User-Agent"] = "pi-fetch/1.0";
+    headers["User-Agent"] = "pi-safe-fetch/1.0";
   }
 
   const hasBody = params.body !== undefined;
@@ -104,54 +95,12 @@ export function prepareRequestPayload(
     };
   }
 
-  if (payloadCount > 0 && (method === "GET" || method === "HEAD")) {
+  if (payloadCount > 0) {
     return {
       ok: false,
       headers,
-      error: `HTTP ${method} requests cannot include a request body (\`body\`, \`json\`, or \`form\`). Use POST, PUT, PATCH, DELETE, or OPTIONS instead.`,
+      error: `HTTP ${method} requests cannot include a request body (\`body\`, \`json\`, or \`form\`).`,
     };
-  }
-
-  if (hasJson) {
-    let serialized: string;
-    try {
-      serialized = JSON.stringify(params.json);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false,
-        headers,
-        error: `Failed to serialize \`json\` payload: ${msg}`,
-      };
-    }
-    if (!hasHeaderCaseInsensitive(headers, "content-type")) {
-      headers["Content-Type"] = "application/json; charset=utf-8";
-    }
-    return { ok: true, body: serialized, headers };
-  }
-
-  if (hasForm) {
-    if (typeof params.form !== "object" || params.form === null || Array.isArray(params.form)) {
-      return {
-        ok: false,
-        headers,
-        error: "`form` payload must be a key-value object of string fields.",
-      };
-    }
-    const searchParams = new URLSearchParams();
-    for (const [formFieldKey, formFieldValue] of Object.entries(params.form)) {
-      if (formFieldValue !== undefined && formFieldValue !== null) {
-        searchParams.set(formFieldKey, String(formFieldValue));
-      }
-    }
-    if (!hasHeaderCaseInsensitive(headers, "content-type")) {
-      headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8";
-    }
-    return { ok: true, body: searchParams.toString(), headers };
-  }
-
-  if (hasBody) {
-    return { ok: true, body: String(params.body), headers };
   }
 
   return { ok: true, body: undefined, headers };
@@ -171,7 +120,7 @@ export function tlsSummary(urlProtocol: string, tls?: FetchTlsOptions): TlsSumma
 }
 
 /**
- * Build runtime `fetch` TLS options for Bun (`tls`) when custom TLS parameters are specified.
+ * Build runtime `safe-fetch` TLS options for Bun (`tls`) when custom TLS parameters are specified.
  */
 export function buildTlsOptions(
   urlProtocol: string,
@@ -379,9 +328,7 @@ function executePinnedHttpRequest(
       reject(err);
     });
 
-    if (init.body !== undefined && init.method !== "GET" && init.method !== "HEAD") {
-      req.write(init.body);
-    }
+    // safe-fetch never sends a request body (GET/HEAD/OPTIONS only).
     req.end();
   });
 }
@@ -636,7 +583,6 @@ export async function executeHttpFetch(
   const customFetchFn = options.fetchImpl;
   let currentMethod: HttpMethod = initialMethod;
   let currentHeaders: Record<string, string> = { ...payloadPrep.headers };
-  let currentBody: string | undefined = payloadPrep.body;
 
   const redirectChain: string[] = [initialRedactedUrl];
   let redirectCount = 0;
@@ -649,7 +595,7 @@ export async function executeHttpFetch(
         ? await customFetchFn(currentUrl.toString(), {
             method: currentMethod,
             headers: currentHeaders,
-            body: currentMethod === "GET" || currentMethod === "HEAD" ? undefined : currentBody,
+            body: undefined,
             redirect: "manual",
             signal: combinedSignal,
             pinnedAddresses: currentResolvedAddresses,
@@ -658,7 +604,7 @@ export async function executeHttpFetch(
         : await executePinnedHttpRequest(currentUrl.toString(), {
             method: currentMethod,
             headers: currentHeaders,
-            body: currentMethod === "GET" || currentMethod === "HEAD" ? undefined : currentBody,
+            body: undefined,
             signal: combinedSignal,
             tls: params.tls,
             resolvedAddresses: currentResolvedAddresses,
@@ -763,25 +709,16 @@ export async function executeHttpFetch(
         const sanitized = sanitizeHeadersForRedirect(currentUrl, nextUrl, currentHeaders);
         currentHeaders = sanitized.headers;
 
-        // Per HTTP semantics: 303 (or 301/302 for POST) rewrites non-HEAD method to GET and drops body
-        if (
-          response.status === 303 ||
-          ((response.status === 301 || response.status === 302) && currentMethod === "POST")
-        ) {
-          if (currentMethod !== "HEAD") {
-            currentMethod = "GET";
-          }
-          currentBody = undefined;
-          deleteHeaderCaseInsensitive(currentHeaders, "content-type");
-          deleteHeaderCaseInsensitive(currentHeaders, "content-length");
-        }
+        // 307/308 preserve the safe method (GET/HEAD/OPTIONS) and drop no body
+        // (safe-fetch never sends bodies). 301/302/303 rewrites are dead code
+        // without mutating input methods and are intentionally omitted.
 
-        // If redirect hop crosses into a private target, downgrades HTTPS -> HTTP,
-        // or preserves a mutating method across a cross-origin redirect (307/308), verify authorization
+        // If a redirect hop crosses into a private target or downgrades HTTPS -> HTTP,
+        // verify authorization. Cross-origin safe-method (GET/HEAD/OPTIONS) redirects
+        // need no extra confirmation beyond the SSRF/private-network guards above.
         if (
           hopValidation.isPrivateTarget ||
-          sanitized.protocolDowngraded ||
-          (sanitized.originChanged && isMutatingMethod(currentMethod))
+          sanitized.protocolDowngraded
         ) {
           const hopAuth = await ensureFetchAuthorized({
             params,
@@ -789,7 +726,9 @@ export async function executeHttpFetch(
             targetUrl: nextUrl.toString(),
             isPrivateTarget: Boolean(hopValidation.isPrivateTarget),
             isRedirectHop: true,
-            originChanged: sanitized.originChanged,
+            // NOTE: `sanitized.originChanged` is intentionally not forwarded —
+            // redirect auth depends on `isPrivateTarget`/`protocolDowngraded` only.
+            // `sanitizeHeadersForRedirect` return value is kept for header stripping.
             protocolDowngraded: sanitized.protocolDowngraded,
             ctx: options.ctx,
             signal: combinedSignal,
@@ -867,7 +806,7 @@ export async function executeHttpFetch(
     const rawMsg = err instanceof Error ? err.message : String(err);
     const errorMsg = isTimeout
       ? `Request timed out after ${timeoutMs}ms (${currentMethod} ${redactUrl(currentUrl.toString())}).`
-      : `Fetch error (${currentMethod} ${redactUrl(currentUrl.toString())}): ${rawMsg}`;
+      : `safe-fetch error (${currentMethod} ${redactUrl(currentUrl.toString())}): ${rawMsg}`;
 
     return {
       ok: false,

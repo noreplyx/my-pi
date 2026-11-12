@@ -1,11 +1,11 @@
 /**
- * `fetch` — Full-featured HTTP/HTTPS client tool extension for Pi.
+ * `safe-fetch` — Safe read-only HTTP/HTTPS client tool extension for Pi.
  *
- * Supports GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS; request bodies (`body`, `json`, `form`);
- * query parameters; custom headers with automatic secret redaction; manual redirect validation
+ * Supports GET, HEAD, OPTIONS only; query parameters; custom headers with automatic secret redaction; manual redirect validation
  * with SSRF / cloud-metadata / private-network guards; TLS configuration; and multi-format
  * response processing (`auto`, `json`, `markdown`, `text`, `raw`, `base64`, plus inline image blocks)
  * with streaming byte caps and 2000-line / 50KB truncation.
+ * Request bodies (`body`, `json`, `form`) are kept in the schema but rejected at runtime.
  */
 
 import { appendFile, mkdir } from "node:fs/promises";
@@ -50,7 +50,7 @@ async function logFetchEvent(entry: {
   const statusPart = entry.status !== undefined ? ` status=${entry.status}` : "";
   const bytesPart = entry.byteLength !== undefined ? ` bytes=${entry.byteLength}` : "";
   const errorPart = entry.error ? ` error=${JSON.stringify(entry.error.slice(0, 300))}` : "";
-  const line = `[${new Date().toISOString()}] agent=${agent} FETCH_EXEC outcome=${entry.outcome} method=${entry.method} url=${JSON.stringify(entry.redactedUrl.slice(0, 400))}${statusPart}${bytesPart} elapsedMs=${entry.elapsedMs}${errorPart}\n`;
+  const line = `[${new Date().toISOString()}] agent=${agent} SAFE_FETCH_EXEC outcome=${entry.outcome} method=${entry.method} url=${JSON.stringify(entry.redactedUrl.slice(0, 400))}${statusPart}${bytesPart} elapsedMs=${entry.elapsedMs}${errorPart}\n`;
   try {
     const logPath = fetchAuditLogPath();
     await withFileMutationQueue(logPath, async () => {
@@ -64,27 +64,27 @@ async function logFetchEvent(entry: {
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
-    name: "fetch",
-    label: "HTTP Fetch",
+    name: "safe-fetch",
+    label: "Safe HTTP Fetch",
     description: [
-      "Make HTTP/HTTPS requests (GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS).",
-      "Supports `query` parameters, custom `headers` (credentials/tokens are redacted in output and logs),",
-      "and request payloads via `json` (auto-serialized as application/json), `form` (application/x-www-form-urlencoded), or raw `body`.",
+      "Make safe read-only HTTP/HTTPS requests (GET, HEAD, OPTIONS).",
+      "Supports `query` parameters, custom `headers` (credentials/tokens are redacted in output and logs).",
+      "Request payloads (`body`, `json`, `form`) are NOT allowed for safe-fetch and are rejected at runtime.",
       "Response `format` modes: `auto` (default: pretty-prints JSON, converts HTML to Markdown, returns PNG/JPEG/GIF/WebP as image blocks, spills binary to temp files), `json`, `markdown`, `text`, `raw`, or `base64`.",
       "Includes SSRF protection (cloud metadata endpoints are unconditionally blocked; private/loopback IPs require `allowPrivateNetwork: true`),",
       "per-hop redirect validation (`followRedirects`, `maxRedirects`), `timeoutMs`, and `tls` options (`rejectUnauthorized`, `caPem`, `serverName`).",
       "Text output is truncated to 2000 lines or 50KB (whichever is hit first), with full output saved to a temp file.",
     ].join(" "),
-    promptSnippet: "Perform HTTP/HTTPS requests (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS) with JSON/form/body payloads and HTML/JSON/Markdown formatting",
+    promptSnippet: "Perform safe read-only HTTP/HTTPS requests (GET, HEAD, OPTIONS) with HTML/JSON/Markdown formatting",
     promptGuidelines: [
-      "Prefer `fetch` over `bash` (`curl`/`Invoke-WebRequest`) for HTTP/HTTPS API calls, web page retrieval, and service health checks.",
+      "Prefer `safe-fetch` over `bash` (`curl`/`Invoke-WebRequest`) for HTTP/HTTPS API calls, web page retrieval, and service health checks.",
     ],
     parameters: FetchParams,
     outputSchema: FetchOutputSchema,
     annotations: {
-      readOnlyHint: false,
+      readOnlyHint: true,
       destructiveHint: false,
-      idempotentHint: false,
+      idempotentHint: true,
       openWorldHint: true,
     },
 
@@ -118,13 +118,13 @@ export default function (pi: ExtensionAPI) {
           requestHeaders: execResult.requestHeaders,
           elapsedMs: execResult.elapsedMs,
           tls: execResult.tls,
-          error: execResult.error ?? "HTTP fetch failed.",
+          error: execResult.error ?? "HTTP safe-fetch failed.",
         };
 
         const details: FetchDetails = { ...structuredError };
 
         return {
-          content: [{ type: "text" as const, text: execResult.error ?? "HTTP fetch failed." }],
+          content: [{ type: "text" as const, text: execResult.error ?? "HTTP safe-fetch failed." }],
           details,
           structuredContent: structuredError,
           isError: true,
@@ -221,11 +221,10 @@ export default function (pi: ExtensionAPI) {
           ? resolveRedactedRequestUrl(callArgs.url, callArgs.query)
           : "(no url)";
 
-      const methodColor =
-        method === "GET" || method === "HEAD" || method === "OPTIONS" ? "accent" : "warning";
+      const methodColor = "accent";
 
       let text =
-        theme.fg("toolTitle", theme.bold("fetch ")) +
+        theme.fg("toolTitle", theme.bold("safe-fetch ")) +
         theme.fg(methodColor, theme.bold(method)) +
         " " +
         theme.fg("muted", displayUrl);
@@ -267,7 +266,7 @@ export default function (pi: ExtensionAPI) {
           ? theme.fg("success", "✓")
           : theme.fg("warning", "!");
 
-      let header = `${icon} ${theme.fg("toolTitle", theme.bold("fetch"))}`;
+      let header = `${icon} ${theme.fg("toolTitle", theme.bold("safe-fetch"))}`;
       if (resultDetails?.method) {
         header += ` ${theme.fg("accent", resultDetails.method)}`;
       }

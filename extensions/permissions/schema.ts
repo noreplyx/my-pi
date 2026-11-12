@@ -10,7 +10,7 @@
  *   or: permissions: ./agent-name.permissions.json  (external file, same shape)
  *
  * Rule `match` patterns evaluate against RAW (unredacted) primary targets:
- * `fetch` rules match the real URL with secrets intact (in memory only, never
+ * `safe-fetch` rules match the real URL with secrets intact (in memory only, never
  * logged — a `deny` on a secret-bearing URL must still match). Prompts and
  * the audit log always show the redacted form instead — see the raw vs
  * redacted URL contract in `extensions/fetch/redaction.ts` (`rawForMatch`

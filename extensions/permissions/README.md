@@ -180,9 +180,9 @@ unchanged, and R2 is reporting-only).
 
 Prompts may show friendly summaries — cwd-relative paths (`src/foo.txt`),
 `~` for home, `first-step … (+N more)` for long shell lines, redacted
-fetch URLs — but everything persisted to `audit.log` is canonical:
+safe-fetch URLs — but everything persisted to `audit.log` is canonical:
 absolute paths for file tools (via `displayTarget` in `loader.ts`) and
-secret-redacted URLs for `fetch` (via `redactForDisplay`). Raw secrets
+secret-redacted URLs for `safe-fetch` (via `redactForDisplay`). Raw secrets
 (the real URL, raw JSON args) exist only as in-memory match candidates
 (`buildTargets`/`evaluate`); they are never displayed, notified, or
 logged. Rule `match` patterns therefore evaluate against RAW values — a
