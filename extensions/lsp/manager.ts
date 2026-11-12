@@ -97,7 +97,11 @@ export class LspManager {
 
 	rootFor(language: SupportedLanguage, filePath: string): string {
 		const canonical = this.canonicalLanguage(language);
-		return findRoot(filePath, this.config.servers[canonical].rootMarkers);
+		const markers =
+			canonical === language
+				? this.config.servers[canonical].rootMarkers
+				: [...new Set([...this.config.servers[language].rootMarkers, ...this.config.servers[canonical].rootMarkers])];
+		return findRoot(filePath, markers);
 	}
 
 	/** Lazy per (lang, root). Throws a fail-closed error when disabled or binary missing. */

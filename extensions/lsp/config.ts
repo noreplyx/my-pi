@@ -16,7 +16,8 @@ export type SupportedLanguage =
 	| "lua"
 	| "powershell"
 	| "sql"
-	| "postgres";
+	| "postgres"
+	| "sqlserver";
 
 export const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = [
 	"csharp",
@@ -29,12 +30,14 @@ export const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = [
 	"powershell",
 	"sql",
 	"postgres",
+	"sqlserver",
 ];
 
 export const CANONICAL_LANGUAGE_PAIR: Partial<Record<SupportedLanguage, SupportedLanguage>> = {
 	javascript: "typescript",
 	shell: "bash",
 	postgres: "sql",
+	sqlserver: "sql",
 };
 
 export interface ServerConfig {
@@ -104,13 +107,19 @@ export const DEFAULT_CONFIG: LspConfig = {
 		sql: {
 			command: "sql-language-server",
 			args: ["up", "--method", "stdio"],
-			rootMarkers: [".sqllsrc.json", ".sqlfluff", ".sqruff", "sqls.yml", ".git"],
+			rootMarkers: [".sqllsrc.json", "sqls.yml", ".sqlfluff", ".sqruff", "*.sqlproj", ".git"],
 			enabled: true,
 		},
 		postgres: {
 			command: "postgres-language-server",
 			args: ["lsp-proxy"],
 			rootMarkers: ["postgres-language-server.jsonc", "postgrestools.jsonc", ".sqllsrc.json", ".sqlfluff", ".git"],
+			enabled: true,
+		},
+		sqlserver: {
+			command: "sql-language-server",
+			args: ["up", "--method", "stdio"],
+			rootMarkers: [".sqllsrc.json", "sqls.yml", ".sqlfluff", ".sqruff", "*.sqlproj", ".git"],
 			enabled: true,
 		},
 	},
@@ -137,6 +146,8 @@ export const INSTALL_HINTS: Record<SupportedLanguage, string> = {
 		"Install SQL LSP: `npm i -g sql-language-server` (or configure `servers.sql` in `lsp.json` to use `sqls` from Mason/Go `{ \"command\": \"sqls\", \"args\": [] }` or `sqruff` `{ \"command\": \"sqruff\", \"args\": [\"lsp\"] }`).",
 	postgres:
 		"Install PostgreSQL LSP: `npm i -g @supabase-community/postgres-language-server` or download `postgres-language-server` from https://github.com/supabase-community/postgres-language-server/releases (invoked with `args: [\"lsp-proxy\"]`).",
+	sqlserver:
+		"Install SQL Server (T-SQL) LSP: `npm i -g sql-language-server` (with `\"adapter\": \"mssql\"` in `.sqllsrc.json`, or configure `servers.sqlserver` in `lsp.json` to use `sqls` `{ \"command\": \"sqls\", \"args\": [] }` with `driver: mssql` or `sqruff` `{ \"command\": \"sqruff\", \"args\": [\"lsp\"] }` with `dialect = tsql`).",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -245,9 +256,11 @@ export function resolveFileLanguageInfo(filePath: string): FileLanguageInfo | un
 	if (lowercaseExtension === ".pgsql" || lowercaseExtension === ".plpgsql" || lowercaseExtension === ".psql") {
 		return { language: "postgres", languageId: "postgres" };
 	}
+	if (lowercaseExtension === ".tsql") {
+		return { language: "sqlserver", languageId: "tsql" };
+	}
 	if (
 		lowercaseExtension === ".sql" ||
-		lowercaseExtension === ".tsql" ||
 		lowercaseExtension === ".ddl" ||
 		lowercaseExtension === ".dml"
 	) {

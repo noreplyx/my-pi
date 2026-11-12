@@ -29,6 +29,7 @@ const LanguageEnum = Type.Union([
 	Type.Literal("powershell"),
 	Type.Literal("sql"),
 	Type.Literal("postgres"),
+	Type.Literal("sqlserver"),
 ]);
 
 const LANGUAGE_INFERENCE_NOTE =

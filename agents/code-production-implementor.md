@@ -118,7 +118,7 @@ You implement production code. You NEVER touch test code.
      - Bash / Shell: `bash -n <file>` or `sh -n <file>` (and `shellcheck <file>` if installed).
      - Lua: `luac -p <file>` or `luacheck <file>` (if installed).
      - PowerShell: `pwsh` / `powershell` parser check or `Invoke-ScriptAnalyzer` (if installed).
-     - SQL / Postgres: `sqruff lint <file>` or `sqlfluff lint <file>` / `sqlfluff parse <file>` (if installed).
+     - SQL / Postgres / SQL Server (T-SQL): `sqruff lint <file>` or `sqlfluff lint --dialect tsql <file>` / `sqlfluff parse --dialect tsql <file>` (or default dialect for ANSI/Postgres, if installed).
      - Go: `go build ./...` and `go vet ./...`.
      - Rust: `cargo check`.
   3. **Import, Export & Call-Site Resolution Audit**: Verify every added/modified `import`/`export`/symbol reference resolves to an existing file and exported symbol (using `grep` or `lsp_definition` / `lsp_references`), and check callers when changing function signatures.

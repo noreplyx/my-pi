@@ -1,5 +1,5 @@
 /**
- * LSP extension: C#, Python, TypeScript, JavaScript, Bash, Shell, Lua, PowerShell, SQL, and Postgres via stdio language servers.
+ * LSP extension: C#, Python, TypeScript, JavaScript, Bash, Shell, Lua, PowerShell, SQL, Postgres, and SQL Server (T-SQL) via stdio language servers.
  * Factory only registers capabilities — no processes spawn until a tool
  * runs (or autoStart warms them on session_start).
  */

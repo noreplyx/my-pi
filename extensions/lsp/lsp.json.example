@@ -53,7 +53,7 @@
 		"sql": {
 			"command": "sql-language-server",
 			"args": ["up", "--method", "stdio"],
-			"rootMarkers": [".sqllsrc.json", ".sqlfluff", ".sqruff", "sqls.yml", ".git"],
+			"rootMarkers": [".sqllsrc.json", "sqls.yml", ".sqlfluff", ".sqruff", "*.sqlproj", ".git"],
 			"enabled": true
 		},
 		"_comment_sql_alternative": "Alternatives: sqls — { \"command\": \"sqls\", \"args\": [] } or sqruff — { \"command\": \"sqruff\", \"args\": [\"lsp\"] }",
@@ -62,6 +62,13 @@
 			"args": ["lsp-proxy"],
 			"rootMarkers": ["postgres-language-server.jsonc", "postgrestools.jsonc", ".sqllsrc.json", ".sqlfluff", ".git"],
 			"enabled": true
-		}
+		},
+		"sqlserver": {
+			"command": "sql-language-server",
+			"args": ["up", "--method", "stdio"],
+			"rootMarkers": [".sqllsrc.json", "sqls.yml", ".sqlfluff", ".sqruff", "*.sqlproj", ".git"],
+			"enabled": true
+		},
+		"_comment_sqlserver_alternative": "Alternatives for T-SQL: sqls (with driver: mssql in sqls.yml) — { \"command\": \"sqls\", \"args\": [] } or sqruff (with dialect = tsql in .sqruff) — { \"command\": \"sqruff\", \"args\": [\"lsp\"] }"
 	}
 }
