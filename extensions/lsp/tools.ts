@@ -6,7 +6,12 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { SUPPORTED_LANGUAGES, languageFromFile, type SupportedLanguage } from "./config.js";
+import {
+	CANONICAL_LANGUAGE_PAIR,
+	SUPPORTED_LANGUAGES,
+	languageFromFile,
+	type SupportedLanguage,
+} from "./config.js";
 import { uriToPath, pathToUri } from "./client.js";
 import type { LspManager } from "./manager.js";
 
@@ -22,10 +27,12 @@ const LanguageEnum = Type.Union([
 	Type.Literal("shell"),
 	Type.Literal("lua"),
 	Type.Literal("powershell"),
+	Type.Literal("sql"),
+	Type.Literal("postgres"),
 ]);
 
 const LANGUAGE_INFERENCE_NOTE =
-	"`language` may be omitted when `file` has known extension (.cs/.py/.pyi/.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.sh/.bash/.zsh/.lua/.ps1/.psm1/.psd1); inferred automatically. If both given and disagree, the call fails.";
+	"`language` may be omitted when `file` has known extension (.cs/.py/.pyi/.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.sh/.bash/.zsh/.lua/.ps1/.psm1/.psd1/.sql/.tsql/.ddl/.dml/.pgsql/.plpgsql/.psql); inferred automatically. If both given and disagree, the call fails.";
 
 const OptionalLanguage = Type.Optional(
 	Type.Union([...LanguageEnum.anyOf], {
@@ -33,15 +40,15 @@ const OptionalLanguage = Type.Optional(
 	}),
 );
 
-function areLanguagesCompatible(a: SupportedLanguage, b: SupportedLanguage): boolean {
-	if (a === b) return true;
-	if ((a === "typescript" && b === "javascript") || (a === "javascript" && b === "typescript")) {
-		return true;
-	}
-	if ((a === "bash" && b === "shell") || (a === "shell" && b === "bash")) {
-		return true;
-	}
-	return false;
+function areLanguagesCompatible(
+	firstLanguage: SupportedLanguage,
+	secondLanguage: SupportedLanguage,
+): boolean {
+	return (
+		firstLanguage === secondLanguage ||
+		CANONICAL_LANGUAGE_PAIR[firstLanguage] === secondLanguage ||
+		CANONICAL_LANGUAGE_PAIR[secondLanguage] === firstLanguage
+	);
 }
 
 /**
@@ -50,30 +57,30 @@ function areLanguagesCompatible(a: SupportedLanguage, b: SupportedLanguage): boo
  * Mismatches and uninferrable files are errors.
  */
 export function resolveLanguage(
-	explicit: SupportedLanguage | undefined,
-	fileAbs: string | undefined,
+	explicitLanguage: SupportedLanguage | undefined,
+	absoluteFilePath: string | undefined,
 ):
 	| { language: SupportedLanguage }
 	| { error: string; inferred?: SupportedLanguage; explicit?: SupportedLanguage; file?: string } {
-	const inferred = fileAbs ? languageFromFile(fileAbs) : undefined;
-	if (explicit && inferred) {
-		if (!areLanguagesCompatible(explicit, inferred)) {
+	const inferred = absoluteFilePath ? languageFromFile(absoluteFilePath) : undefined;
+	if (explicitLanguage && inferred) {
+		if (!areLanguagesCompatible(explicitLanguage, inferred)) {
 			return {
-				error: `Language mismatch: inferred ${inferred} but got ${explicit} for file ${fileAbs}; pass matching language or omit language to use inference.`,
+				error: `Language mismatch: inferred ${inferred} but got ${explicitLanguage} for file ${absoluteFilePath}; pass matching language or omit language to use inference.`,
 				inferred,
-				explicit,
-				file: fileAbs,
+				explicit: explicitLanguage,
+				file: absoluteFilePath,
 			};
 		}
-		return { language: explicit };
+		return { language: explicitLanguage };
 	}
-	if (explicit) return { language: explicit };
+	if (explicitLanguage) return { language: explicitLanguage };
 	if (inferred) return { language: inferred };
 	const supportedList = SUPPORTED_LANGUAGES.join("|");
-	if (fileAbs) {
+	if (absoluteFilePath) {
 		return {
-			error: `Cannot infer language from file ${fileAbs}; pass language explicitly: ${supportedList}`,
-			file: fileAbs,
+			error: `Cannot infer language from file ${absoluteFilePath}; pass language explicitly: ${supportedList}`,
+			file: absoluteFilePath,
 		};
 	}
 	return {

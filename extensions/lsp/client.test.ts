@@ -1,11 +1,37 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import * as realChildProcess from "node:child_process";
+import assert from "node:assert/strict";
+import type { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { registerHooks } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { encodeMessage, LspFraming } from "./protocol.ts";
+import { afterEach, describe, test } from "node:test";
+import { pathToFileURL } from "node:url";
 
-interface RpcMessage {
+registerHooks({
+	resolve(specifier, context, nextResolve) {
+		if (specifier === "typebox") {
+			return nextResolve(
+				pathToFileURL(
+					path.resolve(
+						import.meta.dirname,
+						"../../install/releases/1.5.2/node_modules/typebox/build/index.mjs",
+					),
+				).href,
+				context,
+			);
+		}
+		if ((specifier.startsWith("./") || specifier.startsWith("../")) && specifier.endsWith(".js")) {
+			return nextResolve(`${specifier.slice(0, -3)}.ts`, context);
+		}
+		return nextResolve(specifier, context);
+	},
+});
+
+const { encodeMessage, LspFraming } = await import("./protocol.ts");
+const { LspClient, pathToUri } = await import("./client.ts");
+type Diagnostic = import("./client.ts").Diagnostic;
+
+export interface RpcMessage {
 	jsonrpc?: string;
 	id?: number | string;
 	method?: string;
@@ -14,7 +40,14 @@ interface RpcMessage {
 	error?: unknown;
 }
 
-interface FakeLspProcess extends EventEmitter {
+export interface DidOpenTextDocument {
+	uri: string;
+	languageId: string;
+	version: number;
+	text: string;
+}
+
+export interface FakeLspProcess extends EventEmitter {
 	stdin: EventEmitter & {
 		writable: boolean;
 		write: (chunk: Buffer | string) => boolean;
@@ -27,9 +60,11 @@ interface FakeLspProcess extends EventEmitter {
 	emitPublishDiagnostics: (params: unknown) => void;
 }
 
-let activeProc: FakeLspProcess | null = null;
+export interface FakeLspProcessOptions {
+	onDidOpen?: (proc: FakeLspProcess, textDocument: DidOpenTextDocument) => void;
+}
 
-function createFakeLspProcess(): FakeLspProcess {
+export function createFakeLspProcess(options?: FakeLspProcessOptions): FakeLspProcess {
 	const proc = new EventEmitter() as FakeLspProcess;
 	const stdinEmitter = new EventEmitter() as FakeLspProcess["stdin"];
 	const inboundFraming = new LspFraming();
@@ -56,6 +91,15 @@ function createFakeLspProcess(): FakeLspProcess {
 					);
 				});
 			}
+			if (msg.method === "textDocument/didOpen") {
+				const params = msg.params as { textDocument?: DidOpenTextDocument } | undefined;
+				if (params?.textDocument && options?.onDidOpen) {
+					const textDocument = params.textDocument;
+					queueMicrotask(() => {
+						options.onDidOpen?.(proc, textDocument);
+					});
+				}
+			}
 		}
 		return true;
 	};
@@ -81,19 +125,13 @@ function createFakeLspProcess(): FakeLspProcess {
 	return proc;
 }
 
-const spawnMock = mock(() => {
+let activeProc: FakeLspProcess | null = null;
+
+const spawnFakeProcess = (() => {
 	const proc = createFakeLspProcess();
 	activeProc = proc;
 	return proc;
-});
-
-mock.module("node:child_process", () => ({
-	...realChildProcess,
-	spawn: spawnMock,
-}));
-
-const { LspClient, pathToUri } = await import("./client.ts");
-type Diagnostic = import("./client.ts").Diagnostic;
+}) as unknown as typeof spawn;
 
 const rootPath = path.join(os.tmpdir(), "pi-lsp-client-test");
 const rootUri = pathToUri(rootPath);
@@ -104,6 +142,7 @@ function createTestClient(onDiagnostics?: (uri: string, diagnostics: Diagnostic[
 		args: ["--stdio"],
 		rootPath,
 		rootUri,
+		spawnProcess: spawnFakeProcess,
 		onDiagnostics,
 	});
 }
@@ -121,173 +160,179 @@ function makeSampleDiagnostic(uri: string, message: string): Diagnostic {
 	};
 }
 
-describe("LspClient diagnostic cache and sequence tracking", () => {
-	let clientToStop: InstanceType<typeof LspClient> | null = null;
+const isDirectlyExecuted =
+	!process.argv.some((arg) => arg.endsWith("sql.test.ts")) ||
+	process.argv.some((arg) => arg.endsWith("client.test.ts"));
 
-	afterEach(async () => {
-		if (clientToStop) {
-			await clientToStop.stop();
-			clientToStop = null;
-		}
-		activeProc = null;
-	});
+if (isDirectlyExecuted) {
+	describe("LspClient diagnostic cache and sequence tracking", () => {
+		let clientToStop: InstanceType<typeof LspClient> | null = null;
 
-	test("reports hasDiagnostics as false before any publishDiagnostics notification arrives", async () => {
-		const client = createTestClient();
-		clientToStop = client;
-		const filePath = path.join(rootPath, "unreported.ts");
-		const expectedUri = pathToUri(filePath);
-
-		expect(client.hasDiagnostics(expectedUri)).toBe(false);
-
-		const openedUri = await client.ensureOpen(filePath, "const x = 1;\n");
-		expect(openedUri).toBe(expectedUri);
-		expect(client.hasDiagnostics(openedUri)).toBe(false);
-		expect(client.getDiagnostics(openedUri)).toEqual([]);
-	});
-
-	test("marks hasDiagnostics as true when publishDiagnostics arrives with an empty diagnostics list", async () => {
-		const client = createTestClient();
-		clientToStop = client;
-		const filePath = path.join(rootPath, "clean.ts");
-		const uri = await client.ensureOpen(filePath, "export const clean = true;\n");
-
-		activeProc!.emitPublishDiagnostics({ uri, diagnostics: [] });
-
-		expect(client.hasDiagnostics(uri)).toBe(true);
-		expect(client.getDiagnostics(uri)).toEqual([]);
-	});
-
-	test("stores diagnostics and marks hasDiagnostics as true when publishDiagnostics arrives with errors", async () => {
-		const receivedNotifications: Array<{ uri: string; diagnostics: Diagnostic[] }> = [];
-		const client = createTestClient((uri, diagnostics) => {
-			receivedNotifications.push({ uri, diagnostics });
+		afterEach(async () => {
+			if (clientToStop) {
+				await clientToStop.stop();
+				clientToStop = null;
+			}
+			activeProc = null;
 		});
-		clientToStop = client;
-		const filePath = path.join(rootPath, "broken.ts");
-		const uri = await client.ensureOpen(filePath, "const broken: number = 'wrong';\n");
-		const errorDiag = makeSampleDiagnostic(uri, "Type 'string' is not assignable to type 'number'.");
 
-		activeProc!.emitPublishDiagnostics({ uri, diagnostics: [errorDiag] });
+		test("reports hasDiagnostics as false before any publishDiagnostics notification arrives", async () => {
+			const client = createTestClient();
+			clientToStop = client;
+			const filePath = path.join(rootPath, "unreported.ts");
+			const expectedUri = pathToUri(filePath);
 
-		expect(client.hasDiagnostics(uri)).toBe(true);
-		expect(client.getDiagnostics(uri)).toEqual([errorDiag]);
-		expect(client.getDiagnostics()).toEqual([errorDiag]);
-		expect(client.diagnosticUris()).toEqual([uri]);
-		expect(receivedNotifications).toEqual([{ uri, diagnostics: [errorDiag] }]);
-	});
+			assert.equal(client.hasDiagnostics(expectedUri), false);
 
-	test("clears cached diagnostics and resets hasDiagnostics to false when ensureOpen detects modified file text", async () => {
-		const client = createTestClient();
-		clientToStop = client;
-		const filePath = path.join(rootPath, "editable.ts");
-		const uri = await client.ensureOpen(filePath, "const v = 1;\n");
-		const diag = makeSampleDiagnostic(uri, "Unused variable 'v'.");
-
-		activeProc!.emitPublishDiagnostics({ uri, diagnostics: [diag] });
-		expect(client.hasDiagnostics(uri)).toBe(true);
-		expect(client.getDiagnostics(uri)).toEqual([diag]);
-
-		await client.ensureOpen(filePath, "export const v = 2;\n");
-
-		expect(client.hasDiagnostics(uri)).toBe(false);
-		expect(client.getDiagnostics(uri)).toEqual([]);
-		const didChangeMessages = activeProc!.sentMessages.filter((m) => m.method === "textDocument/didChange");
-		expect(didChangeMessages.length).toBe(1);
-	});
-
-	test("preserves cached diagnostics and hasDiagnostics when ensureOpen is called with unchanged file text", async () => {
-		const client = createTestClient();
-		clientToStop = client;
-		const filePath = path.join(rootPath, "unchanged.ts");
-		const initialText = "const same = 42;\n";
-		const uri = await client.ensureOpen(filePath, initialText);
-		const diag = makeSampleDiagnostic(uri, "Unused variable 'same'.");
-
-		activeProc!.emitPublishDiagnostics({ uri, diagnostics: [diag] });
-		expect(client.hasDiagnostics(uri)).toBe(true);
-
-		await client.ensureOpen(filePath, initialText);
-
-		expect(client.hasDiagnostics(uri)).toBe(true);
-		expect(client.getDiagnostics(uri)).toEqual([diag]);
-		const didChangeMessages = activeProc!.sentMessages.filter((m) => m.method === "textDocument/didChange");
-		expect(didChangeMessages.length).toBe(0);
-	});
-
-	test("clears cached diagnostics and resets hasDiagnostics to false on explicit didChange", async () => {
-		const client = createTestClient();
-		clientToStop = client;
-		const filePath = path.join(rootPath, "changed.ts");
-		const uri = await client.ensureOpen(filePath, "let count = 0;\n");
-		const diag = makeSampleDiagnostic(uri, "Prefer const.");
-
-		activeProc!.emitPublishDiagnostics({ uri, diagnostics: [diag] });
-		expect(client.hasDiagnostics(uri)).toBe(true);
-		expect(client.getDiagnostics(uri)).toEqual([diag]);
-
-		await client.didChange(filePath, "const count = 0;\n");
-
-		expect(client.hasDiagnostics(uri)).toBe(false);
-		expect(client.getDiagnostics(uri)).toEqual([]);
-	});
-
-	test("removes cached diagnostics, resets hasDiagnostics, and decrements openFileCount on didClose", async () => {
-		const client = createTestClient();
-		clientToStop = client;
-		const filePath = path.join(rootPath, "closing.ts");
-		const uri = await client.ensureOpen(filePath, "const temp = true;\n");
-		const diag = makeSampleDiagnostic(uri, "Unused temp.");
-
-		activeProc!.emitPublishDiagnostics({ uri, diagnostics: [diag] });
-		expect(client.openFileCount()).toBe(1);
-		expect(client.hasDiagnostics(uri)).toBe(true);
-
-		await client.didClose(filePath);
-
-		expect(client.openFileCount()).toBe(0);
-		expect(client.hasDiagnostics(uri)).toBe(false);
-		expect(client.getDiagnostics(uri)).toEqual([]);
-		expect(client.diagnosticUris()).toEqual([]);
-	});
-
-	test("isolates diagnostic clearing per file URI so editing one file does not clear another file's diagnostics", async () => {
-		const client = createTestClient();
-		clientToStop = client;
-		const firstPath = path.join(rootPath, "first.ts");
-		const secondPath = path.join(rootPath, "second.ts");
-		const firstUri = await client.ensureOpen(firstPath, "const a = 1;\n");
-		const secondUri = await client.ensureOpen(secondPath, "const b = 2;\n");
-		const firstDiag = makeSampleDiagnostic(firstUri, "Error in first file.");
-		const secondDiag = makeSampleDiagnostic(secondUri, "Error in second file.");
-
-		activeProc!.emitPublishDiagnostics({ uri: firstUri, diagnostics: [firstDiag] });
-		activeProc!.emitPublishDiagnostics({ uri: secondUri, diagnostics: [secondDiag] });
-		expect(client.hasDiagnostics(firstUri)).toBe(true);
-		expect(client.hasDiagnostics(secondUri)).toBe(true);
-
-		await client.ensureOpen(firstPath, "export const a = 10;\n");
-
-		expect(client.hasDiagnostics(firstUri)).toBe(false);
-		expect(client.getDiagnostics(firstUri)).toEqual([]);
-		expect(client.hasDiagnostics(secondUri)).toBe(true);
-		expect(client.getDiagnostics(secondUri)).toEqual([secondDiag]);
-	});
-
-	test("ignores publishDiagnostics notifications that are missing a uri field", async () => {
-		const receivedNotifications: Array<{ uri: string; diagnostics: Diagnostic[] }> = [];
-		const client = createTestClient((uri, diagnostics) => {
-			receivedNotifications.push({ uri, diagnostics });
+			const openedUri = await client.ensureOpen(filePath, "const x = 1;\n");
+			assert.equal(openedUri, expectedUri);
+			assert.equal(client.hasDiagnostics(openedUri), false);
+			assert.deepEqual(client.getDiagnostics(openedUri), []);
 		});
-		clientToStop = client;
-		const filePath = path.join(rootPath, "valid.ts");
-		await client.ensureOpen(filePath, "export const valid = 1;\n");
 
-		activeProc!.emitPublishDiagnostics({ diagnostics: [] });
-		activeProc!.emitPublishDiagnostics(undefined);
+		test("marks hasDiagnostics as true when publishDiagnostics arrives with an empty diagnostics list", async () => {
+			const client = createTestClient();
+			clientToStop = client;
+			const filePath = path.join(rootPath, "clean.ts");
+			const uri = await client.ensureOpen(filePath, "export const clean = true;\n");
 
-		expect(client.diagnosticUris()).toEqual([]);
-		expect(client.getDiagnostics()).toEqual([]);
-		expect(receivedNotifications).toEqual([]);
+			activeProc!.emitPublishDiagnostics({ uri, diagnostics: [] });
+
+			assert.equal(client.hasDiagnostics(uri), true);
+			assert.deepEqual(client.getDiagnostics(uri), []);
+		});
+
+		test("stores diagnostics and marks hasDiagnostics as true when publishDiagnostics arrives with errors", async () => {
+			const receivedNotifications: Array<{ uri: string; diagnostics: Diagnostic[] }> = [];
+			const client = createTestClient((uri, diagnostics) => {
+				receivedNotifications.push({ uri, diagnostics });
+			});
+			clientToStop = client;
+			const filePath = path.join(rootPath, "broken.ts");
+			const uri = await client.ensureOpen(filePath, "const broken: number = 'wrong';\n");
+			const errorDiag = makeSampleDiagnostic(uri, "Type 'string' is not assignable to type 'number'.");
+
+			activeProc!.emitPublishDiagnostics({ uri, diagnostics: [errorDiag] });
+
+			assert.equal(client.hasDiagnostics(uri), true);
+			assert.deepEqual(client.getDiagnostics(uri), [errorDiag]);
+			assert.deepEqual(client.getDiagnostics(), [errorDiag]);
+			assert.deepEqual(client.diagnosticUris(), [uri]);
+			assert.deepEqual(receivedNotifications, [{ uri, diagnostics: [errorDiag] }]);
+		});
+
+		test("clears cached diagnostics and resets hasDiagnostics to false when ensureOpen detects modified file text", async () => {
+			const client = createTestClient();
+			clientToStop = client;
+			const filePath = path.join(rootPath, "editable.ts");
+			const uri = await client.ensureOpen(filePath, "const v = 1;\n");
+			const diag = makeSampleDiagnostic(uri, "Unused variable 'v'.");
+
+			activeProc!.emitPublishDiagnostics({ uri, diagnostics: [diag] });
+			assert.equal(client.hasDiagnostics(uri), true);
+			assert.deepEqual(client.getDiagnostics(uri), [diag]);
+
+			await client.ensureOpen(filePath, "export const v = 2;\n");
+
+			assert.equal(client.hasDiagnostics(uri), false);
+			assert.deepEqual(client.getDiagnostics(uri), []);
+			const didChangeMessages = activeProc!.sentMessages.filter((m) => m.method === "textDocument/didChange");
+			assert.equal(didChangeMessages.length, 1);
+		});
+
+		test("preserves cached diagnostics and hasDiagnostics when ensureOpen is called with unchanged file text", async () => {
+			const client = createTestClient();
+			clientToStop = client;
+			const filePath = path.join(rootPath, "unchanged.ts");
+			const initialText = "const same = 42;\n";
+			const uri = await client.ensureOpen(filePath, initialText);
+			const diag = makeSampleDiagnostic(uri, "Unused variable 'same'.");
+
+			activeProc!.emitPublishDiagnostics({ uri, diagnostics: [diag] });
+			assert.equal(client.hasDiagnostics(uri), true);
+
+			await client.ensureOpen(filePath, initialText);
+
+			assert.equal(client.hasDiagnostics(uri), true);
+			assert.deepEqual(client.getDiagnostics(uri), [diag]);
+			const didChangeMessages = activeProc!.sentMessages.filter((m) => m.method === "textDocument/didChange");
+			assert.equal(didChangeMessages.length, 0);
+		});
+
+		test("clears cached diagnostics and resets hasDiagnostics to false on explicit didChange", async () => {
+			const client = createTestClient();
+			clientToStop = client;
+			const filePath = path.join(rootPath, "changed.ts");
+			const uri = await client.ensureOpen(filePath, "let count = 0;\n");
+			const diag = makeSampleDiagnostic(uri, "Prefer const.");
+
+			activeProc!.emitPublishDiagnostics({ uri, diagnostics: [diag] });
+			assert.equal(client.hasDiagnostics(uri), true);
+			assert.deepEqual(client.getDiagnostics(uri), [diag]);
+
+			await client.didChange(filePath, "const count = 0;\n");
+
+			assert.equal(client.hasDiagnostics(uri), false);
+			assert.deepEqual(client.getDiagnostics(uri), []);
+		});
+
+		test("removes cached diagnostics, resets hasDiagnostics, and decrements openFileCount on didClose", async () => {
+			const client = createTestClient();
+			clientToStop = client;
+			const filePath = path.join(rootPath, "closing.ts");
+			const uri = await client.ensureOpen(filePath, "const temp = true;\n");
+			const diag = makeSampleDiagnostic(uri, "Unused temp.");
+
+			activeProc!.emitPublishDiagnostics({ uri, diagnostics: [diag] });
+			assert.equal(client.openFileCount(), 1);
+			assert.equal(client.hasDiagnostics(uri), true);
+
+			await client.didClose(filePath);
+
+			assert.equal(client.openFileCount(), 0);
+			assert.equal(client.hasDiagnostics(uri), false);
+			assert.deepEqual(client.getDiagnostics(uri), []);
+			assert.deepEqual(client.diagnosticUris(), []);
+		});
+
+		test("isolates diagnostic clearing per file URI so editing one file does not clear another file's diagnostics", async () => {
+			const client = createTestClient();
+			clientToStop = client;
+			const firstPath = path.join(rootPath, "first.ts");
+			const secondPath = path.join(rootPath, "second.ts");
+			const firstUri = await client.ensureOpen(firstPath, "const a = 1;\n");
+			const secondUri = await client.ensureOpen(secondPath, "const b = 2;\n");
+			const firstDiag = makeSampleDiagnostic(firstUri, "Error in first file.");
+			const secondDiag = makeSampleDiagnostic(secondUri, "Error in second file.");
+
+			activeProc!.emitPublishDiagnostics({ uri: firstUri, diagnostics: [firstDiag] });
+			activeProc!.emitPublishDiagnostics({ uri: secondUri, diagnostics: [secondDiag] });
+			assert.equal(client.hasDiagnostics(firstUri), true);
+			assert.equal(client.hasDiagnostics(secondUri), true);
+
+			await client.ensureOpen(firstPath, "export const a = 10;\n");
+
+			assert.equal(client.hasDiagnostics(firstUri), false);
+			assert.deepEqual(client.getDiagnostics(firstUri), []);
+			assert.equal(client.hasDiagnostics(secondUri), true);
+			assert.deepEqual(client.getDiagnostics(secondUri), [secondDiag]);
+		});
+
+		test("ignores publishDiagnostics notifications that are missing a uri field", async () => {
+			const receivedNotifications: Array<{ uri: string; diagnostics: Diagnostic[] }> = [];
+			const client = createTestClient((uri, diagnostics) => {
+				receivedNotifications.push({ uri, diagnostics });
+			});
+			clientToStop = client;
+			const filePath = path.join(rootPath, "valid.ts");
+			await client.ensureOpen(filePath, "export const valid = 1;\n");
+
+			activeProc!.emitPublishDiagnostics({ diagnostics: [] });
+			activeProc!.emitPublishDiagnostics(undefined);
+
+			assert.deepEqual(client.diagnosticUris(), []);
+			assert.deepEqual(client.getDiagnostics(), []);
+			assert.deepEqual(receivedNotifications, []);
+		});
 	});
-});
+}

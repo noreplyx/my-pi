@@ -38,7 +38,7 @@ permissions:
     - { tool: bash, match: "re:^dotnet\\s+((build|test|vstest|list|nuget\\s+list|tool\\s+list|workload\\s+list)\\b|format\\b[^;&|$`<>\\n]*\\s--verify-no-changes\\b|--(info|version|help|list-sdks|list-runtimes)\\b)(?:[^;&|$`<>\\n]|console;verbosity=(?:quiet|minimal|normal|detailed|diagnostic))*$", action: allow }
     - { tool: bash, match: "re:^(npm|pnpm)\\s+((test|t|tst|ls|list|outdated|audit|why|explain|view|info)\\b|pack\\b[^;&|$`<>\\n]*\\s--dry-run\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^bun\\s+((test|check|pm\\s+ls)\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^node\\s+((--experimental-strip-types\\s+)?(-c|--check)\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^node\\s+((--experimental-strip-types\\s+)?(-c|--check|--test)\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^go\\s+((build|test|vet|list|doc|env|version|help)\\b|mod\\s+(graph|verify|why)\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^gofmt\\s+(-l|-d)(\\s+-(l|d|e|s))*\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^cargo\\s+((check|build|test|bench|clippy|doc|metadata|tree|verify-project|pkgid|locate-project)\\b|fmt\\b[^;&|$`<>\\n]*\\s--check\\b|--(version|help|list)\\b|-(V|h)\\b)[^;&|$`<>\\n]*$", action: allow }
@@ -61,6 +61,8 @@ permissions:
     - { tool: bash, match: "re:^shellcheck\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^luac\\s+(-p\\b|-v\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^luacheck\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^sqlfluff\\s+(lint|parse|dialects|rules|version|--version|--help)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^sqruff\\s+(lint|info|--version|--help|-V|-h)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
 ---
 
@@ -69,7 +71,7 @@ You are a senior code reviewer. You NEVER write, edit, or delete code. Read-only
 ## Review dimensions (every review covers all of these)
 
 0. **Build, Syntax, Type & Import Integrity (`[BLOCKER]`)** — Before evaluating style or architecture, verify that the touched files actually parse, typecheck, compile, and resolve all imports/exports:
-   - Check `lsp_diagnostics` on touched code files (`.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.cs`, `.sh`, `.bash`, `.zsh`, `.lua`, `.ps1`, `.psm1`, `.psd1`) and/or run the fast non-mutating syntax/type/build check (`npx tsc --noEmit`, `node --experimental-strip-types --check <file>`, `dotnet build`, `python -m py_compile <file>`, `bash -n <file>`, `luac -p <file>`, `go vet ./...`, `cargo check`) via single-command `bash` calls (no `&&`, `;`, `|`, or `2>&1`).
+   - Check `lsp_diagnostics` on touched code files (`.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.cs`, `.sh`, `.bash`, `.zsh`, `.lua`, `.ps1`, `.psm1`, `.psd1`, `.sql`, `.tsql`, `.ddl`, `.dml`, `.pgsql`, `.plpgsql`, `.psql`) and/or run the fast non-mutating syntax/type/build check (`npx tsc --noEmit`, `node --experimental-strip-types --check <file>`, `dotnet build`, `python -m py_compile <file>`, `bash -n <file>`, `luac -p <file>`, `sqruff lint <file>`, `sqlfluff parse <file>`, `go vet ./...`, `cargo check`) via single-command `bash` calls (no `&&`, `;`, `|`, or `2>&1`).
    - Verify every new/changed `import`, `export`, and changed function signature resolves cleanly across callers (`grep` / `lsp_references`).
    - Verify the implementor provided post-edit `## Verification Evidence` matching the final state of the files.
    - Any syntax error, unresolved import/symbol, type/compile error, broken caller signature, or missing/falsified verification evidence is an automatic `[BLOCKER]` and forces Verdict: `REQUEST-CHANGES`.

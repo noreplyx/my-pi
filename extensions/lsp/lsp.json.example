@@ -49,6 +49,19 @@
 			"args": ["-Stdio"],
 			"rootMarkers": ["*.psd1", ".git"],
 			"enabled": true
+		},
+		"sql": {
+			"command": "sql-language-server",
+			"args": ["up", "--method", "stdio"],
+			"rootMarkers": [".sqllsrc.json", ".sqlfluff", ".sqruff", "sqls.yml", ".git"],
+			"enabled": true
+		},
+		"_comment_sql_alternative": "Alternatives: sqls — { \"command\": \"sqls\", \"args\": [] } or sqruff — { \"command\": \"sqruff\", \"args\": [\"lsp\"] }",
+		"postgres": {
+			"command": "postgres-language-server",
+			"args": ["lsp-proxy"],
+			"rootMarkers": ["postgres-language-server.jsonc", "postgrestools.jsonc", ".sqllsrc.json", ".sqlfluff", ".git"],
+			"enabled": true
 		}
 	}
 }

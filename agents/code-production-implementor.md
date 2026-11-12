@@ -36,7 +36,7 @@ permissions:
     - { tool: bash, match: "re:^dotnet\\s+((build|test|vstest|list|nuget\\s+list|tool\\s+list|workload\\s+list)\\b|format\\b[^;&|$`<>\\n]*\\s--verify-no-changes\\b|--(info|version|help|list-sdks|list-runtimes)\\b)(?:[^;&|$`<>\\n]|console;verbosity=(?:quiet|minimal|normal|detailed|diagnostic))*$", action: allow }
     - { tool: bash, match: "re:^(npm|pnpm)\\s+((test|t|tst|ls|list|outdated|audit|why|explain|view|info)\\b|pack\\b[^;&|$`<>\\n]*\\s--dry-run\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^bun\\s+((test|check|pm\\s+ls)\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^node\\s+((--experimental-strip-types\\s+)?(-c|--check)\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^node\\s+((--experimental-strip-types\\s+)?(-c|--check|--test)\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^go\\s+((build|test|vet|list|doc|env|version|help)\\b|mod\\s+(graph|verify|why)\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^gofmt\\s+(-l|-d)(\\s+-(l|d|e|s))*\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^cargo\\s+((check|build|test|bench|clippy|doc|metadata|tree|verify-project|pkgid|locate-project)\\b|fmt\\b[^;&|$`<>\\n]*\\s--check\\b|--(version|help|list)\\b|-(V|h)\\b)[^;&|$`<>\\n]*$", action: allow }
@@ -59,6 +59,8 @@ permissions:
     - { tool: bash, match: "re:^shellcheck\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^luac\\s+(-p\\b|-v\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^luacheck\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^sqlfluff\\s+(lint|parse|dialects|rules|version|--version|--help)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^sqruff\\s+(lint|info|--version|--help|-V|-h)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: ["re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI|ExecutionPolicy\\s+\\S+|EP\\s+\\S+)\\s+)*-(File|f)\\s+[^;&|$`<>\\n]+$", "re:^(?!.*(\\$\\(|\\$\\{))(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI|ExecutionPolicy\\s+\\S+|EP\\s+\\S+)\\s+)*-(Command|c)\\s+[^`<>\\n]+$"], action: ask }
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
     - { tool: bash, match: "re:^git\\s+(add|commit|push|pull|fetch|merge|rebase|cherry-pick|revert|reset|restore|checkout|switch|clean|rm|mv|stash|tag|branch|remote|config|apply|am|init|clone|worktree|submodule|notes|gc|prune)\\b", action: ask }
@@ -108,7 +110,7 @@ You implement production code. You NEVER touch test code.
 - **Invariant 1 — No-Edit-After-Verify**: Every `edit` or `write` tool call invalidates all prior verification runs. Verification commands and `lsp_diagnostics` MUST execute *after* the final `edit`/`write` call.
 - **Invariant 2 — Single-Command Bash Calls (No Shell Chaining)**: `bash` permissions deny `[;&|$`<>\n]`. Never chain commands with `&&`, `;`, `|`, or `2>&1`. Run each build/typecheck/syntax command as a separate direct `bash` call (or run multiple independent `bash` tool calls in parallel in the same turn).
 - **Invariant 3 — Mandatory Multi-Layer Verification on Every Touched File**:
-  1. **LSP Diagnostics Check**: Call `lsp_diagnostics` on every modified/created `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.cs`, `.sh`, `.bash`, `.zsh`, `.lua`, `.ps1`, `.psm1`, or `.psd1` file. If the LSP server binary is unavailable, fall back to the CLI compiler/typechecker below.
+  1. **LSP Diagnostics Check**: Call `lsp_diagnostics` on every modified/created `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.cs`, `.sh`, `.bash`, `.zsh`, `.lua`, `.ps1`, `.psm1`, `.psd1`, `.sql`, `.tsql`, `.ddl`, `.dml`, `.pgsql`, `.plpgsql`, or `.psql` file. If the LSP server binary is unavailable, fall back to the CLI compiler/typechecker below.
   2. **Compiler / Typecheck / Syntax Check** (must run at least one real compiler/syntax tool for the touched language):
      - TypeScript / JavaScript: `npx tsc --noEmit` (or `bun check`), or per-file `node --experimental-strip-types --check <file>` / `node --check <file>`.
      - C# / .NET: `dotnet build --no-restore` (or `dotnet build`).
@@ -116,6 +118,7 @@ You implement production code. You NEVER touch test code.
      - Bash / Shell: `bash -n <file>` or `sh -n <file>` (and `shellcheck <file>` if installed).
      - Lua: `luac -p <file>` or `luacheck <file>` (if installed).
      - PowerShell: `pwsh` / `powershell` parser check or `Invoke-ScriptAnalyzer` (if installed).
+     - SQL / Postgres: `sqruff lint <file>` or `sqlfluff lint <file>` / `sqlfluff parse <file>` (if installed).
      - Go: `go build ./...` and `go vet ./...`.
      - Rust: `cargo check`.
   3. **Import, Export & Call-Site Resolution Audit**: Verify every added/modified `import`/`export`/symbol reference resolves to an existing file and exported symbol (using `grep` or `lsp_definition` / `lsp_references`), and check callers when changing function signatures.

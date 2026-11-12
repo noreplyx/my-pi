@@ -36,7 +36,7 @@ permissions:
     - { tool: bash, match: "re:^dotnet\\s+((build|test|vstest|list|nuget\\s+list|tool\\s+list|workload\\s+list)\\b|format\\b[^;&|$`<>\\n]*\\s--verify-no-changes\\b|--(info|version|help|list-sdks|list-runtimes)\\b)(?:[^;&|$`<>\\n]|console;verbosity=(?:quiet|minimal|normal|detailed|diagnostic))*$", action: allow }
     - { tool: bash, match: "re:^(npm|pnpm)\\s+((test|t|tst|ls|list|outdated|audit|why|explain|view|info)\\b|pack\\b[^;&|$`<>\\n]*\\s--dry-run\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^bun\\s+((test|check|pm\\s+ls)\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^node\\s+((--experimental-strip-types\\s+)?(-c|--check)\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^node\\s+((--experimental-strip-types\\s+)?(-c|--check|--test)\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^go\\s+((build|test|vet|list|doc|env|version|help)\\b|mod\\s+(graph|verify|why)\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^gofmt\\s+(-l|-d)(\\s+-(l|d|e|s))*\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^cargo\\s+((check|build|test|bench|clippy|doc|metadata|tree|verify-project|pkgid|locate-project)\\b|fmt\\b[^;&|$`<>\\n]*\\s--check\\b|--(version|help|list)\\b|-(V|h)\\b)[^;&|$`<>\\n]*$", action: allow }

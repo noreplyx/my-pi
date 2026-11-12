@@ -14,7 +14,9 @@ export type SupportedLanguage =
 	| "bash"
 	| "shell"
 	| "lua"
-	| "powershell";
+	| "powershell"
+	| "sql"
+	| "postgres";
 
 export const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = [
 	"csharp",
@@ -25,7 +27,15 @@ export const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = [
 	"shell",
 	"lua",
 	"powershell",
+	"sql",
+	"postgres",
 ];
+
+export const CANONICAL_LANGUAGE_PAIR: Partial<Record<SupportedLanguage, SupportedLanguage>> = {
+	javascript: "typescript",
+	shell: "bash",
+	postgres: "sql",
+};
 
 export interface ServerConfig {
 	command: string;
@@ -91,6 +101,18 @@ export const DEFAULT_CONFIG: LspConfig = {
 			rootMarkers: ["*.psd1", ".git"],
 			enabled: true,
 		},
+		sql: {
+			command: "sql-language-server",
+			args: ["up", "--method", "stdio"],
+			rootMarkers: [".sqllsrc.json", ".sqlfluff", ".sqruff", "sqls.yml", ".git"],
+			enabled: true,
+		},
+		postgres: {
+			command: "postgres-language-server",
+			args: ["lsp-proxy"],
+			rootMarkers: ["postgres-language-server.jsonc", "postgrestools.jsonc", ".sqllsrc.json", ".sqlfluff", ".git"],
+			enabled: true,
+		},
 	},
 };
 
@@ -111,6 +133,10 @@ export const INSTALL_HINTS: Record<SupportedLanguage, string> = {
 		"Install Lua LSP: download `lua-language-server` from https://github.com/LuaLS/lua-language-server/releases or add `%LOCALAPPDATA%\\nvim-data\\mason\\bin` to PATH.",
 	powershell:
 		"Install PowerShell Editor Services: download PowerShellEditorServices release zip from https://github.com/PowerShell/PowerShellEditorServices/releases and expose a `powershell-editor-services` wrapper on PATH (or configure `servers.powershell` in `lsp.json` to invoke `powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"& '<path>/Start-EditorServices.ps1' -Stdio ...\"`).",
+	sql:
+		"Install SQL LSP: `npm i -g sql-language-server` (or configure `servers.sql` in `lsp.json` to use `sqls` from Mason/Go `{ \"command\": \"sqls\", \"args\": [] }` or `sqruff` `{ \"command\": \"sqruff\", \"args\": [\"lsp\"] }`).",
+	postgres:
+		"Install PostgreSQL LSP: `npm i -g @supabase-community/postgres-language-server` or download `postgres-language-server` from https://github.com/supabase-community/postgres-language-server/releases (invoked with `args: [\"lsp-proxy\"]`).",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -182,30 +208,50 @@ export interface FileLanguageInfo {
 }
 
 export function resolveFileLanguageInfo(filePath: string): FileLanguageInfo | undefined {
-	const base = path.basename(filePath).toLowerCase();
-	const ext = path.extname(filePath).toLowerCase();
-	if (ext === ".cs") return { language: "csharp", languageId: "csharp" };
-	if (ext === ".py" || ext === ".pyi") return { language: "python", languageId: "python" };
-	if (ext === ".tsx") return { language: "typescript", languageId: "typescriptreact" };
-	if (ext === ".ts" || ext === ".mts" || ext === ".cts") return { language: "typescript", languageId: "typescript" };
-	if (ext === ".jsx") return { language: "javascript", languageId: "javascriptreact" };
-	if (ext === ".js" || ext === ".mjs" || ext === ".cjs") return { language: "javascript", languageId: "javascript" };
-	if (ext === ".bash" || base === ".bashrc" || base === ".bash_profile" || base === ".bash_aliases") {
+	const lowercaseFileName = path.basename(filePath).toLowerCase();
+	const lowercaseExtension = path.extname(filePath).toLowerCase();
+	if (lowercaseExtension === ".cs") return { language: "csharp", languageId: "csharp" };
+	if (lowercaseExtension === ".py" || lowercaseExtension === ".pyi") return { language: "python", languageId: "python" };
+	if (lowercaseExtension === ".tsx") return { language: "typescript", languageId: "typescriptreact" };
+	if (lowercaseExtension === ".ts" || lowercaseExtension === ".mts" || lowercaseExtension === ".cts") {
+		return { language: "typescript", languageId: "typescript" };
+	}
+	if (lowercaseExtension === ".jsx") return { language: "javascript", languageId: "javascriptreact" };
+	if (lowercaseExtension === ".js" || lowercaseExtension === ".mjs" || lowercaseExtension === ".cjs") {
+		return { language: "javascript", languageId: "javascript" };
+	}
+	if (
+		lowercaseExtension === ".bash" ||
+		lowercaseFileName === ".bashrc" ||
+		lowercaseFileName === ".bash_profile" ||
+		lowercaseFileName === ".bash_aliases"
+	) {
 		return { language: "bash", languageId: "shellscript" };
 	}
 	if (
-		ext === ".sh" ||
-		ext === ".zsh" ||
-		base === ".zshrc" ||
-		base === ".zshenv" ||
-		base === ".zprofile" ||
-		base === ".profile"
+		lowercaseExtension === ".sh" ||
+		lowercaseExtension === ".zsh" ||
+		lowercaseFileName === ".zshrc" ||
+		lowercaseFileName === ".zshenv" ||
+		lowercaseFileName === ".zprofile" ||
+		lowercaseFileName === ".profile"
 	) {
 		return { language: "shell", languageId: "shellscript" };
 	}
-	if (ext === ".lua") return { language: "lua", languageId: "lua" };
-	if (ext === ".ps1" || ext === ".psm1" || ext === ".psd1") {
+	if (lowercaseExtension === ".lua") return { language: "lua", languageId: "lua" };
+	if (lowercaseExtension === ".ps1" || lowercaseExtension === ".psm1" || lowercaseExtension === ".psd1") {
 		return { language: "powershell", languageId: "powershell" };
+	}
+	if (lowercaseExtension === ".pgsql" || lowercaseExtension === ".plpgsql" || lowercaseExtension === ".psql") {
+		return { language: "postgres", languageId: "postgres" };
+	}
+	if (
+		lowercaseExtension === ".sql" ||
+		lowercaseExtension === ".tsql" ||
+		lowercaseExtension === ".ddl" ||
+		lowercaseExtension === ".dml"
+	) {
+		return { language: "sql", languageId: "sql" };
 	}
 	return undefined;
 }

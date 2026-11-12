@@ -1,6 +1,6 @@
 # LSP Extension
 
-Code intelligence for **C#**, **Python**, **TypeScript**, **JavaScript**, **Bash**, **Shell (`sh`/`zsh`)**, **Lua**, and **PowerShell** via stdio language servers. No new npm dependencies — only `node:child_process` + JSON-RPC framing.
+Code intelligence for **C#**, **Python**, **TypeScript**, **JavaScript**, **Bash**, **Shell (`sh`/`zsh`)**, **Lua**, **PowerShell**, **SQL**, and **PostgreSQL** via stdio language servers. No new npm dependencies — only `node:child_process` + JSON-RPC framing.
 
 ## Supported languages & defaults
 
@@ -14,6 +14,8 @@ Code intelligence for **C#**, **Python**, **TypeScript**, **JavaScript**, **Bash
 | `shell` | `.sh`, `.zsh`, `.zshrc`, `.zshenv`, `.zprofile`, `.profile` | `bash-language-server` | `["start"]` |
 | `lua` | `.lua` | `lua-language-server` | `[]` |
 | `powershell` | `.ps1`, `.psm1`, `.psd1` | `powershell-editor-services` | `["-Stdio"]` |
+| `sql` | `.sql`, `.tsql`, `.ddl`, `.dml` | `sql-language-server` | `["up", "--method", "stdio"]` |
+| `postgres` | `.pgsql`, `.plpgsql`, `.psql` | `postgres-language-server` | `["lsp-proxy"]` |
 
 ## Install language servers
 
@@ -49,9 +51,20 @@ npm i -g bash-language-server
 # PowerShell
 # Download PowerShellEditorServices from https://github.com/PowerShell/PowerShellEditorServices/releases
 # and expose a `powershell-editor-services` wrapper on PATH (supporting `-Stdio`).
+
+# SQL (generic SQL / T-SQL / DDL / DML)
+npm i -g sql-language-server
+# alternatives via lsp.json:
+# - sqls (Mason / Go): { "servers": { "sql": { "command": "sqls", "args": [] } } }
+# - sqruff: { "servers": { "sql": { "command": "sqruff", "args": ["lsp"] } } }
+
+# PostgreSQL / PLpgSQL
+npm i -g @supabase-community/postgres-language-server
+# or download `postgres-language-server` binary from
+# https://github.com/supabase-community/postgres-language-server/releases (uses `args: ["lsp-proxy"]`)
 ```
 
-Verify: `csharp-language-server --version`, `pylsp --version`, `typescript-language-server --version`, `bash-language-server --version`, `lua-language-server --version`.
+Verify: `csharp-language-server --version`, `pylsp --version`, `typescript-language-server --version`, `bash-language-server --version`, `lua-language-server --version`, `sql-language-server --version`, `postgres-language-server --version`.
 
 ## Configure
 
@@ -60,7 +73,7 @@ Copy `lsp.json.example` to either location (project wins):
 - `<extension-dir>/lsp.json` (beside `index.ts`)
 - `<cwd>/.pi/lsp.json`
 
-Shape: `{ autoStart?, servers: { csharp: { command, args, rootMarkers, enabled }, python: {...}, typescript: {...}, javascript: {...}, bash: {...}, shell: {...}, lua: {...}, powershell: {...} } }`.
+Shape: `{ autoStart?, servers: { csharp: { command, args, rootMarkers, enabled }, python: {...}, typescript: {...}, javascript: {...}, bash: {...}, shell: {...}, lua: {...}, powershell: {...}, sql: {...}, postgres: {...} } }`.
 Binaries are resolved on `PATH` (plus `%LOCALAPPDATA%\nvim-data\mason` fallback on Windows, with automatic `.exe`/`.cmd`/`.bat` resolution); missing ones produce fail-closed `isError` messages with the install hint above — never a throw.
 
 ## Use
@@ -69,7 +82,7 @@ Binaries are resolved on `PATH` (plus `%LOCALAPPDATA%\nvim-data\mason` fallback 
 pi --extension ~/.pi/agent/extensions/lsp
 # inside pi:
 /lsp-status    # stopped until first tool use (lazy per language+root)
-/lsp-restart [csharp|python|typescript|javascript|bash|shell|lua|powershell]
+/lsp-restart [csharp|python|typescript|javascript|bash|shell|lua|powershell|sql|postgres]
 /lsp-stop
 ```
 

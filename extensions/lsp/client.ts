@@ -23,6 +23,7 @@ export interface LspClientOptions {
 	rootUri: string;
 	rootPath: string;
 	env?: Record<string, string>;
+	spawnProcess?: typeof spawn;
 	onDiagnostics?: (uri: string, diagnostics: Diagnostic[]) => void;
 	onLog?: (message: string) => void;
 }
@@ -90,7 +91,7 @@ export class LspClient {
 			isWindowsBatchCommand && /\s/.test(this.options.command) && !this.options.command.startsWith('"')
 				? `"${this.options.command}"`
 				: this.options.command;
-		const proc = spawn(commandToSpawn, this.options.args, {
+		const proc = (this.options.spawnProcess ?? spawn)(commandToSpawn, this.options.args, {
 			cwd: this.options.rootPath,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],

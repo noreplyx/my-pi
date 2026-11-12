@@ -2,9 +2,11 @@
  * Lazily starts one LspClient per (language, project root).
  * Root detection walks up looking for language markers.
  */
+import type { spawn } from "node:child_process";
 import { existsSync, promises as fs, readdirSync } from "node:fs";
 import * as path from "node:path";
 import {
+	CANONICAL_LANGUAGE_PAIR,
 	INSTALL_HINTS,
 	resolveExecutableOnPath,
 	type LspConfig,
@@ -49,11 +51,19 @@ export type PathCheck = ExecutableAvailabilityCheck;
 export class LspManager {
 	private readonly clients = new Map<string, LspClient>();
 	private stoppingPromise: Promise<void> | undefined;
+	private config: LspConfig;
+	private readonly executableAvailabilityCheck?: ExecutableAvailabilityCheck;
+	private readonly spawnProcess?: typeof spawn;
 
 	constructor(
-		private config: LspConfig,
-		private readonly executableAvailabilityCheck?: ExecutableAvailabilityCheck,
-	) {}
+		config: LspConfig,
+		executableAvailabilityCheck?: ExecutableAvailabilityCheck,
+		spawnProcess?: typeof spawn,
+	) {
+		this.config = config;
+		this.executableAvailabilityCheck = executableAvailabilityCheck;
+		this.spawnProcess = spawnProcess;
+	}
 
 	setConfig(config: LspConfig): void {
 		this.config = config;
@@ -74,11 +84,9 @@ export class LspManager {
 	}
 
 	private canonicalLanguage(language: SupportedLanguage): SupportedLanguage {
-		if (language === "javascript" && this.hasMatchingCommandAndArgs("javascript", "typescript")) {
-			return "typescript";
-		}
-		if (language === "shell" && this.hasMatchingCommandAndArgs("shell", "bash")) {
-			return "bash";
+		const target = CANONICAL_LANGUAGE_PAIR[language];
+		if (target && this.hasMatchingCommandAndArgs(language, target)) {
+			return target;
 		}
 		return language;
 	}
@@ -127,6 +135,7 @@ export class LspManager {
 				rootUri: pathToUri(root),
 				rootPath: root,
 				env: server.env,
+				spawnProcess: this.spawnProcess,
 			});
 			this.clients.set(key, client);
 		}
