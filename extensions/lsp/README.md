@@ -1,6 +1,19 @@
 # LSP Extension
 
-Code intelligence for **C#**, **Python**, and **TypeScript/JavaScript** via stdio language servers. No new npm dependencies — only `node:child_process` + JSON-RPC framing.
+Code intelligence for **C#**, **Python**, **TypeScript**, **JavaScript**, **Bash**, **Shell (`sh`/`zsh`)**, **Lua**, and **PowerShell** via stdio language servers. No new npm dependencies — only `node:child_process` + JSON-RPC framing.
+
+## Supported languages & defaults
+
+| Language | File extensions / names | Default command | Default args |
+| --- | --- | --- | --- |
+| `csharp` | `.cs` | `csharp-language-server` | `[]` |
+| `python` | `.py`, `.pyi` | `pylsp` | `[]` |
+| `typescript` | `.ts`, `.tsx`, `.mts`, `.cts` | `typescript-language-server` | `["--stdio"]` |
+| `javascript` | `.js`, `.jsx`, `.mjs`, `.cjs` | `typescript-language-server` | `["--stdio"]` |
+| `bash` | `.bash`, `.bashrc`, `.bash_profile`, `.bash_aliases` | `bash-language-server` | `["start"]` |
+| `shell` | `.sh`, `.zsh`, `.zshrc`, `.zshenv`, `.zprofile`, `.profile` | `bash-language-server` | `["start"]` |
+| `lua` | `.lua` | `lua-language-server` | `[]` |
+| `powershell` | `.ps1`, `.psm1`, `.psd1` | `powershell-editor-services` | `["-Stdio"]` |
 
 ## Install language servers
 
@@ -23,9 +36,22 @@ pipx install python-lsp-server
 
 # TypeScript / JavaScript
 npm i -g typescript-language-server typescript
+
+# Bash / Shell (sh, bash, zsh)
+npm i -g bash-language-server
+# optional: install shellcheck and shfmt on PATH for richer diagnostics/formatting
+
+# Lua
+# Download from https://github.com/LuaLS/lua-language-server/releases
+# or on Windows with Neovim Mason installed, `%LOCALAPPDATA%\nvim-data\mason\bin`
+# (and `mason\packages\lua-language-server\bin`) is searched automatically as a fallback.
+
+# PowerShell
+# Download PowerShellEditorServices from https://github.com/PowerShell/PowerShellEditorServices/releases
+# and expose a `powershell-editor-services` wrapper on PATH (supporting `-Stdio`).
 ```
 
-Verify: `csharp-language-server --version`, `pylsp --version`, `typescript-language-server --version`.
+Verify: `csharp-language-server --version`, `pylsp --version`, `typescript-language-server --version`, `bash-language-server --version`, `lua-language-server --version`.
 
 ## Configure
 
@@ -34,8 +60,8 @@ Copy `lsp.json.example` to either location (project wins):
 - `<extension-dir>/lsp.json` (beside `index.ts`)
 - `<cwd>/.pi/lsp.json`
 
-Shape: `{ autoStart?, servers: { csharp: { command, args, rootMarkers, enabled }, python: {...}, typescript: {...} } }`.
-Binaries are resolved on `PATH`; missing ones produce fail-closed `isError` messages with the install hint above — never a throw.
+Shape: `{ autoStart?, servers: { csharp: { command, args, rootMarkers, enabled }, python: {...}, typescript: {...}, javascript: {...}, bash: {...}, shell: {...}, lua: {...}, powershell: {...} } }`.
+Binaries are resolved on `PATH` (plus `%LOCALAPPDATA%\nvim-data\mason` fallback on Windows, with automatic `.exe`/`.cmd`/`.bat` resolution); missing ones produce fail-closed `isError` messages with the install hint above — never a throw.
 
 ## Use
 
@@ -43,7 +69,7 @@ Binaries are resolved on `PATH`; missing ones produce fail-closed `isError` mess
 pi --extension ~/.pi/agent/extensions/lsp
 # inside pi:
 /lsp-status    # stopped until first tool use (lazy per language+root)
-/lsp-restart [csharp|python|typescript]
+/lsp-restart [csharp|python|typescript|javascript|bash|shell|lua|powershell]
 /lsp-stop
 ```
 

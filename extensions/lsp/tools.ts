@@ -17,20 +17,37 @@ const LanguageEnum = Type.Union([
 	Type.Literal("csharp"),
 	Type.Literal("python"),
 	Type.Literal("typescript"),
+	Type.Literal("javascript"),
+	Type.Literal("bash"),
+	Type.Literal("shell"),
+	Type.Literal("lua"),
+	Type.Literal("powershell"),
 ]);
 
 const LANGUAGE_INFERENCE_NOTE =
-	"`language` may be omitted when `file` has known extension (.cs/.py/.ts/.tsx/.js/.jsx/.mjs/.cjs); inferred automatically. If both given and disagree, the call fails.";
+	"`language` may be omitted when `file` has known extension (.cs/.py/.pyi/.ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.sh/.bash/.zsh/.lua/.ps1/.psm1/.psd1); inferred automatically. If both given and disagree, the call fails.";
 
 const OptionalLanguage = Type.Optional(
-	Type.Union([Type.Literal("csharp"), Type.Literal("python"), Type.Literal("typescript")], {
+	Type.Union([...LanguageEnum.anyOf], {
 		description: `Language server to use. ${LANGUAGE_INFERENCE_NOTE}`,
 	}),
 );
 
+function areLanguagesCompatible(a: SupportedLanguage, b: SupportedLanguage): boolean {
+	if (a === b) return true;
+	if ((a === "typescript" && b === "javascript") || (a === "javascript" && b === "typescript")) {
+		return true;
+	}
+	if ((a === "bash" && b === "shell") || (a === "shell" && b === "bash")) {
+		return true;
+	}
+	return false;
+}
+
 /**
  * STRICT auto-detection fallback: explicit wins only when it matches inference
- * (or when no inference is possible). Mismatches and uninferrable files are errors.
+ * (or belongs to the same compatible language family, or when no inference is possible).
+ * Mismatches and uninferrable files are errors.
  */
 export function resolveLanguage(
 	explicit: SupportedLanguage | undefined,
@@ -40,7 +57,7 @@ export function resolveLanguage(
 	| { error: string; inferred?: SupportedLanguage; explicit?: SupportedLanguage; file?: string } {
 	const inferred = fileAbs ? languageFromFile(fileAbs) : undefined;
 	if (explicit && inferred) {
-		if (explicit !== inferred) {
+		if (!areLanguagesCompatible(explicit, inferred)) {
 			return {
 				error: `Language mismatch: inferred ${inferred} but got ${explicit} for file ${fileAbs}; pass matching language or omit language to use inference.`,
 				inferred,
@@ -52,14 +69,15 @@ export function resolveLanguage(
 	}
 	if (explicit) return { language: explicit };
 	if (inferred) return { language: inferred };
+	const supportedList = SUPPORTED_LANGUAGES.join("|");
 	if (fileAbs) {
 		return {
-			error: `Cannot infer language from file ${fileAbs}; pass language explicitly: csharp|python|typescript`,
+			error: `Cannot infer language from file ${fileAbs}; pass language explicitly: ${supportedList}`,
 			file: fileAbs,
 		};
 	}
 	return {
-		error: `Cannot infer language: no file and no language provided; pass language explicitly: csharp|python|typescript`,
+		error: `Cannot infer language: no file and no language provided; pass language explicitly: ${supportedList}`,
 	};
 }
 
@@ -209,8 +227,7 @@ export function registerLspTools(pi: ExtensionAPI, manager: LspManager, getCwd: 
 	pi.registerTool({
 		name: "lsp_hover",
 		label: "LSP hover",
-		description:
-			"Hover type info at a 1-based line/character. Opens the file in the language server first. `language` may be omitted when `file` has known extension (.cs/.py/.ts/.tsx/.js/.jsx/.mjs/.cjs); inferred automatically. If both given and disagree, the call fails.",
+		description: `Hover type info at a 1-based line/character. Opens the file in the language server first. ${LANGUAGE_INFERENCE_NOTE}`,
 		parameters: PositionParams(),
 		annotations: { readOnlyHint: true },
 		outputSchema: Type.Object({ text: Type.String(), uri: Type.String() }),
@@ -238,8 +255,7 @@ export function registerLspTools(pi: ExtensionAPI, manager: LspManager, getCwd: 
 	pi.registerTool({
 		name: "lsp_definition",
 		label: "LSP definition",
-		description:
-			"Go-to-definition at a 1-based position. Returns 1-based locations. `language` may be omitted when `file` has known extension (.cs/.py/.ts/.tsx/.js/.jsx/.mjs/.cjs); inferred automatically. If both given and disagree, the call fails.",
+		description: `Go-to-definition at a 1-based position. Returns 1-based locations. ${LANGUAGE_INFERENCE_NOTE}`,
 		parameters: PositionParams(),
 		annotations: { readOnlyHint: true },
 		outputSchema: Type.Object({ locations: Type.Array(LocationSchema) }),
@@ -270,8 +286,7 @@ export function registerLspTools(pi: ExtensionAPI, manager: LspManager, getCwd: 
 	pi.registerTool({
 		name: "lsp_references",
 		label: "LSP references",
-		description:
-			"Find references at a 1-based position. Returns up to 50 1-based locations. `language` may be omitted when `file` has known extension (.cs/.py/.ts/.tsx/.js/.jsx/.mjs/.cjs); inferred automatically. If both given and disagree, the call fails.",
+		description: `Find references at a 1-based position. Returns up to 50 1-based locations. ${LANGUAGE_INFERENCE_NOTE}`,
 		parameters: PositionParams({
 			includeDeclaration: Type.Optional(Type.Boolean({ description: "Include the declaration itself" })),
 		}),
@@ -314,8 +329,7 @@ export function registerLspTools(pi: ExtensionAPI, manager: LspManager, getCwd: 
 	pi.registerTool({
 		name: "lsp_diagnostics",
 		label: "LSP diagnostics",
-		description:
-			"Cached publishDiagnostics for a file, or all files when file is omitted. `language` may be omitted when `file` has known extension (.cs/.py/.ts/.tsx/.js/.jsx/.mjs/.cjs); inferred automatically. If both given and disagree, the call fails.",
+		description: `Cached publishDiagnostics for a file, or all files when file is omitted. ${LANGUAGE_INFERENCE_NOTE}`,
 		parameters: Type.Object({
 			language: OptionalLanguage,
 			file: Type.Optional(Type.String({ description: "File path; omit for all open diagnostics" })),
@@ -383,8 +397,7 @@ export function registerLspTools(pi: ExtensionAPI, manager: LspManager, getCwd: 
 	pi.registerTool({
 		name: "lsp_document_symbols",
 		label: "LSP document symbols",
-		description:
-			"Outline symbols for a file (classes, functions, methods). `language` may be omitted when `file` has known extension (.cs/.py/.ts/.tsx/.js/.jsx/.mjs/.cjs); inferred automatically. If both given and disagree, the call fails.",
+		description: `Outline symbols for a file (classes, functions, methods). ${LANGUAGE_INFERENCE_NOTE}`,
 		parameters: Type.Object({ language: OptionalLanguage, file: Type.String() }),
 		annotations: { readOnlyHint: true },
 		outputSchema: Type.Object({ symbols: Type.Array(Type.Unknown()) }),
@@ -449,6 +462,4 @@ export function registerLspTools(pi: ExtensionAPI, manager: LspManager, getCwd: 
 			}
 		},
 	});
-
-	void SUPPORTED_LANGUAGES;
 }

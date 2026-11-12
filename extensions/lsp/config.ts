@@ -6,9 +6,26 @@ import { constants } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
 import * as path from "node:path";
 
-export type SupportedLanguage = "csharp" | "python" | "typescript";
+export type SupportedLanguage =
+	| "csharp"
+	| "python"
+	| "typescript"
+	| "javascript"
+	| "bash"
+	| "shell"
+	| "lua"
+	| "powershell";
 
-export const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = ["csharp", "python", "typescript"];
+export const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = [
+	"csharp",
+	"python",
+	"typescript",
+	"javascript",
+	"bash",
+	"shell",
+	"lua",
+	"powershell",
+];
 
 export interface ServerConfig {
 	command: string;
@@ -44,6 +61,36 @@ export const DEFAULT_CONFIG: LspConfig = {
 			rootMarkers: ["tsconfig.json", "package.json", "jsconfig.json"],
 			enabled: true,
 		},
+		javascript: {
+			command: "typescript-language-server",
+			args: ["--stdio"],
+			rootMarkers: ["package.json", "jsconfig.json", "tsconfig.json", ".git"],
+			enabled: true,
+		},
+		bash: {
+			command: "bash-language-server",
+			args: ["start"],
+			rootMarkers: [".shellcheckrc", ".git"],
+			enabled: true,
+		},
+		shell: {
+			command: "bash-language-server",
+			args: ["start"],
+			rootMarkers: [".shellcheckrc", ".git"],
+			enabled: true,
+		},
+		lua: {
+			command: "lua-language-server",
+			args: [],
+			rootMarkers: [".luarc.json", ".luarc.jsonc", ".luacheckrc", "stylua.toml", ".stylua.toml", ".git"],
+			enabled: true,
+		},
+		powershell: {
+			command: "powershell-editor-services",
+			args: ["-Stdio"],
+			rootMarkers: ["*.psd1", ".git"],
+			enabled: true,
+		},
 	},
 };
 
@@ -54,6 +101,16 @@ export const INSTALL_HINTS: Record<SupportedLanguage, string> = {
 		"Install Python: `pipx install python-lsp-server` (alt: `npm i -g pyright` + `pyright-langserver --stdio`).",
 	typescript:
 		"Install TypeScript: `npm i -g typescript-language-server typescript`.",
+	javascript:
+		"Install JavaScript LSP: `npm i -g typescript-language-server typescript` (or use Mason `vtsls --stdio`).",
+	bash:
+		"Install Bash LSP: `npm i -g bash-language-server` (optional: install `shellcheck` and `shfmt` on PATH for richer diagnostics/formatting).",
+	shell:
+		"Install Shell LSP: `npm i -g bash-language-server` (supports sh/bash/zsh; optional: `shellcheck` and `shfmt` on PATH).",
+	lua:
+		"Install Lua LSP: download `lua-language-server` from https://github.com/LuaLS/lua-language-server/releases or add `%LOCALAPPDATA%\\nvim-data\\mason\\bin` to PATH.",
+	powershell:
+		"Install PowerShell Editor Services: download PowerShellEditorServices release zip from https://github.com/PowerShell/PowerShellEditorServices/releases and expose a `powershell-editor-services` wrapper on PATH (or configure `servers.powershell` in `lsp.json` to invoke `powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"& '<path>/Start-EditorServices.ps1' -Stdio ...\"`).",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -119,23 +176,42 @@ export async function loadLspConfig(
 	return { config, sources, warnings };
 }
 
-export function languageFromFile(filePath: string): SupportedLanguage | undefined {
+export interface FileLanguageInfo {
+	language: SupportedLanguage;
+	languageId: string;
+}
+
+export function resolveFileLanguageInfo(filePath: string): FileLanguageInfo | undefined {
+	const base = path.basename(filePath).toLowerCase();
 	const ext = path.extname(filePath).toLowerCase();
-	if (ext === ".cs") return "csharp";
-	if (ext === ".py" || ext === ".pyi") return "python";
+	if (ext === ".cs") return { language: "csharp", languageId: "csharp" };
+	if (ext === ".py" || ext === ".pyi") return { language: "python", languageId: "python" };
+	if (ext === ".tsx") return { language: "typescript", languageId: "typescriptreact" };
+	if (ext === ".ts" || ext === ".mts" || ext === ".cts") return { language: "typescript", languageId: "typescript" };
+	if (ext === ".jsx") return { language: "javascript", languageId: "javascriptreact" };
+	if (ext === ".js" || ext === ".mjs" || ext === ".cjs") return { language: "javascript", languageId: "javascript" };
+	if (ext === ".bash" || base === ".bashrc" || base === ".bash_profile" || base === ".bash_aliases") {
+		return { language: "bash", languageId: "shellscript" };
+	}
 	if (
-		ext === ".ts" ||
-		ext === ".tsx" ||
-		ext === ".js" ||
-		ext === ".jsx" ||
-		ext === ".mjs" ||
-		ext === ".cjs" ||
-		ext === ".mts" ||
-		ext === ".cts"
+		ext === ".sh" ||
+		ext === ".zsh" ||
+		base === ".zshrc" ||
+		base === ".zshenv" ||
+		base === ".zprofile" ||
+		base === ".profile"
 	) {
-		return "typescript";
+		return { language: "shell", languageId: "shellscript" };
+	}
+	if (ext === ".lua") return { language: "lua", languageId: "lua" };
+	if (ext === ".ps1" || ext === ".psm1" || ext === ".psd1") {
+		return { language: "powershell", languageId: "powershell" };
 	}
 	return undefined;
+}
+
+export function languageFromFile(filePath: string): SupportedLanguage | undefined {
+	return resolveFileLanguageInfo(filePath)?.language;
 }
 
 async function isExecutableFile(file: string): Promise<boolean> {
@@ -147,21 +223,35 @@ async function isExecutableFile(file: string): Promise<boolean> {
 	}
 }
 
-export function isExecutableOnPath(command: string): Promise<boolean> {
+export async function resolveExecutableOnPath(command: string): Promise<string | undefined> {
+	const executableExtensions = process.platform === "win32" ? ["", ".exe", ".cmd", ".bat"] : [""];
 	if (command.includes("/") || command.includes("\\")) {
-		return isExecutableFile(command);
-	}
-	const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-	const names =
-		process.platform === "win32" ? [command, `${command}.exe`, `${command}.cmd`] : [command];
-	return (async () => {
-		for (const dir of dirs) {
-			for (const name of names) {
-				if (await isExecutableFile(path.join(dir, name))) return true;
-			}
+		for (const ext of executableExtensions) {
+			const candidate = `${command}${ext}`;
+			if (await isExecutableFile(candidate)) return candidate;
 		}
-		return false;
-	})();
+		return undefined;
+	}
+	const pathDirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+	const fallbackDirs: string[] = [];
+	if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+		const masonRoot = path.join(process.env.LOCALAPPDATA, "nvim-data", "mason");
+		fallbackDirs.push(
+			path.join(masonRoot, "packages", command, "bin"),
+			path.join(masonRoot, "bin"),
+		);
+	}
+	for (const dir of [...pathDirs, ...fallbackDirs]) {
+		for (const ext of executableExtensions) {
+			const candidate = path.join(dir, `${command}${ext}`);
+			if (await isExecutableFile(candidate)) return candidate;
+		}
+	}
+	return undefined;
+}
+
+export async function isExecutableOnPath(command: string): Promise<boolean> {
+	return (await resolveExecutableOnPath(command)) !== undefined;
 }
 
 /** Fail-closed helper: which enabled servers have a missing binary? */

@@ -4,7 +4,12 @@
  */
 import { existsSync, promises as fs, readdirSync } from "node:fs";
 import * as path from "node:path";
-import { INSTALL_HINTS, isExecutableOnPath, type LspConfig, type SupportedLanguage } from "./config.js";
+import {
+	INSTALL_HINTS,
+	resolveExecutableOnPath,
+	type LspConfig,
+	type SupportedLanguage,
+} from "./config.js";
 import { LspClient, pathToUri } from "./client.js";
 
 function markerMatches(dir: string, marker: string): boolean {
@@ -38,11 +43,17 @@ export interface ClientStatus {
 	diagnosticUris: number;
 }
 
+export type ExecutableAvailabilityCheck = (command: string) => Promise<boolean>;
+export type PathCheck = ExecutableAvailabilityCheck;
+
 export class LspManager {
 	private readonly clients = new Map<string, LspClient>();
 	private stoppingPromise: Promise<void> | undefined;
 
-	constructor(private config: LspConfig) {}
+	constructor(
+		private config: LspConfig,
+		private readonly executableAvailabilityCheck?: ExecutableAvailabilityCheck,
+	) {}
 
 	setConfig(config: LspConfig): void {
 		this.config = config;
@@ -52,12 +63,33 @@ export class LspManager {
 		return this.config;
 	}
 
+	private hasMatchingCommandAndArgs(first: SupportedLanguage, second: SupportedLanguage): boolean {
+		const firstServer = this.config.servers[first];
+		const secondServer = this.config.servers[second];
+		return (
+			firstServer.command === secondServer.command &&
+			firstServer.args.length === secondServer.args.length &&
+			firstServer.args.every((arg, index) => arg === secondServer.args[index])
+		);
+	}
+
+	private canonicalLanguage(language: SupportedLanguage): SupportedLanguage {
+		if (language === "javascript" && this.hasMatchingCommandAndArgs("javascript", "typescript")) {
+			return "typescript";
+		}
+		if (language === "shell" && this.hasMatchingCommandAndArgs("shell", "bash")) {
+			return "bash";
+		}
+		return language;
+	}
+
 	private key(language: SupportedLanguage, root: string): string {
-		return `${language}:${root}`;
+		return `${this.canonicalLanguage(language)}:${root}`;
 	}
 
 	rootFor(language: SupportedLanguage, filePath: string): string {
-		return findRoot(filePath, this.config.servers[language].rootMarkers);
+		const canonical = this.canonicalLanguage(language);
+		return findRoot(filePath, this.config.servers[canonical].rootMarkers);
 	}
 
 	/** Lazy per (lang, root). Throws a fail-closed error when disabled or binary missing. */
@@ -72,8 +104,17 @@ export class LspManager {
 			throw new Error(`LSP for ${language} is disabled in lsp.json (servers.${language}.enabled=false).`);
 		}
 		if (signal?.aborted) throw new Error("aborted");
-		if (!(await isExecutableOnPath(server.command))) {
-			throw new Error(`${server.command} not found on PATH. ${INSTALL_HINTS[language]}`);
+		let resolvedCommand: string | undefined;
+		if (this.executableAvailabilityCheck) {
+			if (!(await this.executableAvailabilityCheck(server.command))) {
+				throw new Error(`${server.command} not found on PATH. ${INSTALL_HINTS[language]}`);
+			}
+			resolvedCommand = (await resolveExecutableOnPath(server.command)) ?? server.command;
+		} else {
+			resolvedCommand = await resolveExecutableOnPath(server.command);
+			if (!resolvedCommand) {
+				throw new Error(`${server.command} not found on PATH. ${INSTALL_HINTS[language]}`);
+			}
 		}
 		if (signal?.aborted) throw new Error("aborted");
 		const root = this.rootFor(language, filePath);
@@ -81,7 +122,7 @@ export class LspManager {
 		let client = this.clients.get(key);
 		if (!client) {
 			client = new LspClient({
-				command: server.command,
+				command: resolvedCommand,
 				args: server.args,
 				rootUri: pathToUri(root),
 				rootPath: root,
@@ -116,8 +157,12 @@ export class LspManager {
 	}
 
 	async restart(language?: SupportedLanguage): Promise<void> {
+		const canonicalTarget = language ? this.canonicalLanguage(language) : undefined;
 		const targets = [...this.clients.entries()].filter(
-			([key]) => !language || key.startsWith(`${language}:`),
+			([key]) =>
+				!language ||
+				key.startsWith(`${language}:`) ||
+				(canonicalTarget !== undefined && key.startsWith(`${canonicalTarget}:`)),
 		);
 		await Promise.all(
 			targets.map(async ([key, client]) => {

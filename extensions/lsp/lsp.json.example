@@ -19,6 +19,36 @@
 			"args": ["--stdio"],
 			"rootMarkers": ["tsconfig.json", "package.json", "jsconfig.json"],
 			"enabled": true
+		},
+		"javascript": {
+			"command": "typescript-language-server",
+			"args": ["--stdio"],
+			"rootMarkers": ["package.json", "jsconfig.json", "tsconfig.json", ".git"],
+			"enabled": true
+		},
+		"bash": {
+			"command": "bash-language-server",
+			"args": ["start"],
+			"rootMarkers": [".shellcheckrc", ".git"],
+			"enabled": true
+		},
+		"shell": {
+			"command": "bash-language-server",
+			"args": ["start"],
+			"rootMarkers": [".shellcheckrc", ".git"],
+			"enabled": true
+		},
+		"lua": {
+			"command": "lua-language-server",
+			"args": [],
+			"rootMarkers": [".luarc.json", ".luarc.jsonc", ".luacheckrc", "stylua.toml", ".stylua.toml", ".git"],
+			"enabled": true
+		},
+		"powershell": {
+			"command": "powershell-editor-services",
+			"args": ["-Stdio"],
+			"rootMarkers": ["*.psd1", ".git"],
+			"enabled": true
 		}
 	}
 }

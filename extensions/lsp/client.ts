@@ -6,6 +6,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { resolveFileLanguageInfo } from "./config.js";
 import { encodeMessage, LspFraming, PendingRequests } from "./protocol.js";
 
 export interface Diagnostic {
@@ -83,11 +84,18 @@ export class LspClient {
 	start(): void {
 		if (this.proc) return;
 		this.stopped = false;
-		const proc = spawn(this.options.command, this.options.args, {
+		const isWindowsBatchCommand =
+			process.platform === "win32" && /\.(cmd|bat)$/i.test(this.options.command);
+		const commandToSpawn =
+			isWindowsBatchCommand && /\s/.test(this.options.command) && !this.options.command.startsWith('"')
+				? `"${this.options.command}"`
+				: this.options.command;
+		const proc = spawn(commandToSpawn, this.options.args, {
 			cwd: this.options.rootPath,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
+			...(isWindowsBatchCommand ? { shell: true } : {}),
 		});
 		this.proc = proc;
 		proc.stdin?.on("error", (err) => {
@@ -206,10 +214,7 @@ export class LspClient {
 	}
 
 	languageIdFor(filePath: string): string {
-		const lower = filePath.toLowerCase();
-		if (lower.endsWith(".cs")) return "csharp";
-		if (lower.endsWith(".py")) return "python";
-		return "typescript";
+		return resolveFileLanguageInfo(filePath)?.languageId ?? "typescript";
 	}
 
 	async ensureOpen(filePath: string, text: string): Promise<string> {

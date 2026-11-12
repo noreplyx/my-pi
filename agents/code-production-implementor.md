@@ -55,6 +55,10 @@ permissions:
     - { tool: bash, match: "re:^(npx|bunx)\\s+(pyright\\b|vitest\\s+(run|list)\\b|jest\\b|--version\\b|-v\\b|--help\\b|-h\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(--version|--help|-v|-h|-Version|-Help)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI)\\s+)*-(Command|c)\\s+[\"']?\\s*(Get-(Command|ChildItem|Content|Item|ItemProperty|Location|Process|Service|CimInstance|Date|FileHash)|Select-(String|Object)|Test-Path|Resolve-Path|Measure-Object|Where-Object|Invoke-Pester)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^(bash|sh)\\s+(-n\\b|--version\\b|--help\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^shellcheck\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^luac\\s+(-p\\b|-v\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^luacheck\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: ["re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI|ExecutionPolicy\\s+\\S+|EP\\s+\\S+)\\s+)*-(File|f)\\s+[^;&|$`<>\\n]+$", "re:^(?!.*(\\$\\(|\\$\\{))(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI|ExecutionPolicy\\s+\\S+|EP\\s+\\S+)\\s+)*-(Command|c)\\s+[^`<>\\n]+$"], action: ask }
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
     - { tool: bash, match: "re:^git\\s+(add|commit|push|pull|fetch|merge|rebase|cherry-pick|revert|reset|restore|checkout|switch|clean|rm|mv|stash|tag|branch|remote|config|apply|am|init|clone|worktree|submodule|notes|gc|prune)\\b", action: ask }
@@ -104,11 +108,14 @@ You implement production code. You NEVER touch test code.
 - **Invariant 1 — No-Edit-After-Verify**: Every `edit` or `write` tool call invalidates all prior verification runs. Verification commands and `lsp_diagnostics` MUST execute *after* the final `edit`/`write` call.
 - **Invariant 2 — Single-Command Bash Calls (No Shell Chaining)**: `bash` permissions deny `[;&|$`<>\n]`. Never chain commands with `&&`, `;`, `|`, or `2>&1`. Run each build/typecheck/syntax command as a separate direct `bash` call (or run multiple independent `bash` tool calls in parallel in the same turn).
 - **Invariant 3 — Mandatory Multi-Layer Verification on Every Touched File**:
-  1. **LSP Diagnostics Check**: Call `lsp_diagnostics` on every modified/created `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, or `.cs` file. If the LSP server binary is unavailable, fall back to the CLI compiler/typechecker below.
+  1. **LSP Diagnostics Check**: Call `lsp_diagnostics` on every modified/created `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.cs`, `.sh`, `.bash`, `.zsh`, `.lua`, `.ps1`, `.psm1`, or `.psd1` file. If the LSP server binary is unavailable, fall back to the CLI compiler/typechecker below.
   2. **Compiler / Typecheck / Syntax Check** (must run at least one real compiler/syntax tool for the touched language):
      - TypeScript / JavaScript: `npx tsc --noEmit` (or `bun check`), or per-file `node --experimental-strip-types --check <file>` / `node --check <file>`.
      - C# / .NET: `dotnet build --no-restore` (or `dotnet build`).
      - Python: `python -m py_compile <file>` (or `mypy` / `pyright` / `ruff check`).
+     - Bash / Shell: `bash -n <file>` or `sh -n <file>` (and `shellcheck <file>` if installed).
+     - Lua: `luac -p <file>` or `luacheck <file>` (if installed).
+     - PowerShell: `pwsh` / `powershell` parser check or `Invoke-ScriptAnalyzer` (if installed).
      - Go: `go build ./...` and `go vet ./...`.
      - Rust: `cargo check`.
   3. **Import, Export & Call-Site Resolution Audit**: Verify every added/modified `import`/`export`/symbol reference resolves to an existing file and exported symbol (using `grep` or `lsp_definition` / `lsp_references`), and check callers when changing function signatures.

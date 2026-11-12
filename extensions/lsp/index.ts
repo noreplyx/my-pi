@@ -1,5 +1,5 @@
 /**
- * LSP extension: C#, Python, TypeScript/JavaScript via stdio language servers.
+ * LSP extension: C#, Python, TypeScript, JavaScript, Bash, Shell, Lua, and PowerShell via stdio language servers.
  * Factory only registers capabilities — no processes spawn until a tool
  * runs (or autoStart warms them on session_start).
  */
@@ -52,12 +52,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		},
 	});
 
+	const languageChoices = SUPPORTED_LANGUAGES.join("|");
 	pi.registerCommand("lsp-restart", {
-		description: "Restart LSP servers: /lsp-restart [csharp|python|typescript]",
+		description: `Restart LSP servers: /lsp-restart [${languageChoices}]`,
 		handler: async (args, ctx) => {
 			const lang = args.trim().toLowerCase();
 			if (lang && !isSupportedLanguage(lang)) {
-				ctx.ui.notify("Usage: /lsp-restart [csharp|python|typescript]", "warning");
+				ctx.ui.notify(`Usage: /lsp-restart [${languageChoices}]`, "warning");
 				return;
 			}
 			await manager.restart(lang || undefined);
