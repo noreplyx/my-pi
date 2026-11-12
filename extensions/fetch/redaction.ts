@@ -3,6 +3,17 @@
  *
  * Kept free of `permissions` imports so both `extensions/fetch/*` and `extensions/permissions/*`
  * can import from this leaf module without circular dependencies.
+ *
+ * RAW vs REDACTED URL CONTRACT (security boundary):
+ * - `rawForMatch()` returns the merged request URL with secrets INTACT. It is
+ *   for permission-rule *matching* only: rules must see the real target, or a
+ *   `deny` on a secret-bearing URL would silently never match (fail-open).
+ *   Raw URLs live in memory only — NEVER pass them to display, audit, or logs.
+ * - `redactForDisplay()` (aka `resolveRedactedRequestUrl`) returns the same URL
+ *   with credentials / sensitive query keys / sensitive fragments replaced by
+ *   `[REDACTED]`. It is for prompts, `describeCall`, audit lines, and exec logs.
+ * Matching MUST use raw, display/audit MUST use redacted. See
+ * `extensions/permissions/loader.ts` (`buildTargets` vs `displayTarget`).
  */
 
 const SENSITIVE_HEADER_EXACT = new Set([
@@ -166,6 +177,12 @@ export function buildRequestUrl(
 
 /**
  * Canonical helper to merge `query` parameters into `rawUrl` and return a secret-redacted URL string.
+ *
+ * DISPLAY-ONLY: use the result for prompts, `describeCall`, audit lines, and
+ * exec logs. NEVER use it for permission-rule matching (a redacted secret
+ * would make `deny` rules on that secret silently never match) — use
+ * {@link rawForMatch} for matching. Kept under its historic name for
+ * compatibility; {@link redactForDisplay} is the contract alias.
  */
 export function resolveRedactedRequestUrl(rawUrl: unknown, query?: unknown): string {
   if (typeof rawUrl !== "string" || !rawUrl) return "";
@@ -175,6 +192,41 @@ export function resolveRedactedRequestUrl(rawUrl: unknown, query?: unknown): str
       : undefined;
   const built = buildRequestUrl(rawUrl, queryRecord);
   return built.ok && built.url ? redactUrl(built.url.toString()) : redactUrl(rawUrl);
+}
+
+/**
+ * Merge `query` parameters into `rawUrl` and return the RAW request URL
+ * string with secrets intact — for permission-rule MATCHING only.
+ *
+ * Raw output must stay in memory (match candidates, `evaluate`) and MUST
+ * NEVER reach display, audit, or logs; use {@link redactForDisplay} there.
+ * Returns `""` for missing input; unparseable input falls back to the
+ * trimmed raw string so substring rules can still match it. Never throws.
+ */
+export function rawForMatch(rawUrl: unknown, query?: unknown): string {
+  if (typeof rawUrl !== "string" || !rawUrl) return "";
+  const queryRecord =
+    typeof query === "object" && query !== null && !Array.isArray(query)
+      ? (query as Record<string, string | number | boolean>)
+      : undefined;
+  try {
+    const built = buildRequestUrl(rawUrl, queryRecord);
+    if (built.ok && built.url) return built.url.toString();
+  } catch {
+    // fall through to the trimmed fallback below
+  }
+  return rawUrl.trim();
+}
+
+/**
+ * Merge `query` parameters into `rawUrl` and return the secret-REDACTED URL
+ * string — for DISPLAY and AUDIT only (prompts, `describeCall`, log lines).
+ *
+ * Contract alias of {@link resolveRedactedRequestUrl}. NEVER use redacted
+ * output for permission-rule matching — use {@link rawForMatch} instead.
+ */
+export function redactForDisplay(rawUrl: unknown, query?: unknown): string {
+  return resolveRedactedRequestUrl(rawUrl, query);
 }
 
 /**

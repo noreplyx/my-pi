@@ -396,9 +396,16 @@ export async function runSingleAgent(
 						qTimer = setTimeout(() => ctrl.abort(), Math.floor(questionTimeoutMs));
 					}
 					try {
+						// Preserve the reserved `permissionPrompt` marker verbatim for
+						// nested forwarding (child → this parent → grandparent UI):
+						// pi-core may strip it, but never drop it here.
+						const fwdMarker =
+							(req as { permissionPrompt?: unknown }).permissionPrompt !== undefined
+								? { permissionPrompt: (req as { permissionPrompt?: unknown }).permissionPrompt }
+								: {};
 						if (method === "select") {
 							const options = Array.isArray(req.options) ? req.options.filter((o: unknown) => typeof o === "string").slice(0, 20) : [];
-							const picked = await parentUI.select(title, options, { signal: ctrl.signal });
+							const picked = await parentUI.select(title, options, { signal: ctrl.signal, ...fwdMarker } as any);
 							// Only "Allow for this session" is memoized. "Allow
 							// once", Deny variants, and dismissals re-prompt next time.
 							if (permissionShaped && permissionKey && picked === FORWARDED_SESSION_VALUE) {
@@ -410,7 +417,7 @@ export async function runSingleAgent(
 								safeWriteStdin(proc, { type: "extension_ui_response", id, value: picked });
 							}
 						} else if (method === "confirm") {
-							const ok = await parentUI.confirm(title, String(req.message ?? "").slice(0, 2000), { signal: ctrl.signal });
+							const ok = await parentUI.confirm(title, String(req.message ?? "").slice(0, 2000), { signal: ctrl.signal, ...fwdMarker } as any);
 							safeWriteStdin(proc, { type: "extension_ui_response", id, confirmed: ok });
 						} else {
 							const text = await parentUI.input(title, typeof req.placeholder === "string" ? req.placeholder : undefined, {

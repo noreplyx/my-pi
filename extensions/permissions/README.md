@@ -11,7 +11,7 @@ governed by `agents/main.md`.
 |---|---|
 | `agents/<name>.md` frontmatter `permissions:` | The agent's entire policy (no global fallback) |
 | `agents/main.md` | Policy for the main session |
-| `~/.pi/agent/permissions/audit.log` | Append-only decision log |
+| `~/.pi/agent/permissions/audit.log` | Best-effort decision log (rotates to `audit.log.1` at ~1 MiB; see below) |
 
 ## Rule shape
 
@@ -41,9 +41,17 @@ governed by `agents/main.md`.
   the agent in the denial). Dismissing or leaving the feedback empty denies
   without feedback; feedback is trimmed and capped (~500 chars). The legacy
   confirm fallback (no `select` support) stays binary allow/deny with no
-  feedback step. Every dialog title
-  shows a one-line summary — `<action> <path>` with cwd-relative paths
-  (`Allow write src/foo.txt?`), short `bash` commands in full
+  feedback step. Every dialog title carries a fixed `Permissions (…):`
+  prefix plus rule provenance — `Permissions (agent rule #2 · reviewer):
+  Allow write src/foo.txt?` — so each choice shows what matched, which
+  agent policy decided, and (for chained shell) which segment. `select()`
+  has no message slot, so the full `Matched <where> + Agent + chain`
+  context lives in the title; titles are single-line (the swarm summary
+  exemption notwithstanding) and capped (~500 chars, trailing `?` kept)
+  so model-controlled input cannot spoof extra lines or fake provenance.
+  The `Permissions:` prefix also keeps these dialogs structurally
+  distinguishable from plain `ask_user` selects for parent-side
+  forwarded-permission detection (see subagent README). Summaries show
   (long multi-step lines collapse to `first-step … (+N more)`),
   `grep <path> "<pattern>"` for searches, `subagent <agent>
   "<task…>"` (single), `parallel (n tasks)`, or `swarm (n workers)` for delegated work, and `key=value` pairs for anything else. Titles are capped
@@ -154,8 +162,7 @@ is actually invoked (and stays retracted in `/permissions-status`).
 R2 (unknown-tool) is scoped to the active agent only
 (`PI_AGENT_FILE` → `PI_AGENT_NAME` → `agents/main.md`; see
 `resolveActiveAgentFileLabel` in `index.ts`, injectable `env` param for
-tests; `resolveActiveAgentLabel` remains as a deprecated alias). Matching
-is tolerant (exact, basename, or `/`- (or `\`-) guarded suffix — so absolute-path or
+tests; `resolveActiveAgentLabel` remains as a deprecated alias). Matching is tolerant (exact or basename — so absolute-path or
 different cwd-relative forms still match) via `isActiveAgentFile` in
 `validate.ts`, driven by `ValidateOptions.scopeUnknownToolCheckToActive` +
 `activeFileLabel` (`scopeR2ToActive`/`activeLabel` remain as deprecated
@@ -168,3 +175,34 @@ typo in the active agent (e.g. `wriet`) still warns, still notifies at
 startup, and still retracts once the tool is observed at runtime.
 Enforcement is unaffected (loader/matcher fail-closed semantics
 unchanged, and R2 is reporting-only).
+
+## Display vs audit path invariant
+
+Prompts may show friendly summaries — cwd-relative paths (`src/foo.txt`),
+`~` for home, `first-step … (+N more)` for long shell lines, redacted
+fetch URLs — but everything persisted to `audit.log` is canonical:
+absolute paths for file tools (via `displayTarget` in `loader.ts`) and
+secret-redacted URLs for `fetch` (via `redactForDisplay`). Raw secrets
+(the real URL, raw JSON args) exist only as in-memory match candidates
+(`buildTargets`/`evaluate`); they are never displayed, notified, or
+logged. Rule `match` patterns therefore evaluate against RAW values — a
+`deny` on a secret-bearing URL still matches — while the log only ever
+sees the redacted form.
+
+## Audit log
+
+`~/.pi/agent/permissions/audit.log` records every allow/deny decision
+with agent identity, tool, canonical target, rule provenance (`via=`),
+chain segment, dialog title, and (for deny-with-feedback) capped feedback.
+Agent names and tool names are sanitized (CR/LF stripped, JSON-quoted)
+so crafted values cannot inject log lines; targets are JSON-quoted and
+capped at 500 chars. Writes are best-effort: a failed write warns on
+stderr (never stdout, never throws, never blocks the tool call).
+Rotation: at ~1 MiB the log rotates to `audit.log.1` (rotate, never
+truncate, inside the file-mutation queue) — one rotated copy is kept, so
+the family caps at ~2 MiB.
+
+The log is best-effort plaintext for debugging and review: tamper-evident,
+NOT tamper-proof. When in doubt, deny and log (default-deny): `ask`
+without a UI denies, dismissed dialogs deny, and failed confirmations
+deny.

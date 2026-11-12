@@ -28,7 +28,7 @@ import {
 	type ValidatedConfig,
 } from "./schema.ts";
 import { normalizeMcpServerName } from "./validate.ts";
-import { redactFetchArgsSummary, resolveRedactedRequestUrl } from "../fetch/redaction.ts";
+import { rawForMatch as rawFetchUrlForMatch, redactForDisplay as redactedFetchUrlForDisplay } from "../fetch/redaction.ts";
 
 export interface EvalResult {
 	action: PermissionAction;
@@ -338,8 +338,14 @@ export function isEmptyPathTarget(toolName: string, input: Record<string, unknow
 }
 
 /**
- * Build match candidates for a tool call. First entry is the primary target
- * (used for display); matching succeeds if ANY candidate matches.
+ * Build match candidates for a tool call. Matching succeeds if ANY
+ * candidate matches.
+ *
+ * RAW match path: candidates carry secrets INTACT (notably `fetch` — the
+ * real URL and raw JSON args), in memory only. A `deny` on a secret-bearing
+ * target must still match, so matching NEVER sees redacted values. The
+ * first entry is the primary match target; use {@link displayTarget} (never
+ * these candidates) for prompts, deny reasons, and audit lines.
  */
 export function buildTargets(toolName: string, input: Record<string, unknown>, cwd: string): string[] {
 	const lower = toolName.toLowerCase();
@@ -382,11 +388,11 @@ export function buildTargets(toolName: string, input: Record<string, unknown>, c
 	}
 	if (lower === "fetch") {
 		const method = (asString(input.method) ?? "GET").trim().toUpperCase() || "GET";
-		const redactedUrl = resolveRedactedRequestUrl(input.url, input.query);
-		const redactedInput = redactFetchArgsSummary(input);
-		const primary = redactedUrl ? `${method} ${redactedUrl}` : method;
+		// RAW (unredacted) match path — in memory only, never displayed/logged.
+		const rawUrl = rawFetchUrlForMatch(input.url, input.query);
+		const primary = rawUrl ? `${method} ${rawUrl}` : method;
 		try {
-			return [primary, JSON.stringify(redactedInput)];
+			return [primary, JSON.stringify(input)];
 		} catch {
 			return [primary];
 		}
@@ -400,8 +406,65 @@ export function buildTargets(toolName: string, input: Record<string, unknown>, c
 }
 
 /**
+ * Audit/display-safe primary target for a tool call. This is what
+ * `evaluate` stores on `EvalResult.target` and what prompts, deny reasons,
+ * and audit lines show.
+ *
+ * DISPLAY vs AUDIT PATH INVARIANT: prompts may show cwd-relative summaries
+ * (`describeCall`/`shortPath`), but this value — the one persisted to the
+ * audit log — is always absolute for path tools and always secret-redacted
+ * for `fetch` (raw secrets never leave memory). See also `shortPath`,
+ * `shortenHome`, `describeCall`, and `preview` (display-only) in this file.
+ */
+export function displayTarget(toolName: string, input: Record<string, unknown>, cwd: string): string {
+	const lower = toolName.toLowerCase();
+	if (lower === "fetch") {
+		const method = (asString(input.method) ?? "GET").trim().toUpperCase() || "GET";
+		const redactedUrl = redactedFetchUrlForDisplay(input.url, input.query);
+		return redactedUrl ? `${method} ${redactedUrl}` : method;
+	}
+	if (["read", "write", "edit"].includes(lower)) {
+		const raw = pickPath(input);
+		if (raw === null || raw === "") return "";
+		try {
+				return path.resolve(cwd, raw);
+		} catch {
+			return raw;
+		}
+	}
+	if (lower === "ls") {
+		const raw = pickPath(input) ?? ".";
+		if (raw === "") return "";
+		try {
+			return path.resolve(cwd, raw);
+		} catch {
+			return raw;
+		}
+	}
+	if (lower === "find" || lower === "grep") {
+		const targetPath = pickPath(input);
+		const pattern = asString(input.pattern) ?? "";
+		if (targetPath === null) return pattern;
+		let abs: string;
+		try {
+			abs = path.resolve(cwd, targetPath);
+		} catch {
+			abs = targetPath;
+		}
+		return pattern ? `${abs}:${pattern}` : abs;
+	}
+	try {
+		return buildTargets(toolName, input, cwd)[0] ?? "";
+	} catch {
+		return "";
+	}
+}
+
+/**
  * Short display path for prompts: cwd-relative when the target lives inside
  * cwd, otherwise the full absolute path (never hide where it points).
+ * Display-only — the audit log always records the absolute path (see
+ * {@link displayTarget}).
  */
 export function shortPath(raw: string, cwd: string): string {
 	if (!raw) return "";
@@ -444,8 +507,8 @@ function summarizeBash(cmd: string): string {
  * pattern when present; bash shows the full command; subagent shows the
  * agent plus a task snippet (or parallel/swarm shape); anything else shows
  * compact `key=value` pairs. Home directories shorten to `~` (display
- * only — matching and audit keep absolute paths). Pure — safe to
- * unit-test without `pi`.
+ * only — matching and audit keep absolute paths; see {@link displayTarget}).
+ * Pure — safe to unit-test without `pi`.
  */
 export function describeCall(toolName: string, input: Record<string, unknown>, cwd: string): string {
 	const lower = toolName.toLowerCase();
@@ -472,7 +535,8 @@ export function describeCall(toolName: string, input: Record<string, unknown>, c
 	}
 	if (lower === "fetch") {
 		const method = (asString(input.method) ?? "GET").trim().toUpperCase() || "GET";
-		const redactedUrl = resolveRedactedRequestUrl(input.url, input.query);
+		// Display-only: always the secret-redacted URL (matching uses raw).
+		const redactedUrl = redactedFetchUrlForDisplay(input.url, input.query);
 		const flags: string[] = [];
 		if (input.allowPrivateNetwork === true) flags.push("private-net");
 		if (
@@ -501,7 +565,8 @@ function truncate(s: string, max: number): string {
 	return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
-/** Shorten a leading home directory to `~` (display only, like pi core). */
+/** Shorten a leading home directory to `~` (display only, like pi core).
+ * Display-only — audit keeps the absolute path (see {@link displayTarget}). */
 export function shortenHome(p: string): string {
 	const home = os.homedir();
 	if (!home || home === path.sep) return p;
@@ -671,8 +736,18 @@ function hasDangerousShell(segment: string): boolean {
 }
 
 export function evaluate(toolName: string, input: Record<string, unknown>, cwd: string, override: AgentOverride | null = null): EvalResult {
+	// RAW match candidates (secrets intact, in memory only) vs the
+	// audit/display-safe primary (absolute paths, redacted fetch URLs).
+	// Rules match against `targets`; every `EvalResult.target` (prompts,
+	// deny reasons, audit lines, session-grant keys) uses `display`.
 	const targets = buildTargets(toolName, input, cwd);
-	const primary = targets[0] ?? "";
+	const rawPrimary = targets[0] ?? "";
+	let display: string;
+	try {
+		display = displayTarget(toolName, input, cwd);
+	} catch {
+		display = rawPrimary;
+	}
 	const pathMode = isPathTool(toolName);
 	const emptyTarget = isEmptyPathTarget(toolName, input);
 
@@ -702,20 +777,20 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 	};
 
 	/** Evaluate one target string through the agent-only precedence. */
-	const evalOne = (cands: string[], displayTarget: string): EvalResult => {
+	const evalOne = (cands: string[], shownTarget: string): EvalResult => {
 		// 1. Agent rules in order.
 		const agentHit = firstMatch(agentRules, cands);
 		if (agentHit) {
-			return { action: agentHit.rule.action, source: "agent", ruleIndex: agentHit.index, rule: agentHit.rule, target: displayTarget };
+			return { action: agentHit.rule.action, source: "agent", ruleIndex: agentHit.index, rule: agentHit.rule, target: shownTarget };
 		}
 
 		// 2. Agent default (explicit only — otherwise fall through).
 		if (agentEntry?.exists && agentEntry.validated.hasDefault) {
-			return { action: agentEntry.validated.config.defaultAction, source: "agent", ruleIndex: -1, target: displayTarget };
+			return { action: agentEntry.validated.config.defaultAction, source: "agent", ruleIndex: -1, target: shownTarget };
 		}
 
 		// 3. Hardcoded fallback (fail closed: ask).
-		return { action: FALLBACK_DEFAULT_ACTION, source: "default", ruleIndex: -1, target: displayTarget };
+		return { action: FALLBACK_DEFAULT_ACTION, source: "default", ruleIndex: -1, target: shownTarget };
 	};
 
 	// Chain-aware shell evaluation (strict): split `bash`/`powershell` on
@@ -725,13 +800,13 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 	const lower = toolName.toLowerCase();
 	if (lower === "bash" || lower === "powershell") {
 		try {
-			const segments = splitShellCommands(primary);
+			const segments = splitShellCommands(rawPrimary);
 			if (segments.length > 1) {
-				const results = segments.map((seg) => evalOne([seg], primary));
+				const results = segments.map((seg) => evalOne([seg], display));
 				// Deny wins — report the first denying segment.
 				for (let i = 0; i < results.length; i++) {
 					if (results[i].action === "deny") {
-						return { ...results[i], target: primary, segment: segments[i], segmentIndex: i, segmentCount: segments.length };
+						return { ...results[i], target: display, segment: segments[i], segmentIndex: i, segmentCount: segments.length };
 					}
 				}
 				const firstNonAllow = results.findIndex((result) => result.action !== "allow");
@@ -741,14 +816,14 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 					// Deny stays authoritative (returned above).
 					for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
 						if (hasDangerousShell(segments[segmentIndex])) {
-							return { ...results[segmentIndex], action: "ask", target: primary, segment: segments[segmentIndex], segmentIndex, segmentCount: segments.length };
+							return { ...results[segmentIndex], action: "ask", target: display, segment: segments[segmentIndex], segmentIndex, segmentCount: segments.length };
 						}
 					}
-					return { ...results[0], action: "allow", target: primary, segment: segments[0], segmentIndex: 0, segmentCount: segments.length };
+					return { ...results[0], action: "allow", target: display, segment: segments[0], segmentIndex: 0, segmentCount: segments.length };
 				}
 				return {
 					...results[firstNonAllow],
-					target: primary,
+					target: display,
 					segment: segments[firstNonAllow],
 					segmentIndex: firstNonAllow,
 					segmentCount: segments.length,
@@ -756,8 +831,8 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 			}
 			// Single-segment allow with smuggled substitution/redirect → ask.
 			// Deny stays authoritative (evalOne deny is returned untouched).
-			const single = evalOne([primary], primary);
-			if (single.action === "allow" && hasDangerousShell(primary)) {
+			const single = evalOne([rawPrimary], display);
+			if (single.action === "allow" && hasDangerousShell(rawPrimary)) {
 				return { ...single, action: "ask" };
 			}
 			return single;
@@ -766,7 +841,7 @@ export function evaluate(toolName: string, input: Record<string, unknown>, cwd: 
 		}
 	}
 
-	return evalOne(targets, primary);
+	return evalOne(targets, display);
 }
 
 export function describeStatus(cwd?: string, override: AgentOverride | null = null): {

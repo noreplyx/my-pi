@@ -17,7 +17,7 @@
 
 import * as path from "node:path";
 import { getAgentDir, withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { buildTargets, describeCall, describeStatus, evaluate, loadAllAgentFiles, loadConfiguredMcpServers, reloadAll, resolveGrantDir, resolveGrantPath, warnStalePermissionsFileEnv } from "./loader.ts";
+import { describeCall, describeStatus, displayTarget, evaluate, loadAllAgentFiles, loadConfiguredMcpServers, reloadAll, resolveGrantDir, resolveGrantPath, warnStalePermissionsFileEnv, type AgentOverride } from "./loader.ts";
 import { matchToolName } from "./matcher.ts";
 import { isAutoApproveEnabled } from "../auto-approve/state.ts";
 import { createSessionGrants, SESSION_CHOICE_DENY_FEEDBACK, SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICES } from "./session-grants.ts";
@@ -27,19 +27,57 @@ function auditPath(): string {
 	return path.join(getAgentDir(), "permissions", "audit.log");
 }
 
+/** Max audit.log size before rotation (1 MiB; one rotated `audit.log.1` kept,
+ *  so the family caps at ~2 MiB). */
+const AUDIT_ROTATE_BYTES = 1_000_000;
+
+/** Strip CR/LF so a crafted agent name cannot inject log lines. */
+function sanitizeLogField(value: string): string {
+	return value.replace(/[\r\n]+/g, " ");
+}
+
+/**
+ * Append one decision line to the audit log (best-effort, never throws).
+ *
+ * DISPLAY vs AUDIT PATH INVARIANT: this is the audit path — `target` must
+ * already be audit-safe when passed in (absolute paths via `displayTarget`,
+ * secret-redacted fetch URLs). Prompts may show cwd-relative summaries, but
+ * nothing persisted here is ever relative (except redacted secrets).
+ * The log is best-effort plaintext: rotation keeps one `audit.log.1`
+ * (rotate, never truncate, inside the mutation queue); it is tamper-evident,
+ * NOT tamper-proof. Default-deny guidance: when in doubt, deny and log.
+ */
 async function audit(action: string, toolName: string, target: string, extra = ""): Promise<void> {
-	const line = `[${new Date().toISOString()}] agent=${process.env.PI_AGENT_NAME ?? "-"} ${action.toUpperCase()} tool=${toolName} target=${JSON.stringify(target.slice(0, 500))}${extra ? ` ${extra}` : ""}\n`;
+	const agent = JSON.stringify(sanitizeLogField(process.env.PI_AGENT_NAME?.trim() || "-"));
+	const line = `[${new Date().toISOString()}] agent=${agent} ${action.toUpperCase()} tool=${JSON.stringify(sanitizeLogField(toolName))} target=${JSON.stringify(target.slice(0, 500))}${extra ? ` ${extra}` : ""}\n`;
 	try {
-		await withFileMutationQueue(auditPath(), async () => {
-			const { appendFile, mkdir } = await import("node:fs/promises");
-			await mkdir(path.dirname(auditPath()), { recursive: true });
-			await appendFile(auditPath(), line);
+		const logPath = auditPath();
+		await withFileMutationQueue(logPath, async () => {
+			const { appendFile, mkdir, rename, stat } = await import("node:fs/promises");
+			await mkdir(path.dirname(logPath), { recursive: true });
+			// Rotate, never truncate: a full log moves to `audit.log.1`
+			// (overwriting the previous rotation) before appending fresh.
+			try {
+				const st = await stat(logPath);
+				if (st.size >= AUDIT_ROTATE_BYTES) await rename(logPath, `${logPath}.1`);
+			} catch {
+				// Missing log or a lost rotation race — appending still applies.
+			}
+			await appendFile(logPath, line);
 		});
-	} catch {
-		// never break tool execution on audit failure
+	} catch (err: any) {
+		// Best-effort log: never break tool execution on audit failure, but
+		// never swallow silently either — warn (stderr only, never stdout).
+		try {
+			console.warn(`[permissions] audit write failed: ${err?.message ?? err}`);
+		} catch {
+			// last resort: ignore
+		}
 	}
 }
 
+/** Display-only one-line truncation for prompts/reasons (never persisted
+ *  verbatim — the audit log keeps the full canonical target). */
 function preview(s: string, max = 120): string {
 	const oneLine = s.replace(/\s+/g, " ").trim() || "(no args)";
 	return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
@@ -272,12 +310,28 @@ export default function (pi: ExtensionAPI) {
 		const st = describeStatus(ctx.cwd);
 		const message =
 			`${label}\n\nMatched ${where}${result.rule ? ` — tool="${result.rule.tool}" match=${JSON.stringify(result.rule.match ?? "(any)")}` : ""}${chainInfo}\nAgent: ${st.agentName ?? "(none)"}${st.agentFile ? ` @ ${st.agentFile}` : ""}`;
-		// select() has no body slot — the summary (`write src/foo.txt`)
-		// goes into the dialog title so every choice carries context.
-		// The same title is used for the confirm fallback, so no dialog
-		// path ever shows a generic title. The title is also audit-logged
-		// on user decisions, so "what did the dialog show?" is answerable
-		// from the log alone.
+		// select() has no message/body slot, so rule provenance (which rule
+		// or default matched), the agent identity, and the chain segment are
+		// threaded into the dialog title itself — every choice then carries
+		// the full "Matched <where> + Agent + chain" context, and the
+		// parent-side forwarded-permission memo keys on the same raw title.
+		// Structured marker (reserved, best-effort): permission dialogs send
+		// `permissionPrompt: true` in the select/confirm options bag for
+		// parent-side structural classification (see forwarded-permissions.ts).
+		// pi-core may strip unknown options-bag fields, so the wire is NOT
+		// relied upon — the `Permissions …:` title heuristic below remains
+		// the active classifier until pi-core supports passthrough. Do NOT
+		// claim the wire carries it.
+		// Fixed "Permissions (…)" prefix + single trailing `?` + overall cap:
+		// model-controlled input (commands, paths) cannot spoof a second line
+		// or fake provenance, and the `Permissions:` prefix keeps these
+		// dialogs structurally distinguishable from plain `ask_user` selects
+		// (see forwarded-permissions.ts). Choices stay exactly SESSION_CHOICES
+		// so structured parent-side detection keeps matching.
+		// The same title feeds the confirm fallback, so no dialog path ever
+		// shows a generic title. The title is also audit-logged on user
+		// decisions, so "what did the dialog show?" is answerable from the
+		// log alone.
 		const summary = describeCall(event.toolName, input, ctx.cwd);
 		// describeCall already caps bash at ~120 chars; this is a second
 		// guard so future tool summaries can never blow up the dialog title.
@@ -285,12 +339,24 @@ export default function (pi: ExtensionAPI) {
 		// exempt them here so the full worker/goal list reaches the prompt.
 		const isSwarmSummary = event.toolName.toLowerCase() === "subagent" && summary.includes("swarm (");
 		const shortSummary = !isSwarmSummary && summary.length > 140 ? `${summary.slice(0, 139)}…` : summary;
-		const dialogTitle = `Allow ${shortSummary}?`;
+		const agentBit = sanitizeLogField(st.agentName ?? "(none)").slice(0, 60);
+		const provenance = `${where} · ${agentBit}`;
+		const titlePrefix = `Permissions (${provenance}): Allow `;
+		const MAX_TITLE = 500;
+		let titleCore = shortSummary;
+		if (titlePrefix.length + titleCore.length + 1 > MAX_TITLE) {
+			const budget = Math.max(20, MAX_TITLE - titlePrefix.length - 1);
+			titleCore = `${titleCore.slice(0, budget - 1)}…`;
+		}
+		const dialogTitle = `${titlePrefix}${titleCore}?`;
 		let choice: string | undefined;
 		try {
 			choice = await ctx.ui.select(dialogTitle, [...SESSION_CHOICES], {
 				...(ctx.signal ? { signal: ctx.signal } : {}),
-			});
+				// Reserved structured marker (best-effort; pi-core may strip
+				// unknown fields — heuristic stays active, see above).
+				permissionPrompt: true,
+			} as any);
 		} catch {
 			// select() unavailable on this client (e.g. older RPC) — fall back
 			// to the legacy binary confirm rather than failing open.
@@ -298,7 +364,7 @@ export default function (pi: ExtensionAPI) {
 			// headless) is an explicit deny, never a bubble-out exception.
 			let ok: boolean;
 			try {
-				ok = await ctx.ui.confirm(dialogTitle, message);
+				ok = await ctx.ui.confirm(dialogTitle, message, { permissionPrompt: true } as any);
 			} catch {
 				return { block: true, reason: `Denied by user (${where}): ${label}` };
 			}
@@ -312,7 +378,7 @@ export default function (pi: ExtensionAPI) {
 			const dir = resolveGrantDir(event.toolName, input, ctx.cwd);
 			if (dir) {
 				sessionGrants.addDirectory(event.toolName, dir, where);
-				void audit("allow", event.toolName, result.target, `via=${where} user-allow-session dir=${dir} title=${JSON.stringify(dialogTitle)}`);
+				void audit("allow", event.toolName, result.target, `via=${where} user-allow-session dir=${JSON.stringify(dir)} title=${JSON.stringify(dialogTitle)}`);
 			} else {
 				sessionGrants.add(event.toolName, result.target, where);
 				void audit("allow", event.toolName, result.target, `via=${where} user-allow-session title=${JSON.stringify(dialogTitle)}`);
@@ -407,80 +473,64 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /permissions-check [--as-agent <name>] <tool> [json-args]", "warning");
 				return;
 			}
-			// Temporarily assume the target agent identity so evaluate() loads its
-			// frontmatter exactly as the child `pi` process would (PI_AGENT_NAME/FILE).
-			const savedName = process.env.PI_AGENT_NAME;
-			const savedFile = process.env.PI_AGENT_FILE;
-			let asAgentFile: string | null = null;
+			// Evaluate as the target agent via an explicit override — the loader
+			// resolves that agent's frontmatter without touching process.env.
+			// (The previous savedName/savedFile mutate + reloadAll + restore
+			// dance raced concurrent evaluations through global state; the
+			// override is threaded as a parameter instead, so there is
+			// nothing to restore and no TOCTOU window.)
+			let override: AgentOverride | null = null;
 			if (asAgent) {
 				if (asAgent.endsWith(".md")) {
+					let isFile = false;
 					try {
 						const { statSync } = await import("node:fs");
 						statSync(asAgent);
-						asAgentFile = asAgent;
+						isFile = true;
 					} catch {
-						asAgentFile = null;
+						isFile = false;
 					}
-				}
-				try {
-					if (asAgentFile) process.env.PI_AGENT_FILE = asAgentFile;
-					else {
-						process.env.PI_AGENT_NAME = asAgent;
-						delete process.env.PI_AGENT_FILE;
-					}
-					reloadAll();
-				} catch {
-					// fall through with whatever identity we have; evaluate still works
+					override = isFile ? { file: asAgent } : { name: asAgent };
+				} else {
+					override = { name: asAgent };
 				}
 			}
-			try {
-				const space = text.search(/\s/);
-				const tool = space === -1 ? text : text.slice(0, space);
-				const rest = space === -1 ? "" : text.slice(space + 1).trim();
-				let input: Record<string, unknown> = {};
-				if (rest) {
-					// Accept raw `key=value` shorthand for the common cases plus JSON.
-					if (rest.startsWith("{")) {
-						try {
-							input = JSON.parse(rest) as Record<string, unknown>;
-						} catch (e: any) {
-							ctx.ui.notify(`Invalid JSON args: ${e?.message ?? e}`, "error");
-							return;
-						}
-					} else {
-						const m = rest.match(/^(command|path|pattern|file_path)=([\s\S]*)$/);
-						if (m) input = { [m[1]]: m[2] };
-						else input = { command: rest, path: rest };
+			const space = text.search(/\s/);
+			const tool = space === -1 ? text : text.slice(0, space);
+			const rest = space === -1 ? "" : text.slice(space + 1).trim();
+			let input: Record<string, unknown> = {};
+			if (rest) {
+				// Accept raw `key=value` shorthand for the common cases plus JSON.
+				if (rest.startsWith("{")) {
+					try {
+						input = JSON.parse(rest) as Record<string, unknown>;
+					} catch (e: any) {
+						ctx.ui.notify(`Invalid JSON args: ${e?.message ?? e}`, "error");
+						return;
 					}
+				} else {
+					const m = rest.match(/^(command|path|pattern|file_path)=([\s\S]*)$/);
+					if (m) input = { [m[1]]: m[2] };
+					else input = { command: rest, path: rest };
 				}
-				const r = evaluate(tool, input, ctx.cwd);
-				const targets = buildTargets(tool, input, ctx.cwd);
-				const status = describeStatus(ctx.cwd);
-				ctx.ui.notify(
-					[
+			}
+			const r = evaluate(tool, input, ctx.cwd, override);
+			// Audit/display-safe target (absolute paths, redacted fetch URLs)
+			// — never the raw match candidates.
+			const shown = displayTarget(tool, input, ctx.cwd);
+			const status = describeStatus(ctx.cwd, override);
+			ctx.ui.notify(
+				[
 						`tool=${tool} action=${r.action} source=${r.source}${r.ruleIndex >= 0 ? ` rule#${r.ruleIndex + 1}` : ""}${r.segmentCount && r.segmentCount > 1 ? ` segment=${(r.segmentIndex ?? 0) + 1}/${r.segmentCount}` : ""}${asAgent ? ` as-agent=${asAgent}` : ""}`,
 						...(asAgent ? [`agent: ${status.agentName ?? "(unknown)"}${status.agentFile ? ` @ ${status.agentFile}` : ""}`] : []),
 						...(r.rule ? [`rule: tool="${r.rule.tool}" match=${JSON.stringify(r.rule.match ?? "(any)")}`] : []),
 						...(r.segmentCount && r.segmentCount > 1 && r.segment ? [`segment: ${preview(r.segment, 200)}`] : []),
-						`target: ${preview(targets[0] ?? "", 500)}`,
+						`target: ${preview(shown, 500)}`,
 						...(r.action === "ask" && isAutoApproveEnabled() ? [`runtime: auto-approve ON — would allow (deny still blocks)`] : []),
-					].join("\n"),
-					"info",
-				);
-			} finally {
-				if (asAgent) {
-					try {
-						if (savedName === undefined) delete process.env.PI_AGENT_NAME;
-						else process.env.PI_AGENT_NAME = savedName;
-						if (savedFile === undefined) delete process.env.PI_AGENT_FILE;
-						else process.env.PI_AGENT_FILE = savedFile;
-						reloadAll();
-					} catch {
-						// never break the session on env restore
-					}
-				}
-			}
-		},
+				].join("\n"),
+				"info",
+			);
+			},
 	});
 
 	pi.registerCommand("permissions-clear-session", {

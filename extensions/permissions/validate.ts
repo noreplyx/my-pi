@@ -71,30 +71,27 @@ export function baseNameOf(p: string): string {
 
 /** True when a FileReport label identifies the active agent file.
  *
- * Tolerant path forms (case-sensitive name): exact match after trim,
+ * Tolerant path forms (case-sensitive name): exact match after trim, or
  * basename match (`reviewer.md` vs `agents/reviewer.md` vs absolute
- * path), or suffix match with a `/` separator guard
- * (`agents/reviewer.md` matches `/proj/agents/reviewer.md` but
- * `agents/reviewer.md` does NOT match `/xagents/reviewer.md`).
- * This keeps R2 enabled across absolute-path / different cwd-relative
- * label forms instead of silently disabling it on mismatch. */
+ * path). Basename equality already covers every `/`-guarded suffix form
+ * (`agents/reviewer.md` vs `/proj/agents/reviewer.md` share a basename),
+ * so no separate suffix branch is needed — and none is kept, so a future
+ * basename change cannot silently widen this. This keeps R2 enabled across
+ * absolute-path / different cwd-relative label forms instead of silently
+ * disabling it on mismatch. */
 export function isActiveAgentFile(label: string, activeFileLabel: string | null | undefined): boolean {
 	const l = label?.trim() ?? "";
 	const a = activeFileLabel?.trim() ?? "";
 	if (!l || !a) return false;
 	if (l === a) return true;
-	if (baseNameOf(l) === baseNameOf(a)) return true;
-	// Defense-in-depth: subsumed by basename above (equal basenames already
-	// returned), kept so a future basename change cannot silently widen this.
-	if (l.endsWith(`/${a}`) || a.endsWith(`/${l}`)) return true;
-	return false;
+	return baseNameOf(l) === baseNameOf(a);
 }
 
 /** Options for scoping startup validation. R2 (unknown-tool) can be
  *  scoped to the active agent only; all other rules always run globally. */
 export interface ValidateOptions {
 	/** Label of the active agent file. Tolerant match via {@link isActiveAgentFile}
-	 *  (exact, basename, or `/`-guarded suffix) — callers should pass a
+	 *  (exact or basename) — callers should pass a
 	 *  `FileReport.label` (or any path form of it, e.g. absolute path).
 	 *  Null = unknown. Normalized (`trim()`) at entry. */
 	activeFileLabel?: string | null;
@@ -336,7 +333,7 @@ function validateRules(
  *  `opts.scopeUnknownToolCheckToActive` is true (skipped entirely when the
  *  normalized `activeFileLabel` is null); all other rules (R1/R3-R7) always
  *  run globally. Active-file matching is tolerant (see {@link isActiveAgentFile}:
- *  exact, basename, or `/`-guarded suffix — so absolute-path or different
+ *  exact or basename — so absolute-path or different
  *  cwd-relative forms still match instead of silently disabling R2).
  *  Empty `knownTools` still skips the R2 check entirely. */
 export function collectDiagnostics(files: FileReport[], knownTools: string[], opts?: ValidateOptions): Diagnostic[] {

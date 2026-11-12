@@ -25,9 +25,20 @@ export const SESSION_CHOICE_DENY_FEEDBACK = "Deny with feedback";
 export const SESSION_CHOICES = [SESSION_CHOICE_ONCE, SESSION_CHOICE_SESSION, SESSION_CHOICE_DENY, SESSION_CHOICE_DENY_FEEDBACK] as const;
 export type SessionChoice = (typeof SESSION_CHOICES)[number];
 
+/** Normalize a tool name for grant keys: trim + lowercase.
+ *
+ * Permission rule matching is case-insensitive on tool names (see
+ * `matchToolName` in matcher.ts), so grant keys must be too — otherwise a
+ * grant stored as `Bash` would miss a lookup as `bash` and re-prompt.
+ * Targets are trimmed (whitespace is never significant) but keep their
+ * case: bash commands and paths are case-sensitive. */
+export function normalizeGrantTool(toolName: string): string {
+	return toolName.trim().toLowerCase();
+}
+
 /** Stable key for one exact tool + primary target pair. */
 export function grantKey(toolName: string, primaryTarget: string): string {
-	return `${toolName}\0${primaryTarget}`;
+	return `${normalizeGrantTool(toolName)}\0${primaryTarget.trim()}`;
 }
 
 /** Defensive absolute-path normalization (absolute, no trailing separator). */
@@ -77,7 +88,7 @@ export function createSessionGrants() {
 		 * a subdirectory. Never matches the parent (downward only).
 		 */
 		hasDirectory(toolName: string, absPath: string): SessionGrant | undefined {
-			const dirs = byDir.get(toolName);
+			const dirs = byDir.get(normalizeGrantTool(toolName));
 			if (!dirs || dirs.size === 0) return undefined;
 			const normP = normalizeAbs(absPath);
 			const parent = path.dirname(normP);
@@ -89,10 +100,10 @@ export function createSessionGrants() {
 		addDirectory(toolName: string, absDir: string, where: string): SessionGrant {
 			const dir = normalizeAbs(absDir);
 			const grant: SessionGrant = { tool: toolName, target: dir, scope: "directory", where, grantedAt: new Date().toISOString() };
-			let dirs = byDir.get(toolName);
+			let dirs = byDir.get(normalizeGrantTool(toolName));
 			if (!dirs) {
 				dirs = new Map();
-				byDir.set(toolName, dirs);
+				byDir.set(normalizeGrantTool(toolName), dirs);
 			}
 			dirs.set(dir, grant);
 			return grant;

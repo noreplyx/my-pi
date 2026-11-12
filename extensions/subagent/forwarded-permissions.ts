@@ -23,10 +23,20 @@
  * - Legacy `confirm`-fallback permission dialogs are detected but never
  *   cached (a boolean cannot distinguish once vs session); Deny/dismiss
  *   there also re-prompts (fail-closed).
- * - `ask_user` uses the identical RPC wire shape; detection is heuristic
- *   (exact 3/4-option match + `Allow …?` title). A model-crafted ask_user
- *   with exactly those options and title would be misclassified on repeat
- *   — unlikely but nonzero; the structured-protocol fix (Option C) removes it.
+ * - Reserved structured marker `permissionPrompt` (no current emitter
+ *   reliably carries it on the wire): permission enforcers send
+ *   `permissionPrompt: true` best-effort in the select/confirm options bag,
+ *   but pi-core may strip unknown options-bag fields, so the wire is NOT
+ *   relied upon. The title heuristic below remains the active classifier
+ *   until pi-core supports passthrough. An `ask_user` dialog is NEVER
+ *   memoized: explicit `permissionPrompt: false` (reserved for future
+ *   ask_user emitters; none send it today) is never memoized, and heuristic
+ *   shape alone still requires the fixed `Permissions …:` title prefix that
+ *   ordinary ask_user prompts do not use, so a collision requires the model
+ *   to guess the prefix verbatim. A model-crafted ask_user with exactly the
+ *   session options and an `Allow …?` title remains a known residual risk
+ *   for legacy children (documented — the Option C structured protocol
+ *   removes it once passthrough lands).
  *
  * Pure + dependency-free (same convention as utils.ts) so it is unit-testable
  * with plain `bun test` outside the pi runtime.
@@ -45,12 +55,19 @@ export const FORWARDED_DENY_FEEDBACK_VALUE = "Deny with feedback";
 /** Max cached grants; FIFO eviction of oldest. Titles are few; cap is a guard. */
 export const MAX_FORWARDED_GRANTS = 500;
 
-const PERMISSION_TITLE_RE = /^Allow .*?\?$/s;
+const PERMISSION_TITLE_RE = /^(Permissions(?:\s*\([^)]*\))?:\s+)?Allow .*?\?$/s;
 
 export interface PermissionRequestShape {
 	method?: unknown;
 	title?: unknown;
 	options?: unknown;
+	/** Reserved structured marker (no current emitter reliably carries it on
+	 *  the wire — permission enforcers send `true` best-effort; future
+	 *  ask_user emitters may send `false`. pi-core may strip unknown
+	 *  options-bag fields, so the title heuristic below remains the active
+	 *  classifier until pi-core supports passthrough. Explicit `false`
+	 *  means "not a permission prompt" and is never memoized. */
+	permissionPrompt?: unknown;
 }
 
 function isStringArray(v: unknown): v is string[] {
@@ -59,25 +76,39 @@ function isStringArray(v: unknown): v is string[] {
 
 /**
  * True for a child permission `select` dialog: the session choices
- * (4-option current, or 3-option legacy) + an `Allow …?` title.
- * Uses the raw `req.options` (pre-filter).
+ * (4-option current, or 3-option legacy) plus either the reserved
+ * `permissionPrompt: true` marker (honored when present on the wire) or an
+ * `Allow …?` title with an optional fixed `Permissions …:` prefix (active
+ * heuristic classifier — pi-core may strip the marker, so the heuristic is
+ * NOT a legacy-only fallback). Uses the raw `req.options` (pre-filter). An
+ * explicit `permissionPrompt: false` (reserved ask_user-origin marker, none
+ * sent today) never classifies, even when the title and options look
+ * identical — fail closed against memoizing a model-crafted prompt.
  */
 export function isPermissionSelect(req: PermissionRequestShape): boolean {
 	if (req?.method !== "select") return false;
-	if (typeof req.title !== "string" || !PERMISSION_TITLE_RE.test(req.title.trim())) return false;
 	if (!isStringArray(req.options)) return false;
 	const opts = req.options as string[];
-	return (
+	const optionsMatch =
 		(opts.length === FORWARDED_SESSION_CHOICES.length &&
 			opts.every((o, i) => o === FORWARDED_SESSION_CHOICES[i])) ||
 		(opts.length === FORWARDED_SESSION_CHOICES_LEGACY.length &&
-			opts.every((o, i) => o === FORWARDED_SESSION_CHOICES_LEGACY[i]))
-	);
+			opts.every((o, i) => o === FORWARDED_SESSION_CHOICES_LEGACY[i]));
+	if (!optionsMatch) return false;
+	if (req.permissionPrompt === true) return true;
+	if (req.permissionPrompt === false) return false;
+	if (typeof req.title !== "string" || !PERMISSION_TITLE_RE.test(req.title.trim())) return false;
+	return true;
 }
 
-/** True for the legacy confirm-fallback permission dialog (detect-only, never cached — Deny/dismiss re-prompts fail-closed). */
+/** True for the legacy confirm-fallback permission dialog (detect-only, never cached — Deny/dismiss re-prompts fail-closed).
+ * Honors the reserved `permissionPrompt` marker when present on the wire,
+ * like {@link isPermissionSelect}; heuristic title match remains active.
+ */
 export function isPermissionConfirm(req: PermissionRequestShape): boolean {
 	if (req?.method !== "confirm") return false;
+	if (req.permissionPrompt === true) return true;
+	if (req.permissionPrompt === false) return false;
 	return typeof req.title === "string" && PERMISSION_TITLE_RE.test(req.title.trim());
 }
 
