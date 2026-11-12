@@ -270,6 +270,7 @@ export default function (pi: ExtensionAPI) {
 					? `agent rule #${result.ruleIndex + 1}`
 					: `agent default`
 				: `default (ask)`;
+		const whereShort = where.replace(/ #\d+/, "");
 		const label = `${event.toolName} ${preview(result.target)}`.trim();
 		// Chain context: which segment decided a chained bash/powershell call.
 		const chainInfo =
@@ -280,7 +281,7 @@ export default function (pi: ExtensionAPI) {
 		if (result.action === "deny") {
 			void audit("deny", event.toolName, result.target, `via=${where}${chainInfo}`);
 			const reasonSeg = chainInfo ? ` (segment ${(result.segmentIndex ?? 0) + 1}/${result.segmentCount}: ${preview(result.segment ?? "")})` : "";
-			return { block: true, reason: `Blocked by permissions (${where})${reasonSeg}: ${label}` };
+			return { block: true, reason: `Blocked by permissions${reasonSeg}: ${label}` };
 		}
 
 		// action === "ask"
@@ -305,29 +306,29 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!ctx.hasUI) {
 			void audit("deny", event.toolName, result.target, `via=${where} ask-without-ui`);
-			return { block: true, reason: `Blocked by permissions (${where}, no UI to confirm): ${label}` };
+			return { block: true, reason: `Blocked by permissions — no UI to confirm: ${label}` };
 		}
 		const st = describeStatus(ctx.cwd);
-		const message =
-			`${label}\n\nMatched ${where}${result.rule ? ` — tool="${result.rule.tool}" match=${JSON.stringify(result.rule.match ?? "(any)")}` : ""}${chainInfo}\nAgent: ${st.agentName ?? "(none)"}${st.agentFile ? ` @ ${st.agentFile}` : ""}`;
-		// select() has no message/body slot, so rule provenance (which rule
-		// or default matched), the agent identity, and the chain segment are
-		// threaded into the dialog title itself — every choice then carries
-		// the full "Matched <where> + Agent + chain" context, and the
-		// parent-side forwarded-permission memo keys on the same raw title.
+		const chainSuffix = chainInfo ? ` (segment ${(result.segmentIndex ?? 0) + 1}/${result.segmentCount}: ${preview(result.segment ?? "")})` : "";
+		const message = `${label}${chainSuffix}\nAgent: ${st.agentName ?? "(none)"}`;
+		// select() has no message/body slot, so the chain segment (for chained
+		// shell) stays in the confirm-fallback message above. Provenance
+		// (which rule / agent decided) is audit-only (`via=` + dialog title
+		// in audit.log) and never shown in the title.
 		// Structured marker (reserved, best-effort): permission dialogs send
 		// `permissionPrompt: true` in the select/confirm options bag for
 		// parent-side structural classification (see forwarded-permissions.ts).
 		// pi-core may strip unknown options-bag fields, so the wire is NOT
-		// relied upon — the `Permissions …:` title heuristic below remains
+		// relied upon — the `Allow …?` title heuristic below remains
 		// the active classifier until pi-core supports passthrough. Do NOT
 		// claim the wire carries it.
-		// Fixed "Permissions (…)" prefix + single trailing `?` + overall cap:
-		// model-controlled input (commands, paths) cannot spoof a second line
-		// or fake provenance, and the `Permissions:` prefix keeps these
-		// dialogs structurally distinguishable from plain `ask_user` selects
-		// (see forwarded-permissions.ts). Choices stay exactly SESSION_CHOICES
-		// so structured parent-side detection keeps matching.
+		// Fixed `Allow …?` title + single trailing `?` + overall cap:
+		// model-controlled input (commands, paths) cannot spoof a second line,
+		// and parent-side forwarded-permission detection keys on the
+		// `permissionPrompt` marker or the `Allow …?` shape with the exact
+		// SESSION_CHOICES options (see forwarded-permissions.ts). Choices stay
+		// exactly SESSION_CHOICES so structured parent-side detection keeps
+		// matching.
 		// The same title feeds the confirm fallback, so no dialog path ever
 		// shows a generic title. The title is also audit-logged on user
 		// decisions, so "what did the dialog show?" is answerable from the
@@ -339,9 +340,7 @@ export default function (pi: ExtensionAPI) {
 		// exempt them here so the full worker/goal list reaches the prompt.
 		const isSwarmSummary = event.toolName.toLowerCase() === "subagent" && summary.includes("swarm (");
 		const shortSummary = !isSwarmSummary && summary.length > 140 ? `${summary.slice(0, 139)}…` : summary;
-		const agentBit = sanitizeLogField(st.agentName ?? "(none)").slice(0, 60);
-		const provenance = `${where} · ${agentBit}`;
-		const titlePrefix = `Permissions (${provenance}): Allow `;
+		const titlePrefix = `Allow `;
 		const MAX_TITLE = 500;
 		let titleCore = shortSummary;
 		if (titlePrefix.length + titleCore.length + 1 > MAX_TITLE) {
@@ -366,10 +365,10 @@ export default function (pi: ExtensionAPI) {
 			try {
 				ok = await ctx.ui.confirm(dialogTitle, message, { permissionPrompt: true } as any);
 			} catch {
-				return { block: true, reason: `Denied by user (${where}): ${label}` };
+				return { block: true, reason: `Denied by user: ${label}` };
 			}
 			void audit(ok ? "allow" : "deny", event.toolName, result.target, `via=${where} user-confirm title=${JSON.stringify(dialogTitle)}`);
-			if (!ok) return { block: true, reason: `Denied by user (${where}): ${label}` };
+			if (!ok) return { block: true, reason: `Denied by user: ${label}` };
 			return undefined;
 		}
 		if (choice === SESSION_CHOICE_SESSION) {
@@ -377,10 +376,10 @@ export default function (pi: ExtensionAPI) {
 			// session (recursive down). Anything else: exact target only.
 			const dir = resolveGrantDir(event.toolName, input, ctx.cwd);
 			if (dir) {
-				sessionGrants.addDirectory(event.toolName, dir, where);
+				sessionGrants.addDirectory(event.toolName, dir, whereShort);
 				void audit("allow", event.toolName, result.target, `via=${where} user-allow-session dir=${JSON.stringify(dir)} title=${JSON.stringify(dialogTitle)}`);
 			} else {
-				sessionGrants.add(event.toolName, result.target, where);
+				sessionGrants.add(event.toolName, result.target, whereShort);
 				void audit("allow", event.toolName, result.target, `via=${where} user-allow-session title=${JSON.stringify(dialogTitle)}`);
 			}
 			return undefined;
@@ -403,15 +402,15 @@ export default function (pi: ExtensionAPI) {
 			const trimmed = (feedback ?? "").trim();
 			if (!trimmed) {
 				void audit("deny", event.toolName, result.target, `via=${where} user-deny-feedback-empty title=${JSON.stringify(dialogTitle)}`);
-				return { block: true, reason: `Denied by user (${where}): ${label}` };
+				return { block: true, reason: `Denied by user: ${label}` };
 			}
 			const capped = trimmed.length > FEEDBACK_CAP ? `${trimmed.slice(0, FEEDBACK_CAP - 1)}…` : trimmed;
 			void audit("deny", event.toolName, result.target, `via=${where} user-deny-feedback title=${JSON.stringify(dialogTitle)} feedback=${JSON.stringify(capped)}`);
-			return { block: true, reason: `Denied by user (${where}): ${label}. Feedback: ${capped}` };
+			return { block: true, reason: `Denied by user: ${label}. Feedback: ${capped}` };
 		}
 		// SESSION_CHOICE_DENY or undefined (dismissed/escape) — fail closed.
 		void audit("deny", event.toolName, result.target, `via=${where} user-deny title=${JSON.stringify(dialogTitle)}`);
-		return { block: true, reason: `Denied by user (${where}): ${label}` };
+		return { block: true, reason: `Denied by user: ${label}` };
 	});
 
 	pi.registerCommand("permissions-status", {
@@ -419,7 +418,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const s = describeStatus(ctx.cwd);
 			const lines = [
-				`Agent: ${s.agentName ?? "(none)"}${s.agentFile ? ` @ ${s.agentFile}` : ""}${s.agentExists ? ` (${s.agentRuleCount} rules${s.agentDefault ? `, default=${s.agentDefault}` : ", no default — falls back to ask"})` : " (missing — all-default ask)"}`,
+				`Agent: ${s.agentName ?? "(none)"}${s.agentExists ? ` (${s.agentRuleCount} rules${s.agentDefault ? `, default=${s.agentDefault}` : ", no default — falls back to ask"})` : " (missing — all-default ask)"}`,
 				`Auto-approve: ${isAutoApproveEnabled() ? "ON (ask→allow, deny still blocks)" : "OFF"} (/auto-approve on|off|status)`,
 				...s.agentErrors.map((e) => `  ! ${e}`),
 				`Targets: bash→command, read/write/edit/ls→path, find/grep→path:pattern, other→JSON args.`,
@@ -521,8 +520,8 @@ export default function (pi: ExtensionAPI) {
 			const status = describeStatus(ctx.cwd, override);
 			ctx.ui.notify(
 				[
-						`tool=${tool} action=${r.action} source=${r.source}${r.ruleIndex >= 0 ? ` rule#${r.ruleIndex + 1}` : ""}${r.segmentCount && r.segmentCount > 1 ? ` segment=${(r.segmentIndex ?? 0) + 1}/${r.segmentCount}` : ""}${asAgent ? ` as-agent=${asAgent}` : ""}`,
-						...(asAgent ? [`agent: ${status.agentName ?? "(unknown)"}${status.agentFile ? ` @ ${status.agentFile}` : ""}`] : []),
+						`tool=${tool} action=${r.action} source=${r.source === "agent" ? (r.ruleIndex >= 0 ? "agent rule" : "agent default") : "default"}${r.segmentCount && r.segmentCount > 1 ? ` segment=${(r.segmentIndex ?? 0) + 1}/${r.segmentCount}` : ""}${asAgent ? ` as-agent=${asAgent}` : ""}`,
+						...(asAgent ? [`agent: ${status.agentName ?? "(unknown)"}`] : []),
 						...(r.rule ? [`rule: tool="${r.rule.tool}" match=${JSON.stringify(r.rule.match ?? "(any)")}`] : []),
 						...(r.segmentCount && r.segmentCount > 1 && r.segment ? [`segment: ${preview(r.segment, 200)}`] : []),
 						`target: ${preview(shown, 500)}`,

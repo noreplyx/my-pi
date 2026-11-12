@@ -41,17 +41,18 @@ governed by `agents/main.md`.
   the agent in the denial). Dismissing or leaving the feedback empty denies
   without feedback; feedback is trimmed and capped (~500 chars). The legacy
   confirm fallback (no `select` support) stays binary allow/deny with no
-  feedback step. Every dialog title carries a fixed `Permissions (…):`
-  prefix plus rule provenance — `Permissions (agent rule #2 · reviewer):
-  Allow write src/foo.txt?` — so each choice shows what matched, which
-  agent policy decided, and (for chained shell) which segment. `select()`
-  has no message slot, so the full `Matched <where> + Agent + chain`
-  context lives in the title; titles are single-line (the swarm summary
-  exemption notwithstanding) and capped (~500 chars, trailing `?` kept)
-  so model-controlled input cannot spoof extra lines or fake provenance.
-  The `Permissions:` prefix also keeps these dialogs structurally
-  distinguishable from plain `ask_user` selects for parent-side
-  forwarded-permission detection (see subagent README). Summaries show
+  feedback step. Every dialog title asks just the action —
+  `Allow write src/foo.txt?` — with a trailing `?`, single-line (the swarm
+  summary exemption notwithstanding) and capped (~500 chars) so
+  model-controlled input cannot spoof extra lines. Rule provenance
+  (which rule / agent decided) stays audit-only (`via=` + dialog title
+  in `audit.log`) and never appears in the title. The confirm fallback
+  shows the action plus the agent identity (no `Matched` line).
+  These dialogs stay structurally distinguishable from plain `ask_user`
+  selects via the `permissionPrompt` marker plus the `Allow …?` title shape
+  with the exact session choices for parent-side forwarded-permission
+  detection (see subagent README). Denials read `Blocked by permissions:`
+  / `Denied by user:` with no provenance suffix. Summaries show
   (long multi-step lines collapse to `first-step … (+N more)`),
   `grep <path> "<pattern>"` for searches, `subagent <agent>
   "<task…>"` (single), `parallel (n tasks)`, or `swarm (n workers)` for delegated work, and `key=value` pairs for anything else. Titles are capped
