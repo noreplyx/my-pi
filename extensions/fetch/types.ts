@@ -1,10 +1,10 @@
 /**
- * Shared TypeBox schemas and TypeScript contracts for the `safe-fetch` tool extension.
+ * Shared TypeBox schemas and TypeScript contracts for the `fetch` tool extension.
  */
 
 import { type Static, Type } from "typebox";
 
-export const HTTP_METHODS = ["GET", "HEAD", "OPTIONS"] as const;
+export const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 export type HttpMethod = (typeof HTTP_METHODS)[number];
 
 export const RESPONSE_FORMATS = ["auto", "json", "markdown", "text", "raw", "base64"] as const;
@@ -26,10 +26,14 @@ export const HttpMethodSchema = Type.Union(
   [
     Type.Literal("GET"),
     Type.Literal("HEAD"),
+    Type.Literal("POST"),
+    Type.Literal("PUT"),
+    Type.Literal("PATCH"),
+    Type.Literal("DELETE"),
     Type.Literal("OPTIONS"),
   ],
   {
-    description: 'HTTP request method ("GET", "HEAD", "OPTIONS"). Default: "GET".',
+    description: 'HTTP request method ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"). Default: "GET".',
     default: "GET",
   },
 );
@@ -99,19 +103,19 @@ export const FetchParams = Type.Object({
   ),
   body: Type.Optional(
     Type.String({
-      description: "Raw string request body (mutually exclusive with `json` and `form`; NOT allowed for safe-fetch — any value is rejected at runtime).",
+      description: "Raw string request body (mutually exclusive with `json` and `form`; not allowed on GET/HEAD).",
     }),
   ),
   json: Type.Optional(
     Type.Unknown({
       description:
-        "JSON request payload (mutually exclusive with `body` and `form`; NOT allowed for safe-fetch — any value is rejected at runtime).",
+        "JSON request payload, automatically serialized with `Content-Type: application/json; charset=utf-8` (mutually exclusive with `body` and `form`; not allowed on GET/HEAD).",
     }),
   ),
   form: Type.Optional(
     Type.Record(Type.String(), Type.String(), {
       description:
-        "URL-encoded form fields (mutually exclusive with `body` and `json`; NOT allowed for safe-fetch — any value is rejected at runtime).",
+        "URL-encoded form fields, automatically serialized with `Content-Type: application/x-www-form-urlencoded; charset=utf-8` (mutually exclusive with `body` and `json`; not allowed on GET/HEAD).",
     }),
   ),
   format: Type.Optional(ResponseFormatSchema),

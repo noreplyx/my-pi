@@ -1,5 +1,5 @@
 /**
- * Pure URL construction and secret-redaction helpers for the `safe-fetch` and `permissions` extensions.
+ * Pure URL construction and secret-redaction helpers for the `fetch` and `permissions` extensions.
  *
  * Kept free of `permissions` imports so both `extensions/fetch/*` and `extensions/permissions/*`
  * can import from this leaf module without circular dependencies.
@@ -230,7 +230,7 @@ export function redactForDisplay(rawUrl: unknown, query?: unknown): string {
 }
 
 /**
- * Produce a secret-safe clone of raw safe-fetch input arguments for permission evaluation,
+ * Produce a secret-safe clone of raw fetch input arguments for permission evaluation,
  * audit logging, and UI display.
  */
 export function redactFetchArgsSummary(input: Record<string, unknown>): Record<string, unknown> {

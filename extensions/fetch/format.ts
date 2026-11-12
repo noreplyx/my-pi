@@ -340,7 +340,7 @@ export async function truncateAndSpill(
 
   if (isTruncated) {
     try {
-      const dir = await mkdtemp(join(tmpdir(), "pi-safe-fetch-"));
+      const dir = await mkdtemp(join(tmpdir(), "pi-fetch-"));
       const ext = options.fileExtension ?? "txt";
       fullOutputPath = join(dir, `response.${ext}`);
       await writeFile(fullOutputPath, fullText, "utf-8");
@@ -508,7 +508,7 @@ export async function formatResponseBody(options: {
   if (requestedFormat === "auto" && (!isTextualMime(mime) || looksLikeBinaryBuffer(buffer))) {
     let fullOutputPath: string | undefined;
     try {
-      const dir = await mkdtemp(join(tmpdir(), "pi-safe-fetch-bin-"));
+      const dir = await mkdtemp(join(tmpdir(), "pi-fetch-bin-"));
       const ext = mime.split("/")[1]?.replace(/[^a-zA-Z0-9._-]/g, "") || "bin";
       fullOutputPath = join(dir, `payload.${ext}`);
       await writeFile(fullOutputPath, buffer);

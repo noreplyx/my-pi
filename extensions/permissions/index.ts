@@ -41,7 +41,7 @@ function sanitizeLogField(value: string): string {
  *
  * DISPLAY vs AUDIT PATH INVARIANT: this is the audit path — `target` must
  * already be audit-safe when passed in (absolute paths via `displayTarget`,
- * secret-redacted safe-fetch URLs). Prompts may show cwd-relative summaries, but
+ * secret-redacted fetch URLs). Prompts may show cwd-relative summaries, but
  * nothing persisted here is ever relative (except redacted secrets).
  * The log is best-effort plaintext: rotation keeps one `audit.log.1`
  * (rotate, never truncate, inside the mutation queue); it is tamper-evident,
@@ -515,7 +515,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			const r = evaluate(tool, input, ctx.cwd, override);
-			// Audit/display-safe target (absolute paths, redacted safe-fetch URLs)
+			// Audit/display-safe target (absolute paths, redacted fetch URLs)
 			// — never the raw match candidates.
 			const shown = displayTarget(tool, input, ctx.cwd);
 			const status = describeStatus(ctx.cwd, override);

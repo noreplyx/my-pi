@@ -23,9 +23,10 @@ permissions:
     - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI)\\s+)*-(Command|c)\\s+[\"']?\\s*(Get-(Command|ChildItem|Content|Item|ItemProperty|Location|Process|Service|CimInstance|Date|FileHash)|Select-(String|Object)|Test-Path|Resolve-Path|Measure-Object|Where-Object)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: sql_reader, action: allow }
     - { tool: "re:^lsp_(diagnostics|definition|references|hover|document_symbols|workspace_symbols)$", action: allow }
-    - { tool: safe-fetch, match: 're:"allowPrivateNetwork"\s*:\s*true', action: ask }
-    - { tool: safe-fetch, match: 're:"rejectUnauthorized"\s*:\s*false', action: ask }
-    - { tool: safe-fetch, action: allow }
+    - { tool: fetch, match: 're:^(POST|PUT|PATCH|DELETE)\b', action: ask }
+    - { tool: fetch, match: 're:"allowPrivateNetwork"\s*:\s*true', action: ask }
+    - { tool: fetch, match: 're:"rejectUnauthorized"\s*:\s*false', action: ask }
+    - { tool: fetch, action: allow }
 ---
 
 You are the main session. There is no global permission policy — this file

@@ -341,7 +341,7 @@ export function isEmptyPathTarget(toolName: string, input: Record<string, unknow
  * Build match candidates for a tool call. Matching succeeds if ANY
  * candidate matches.
  *
- * RAW match path: candidates carry secrets INTACT (notably `safe-fetch` — the
+ * RAW match path: candidates carry secrets INTACT (notably `fetch` — the
  * real URL and raw JSON args), in memory only. A `deny` on a secret-bearing
  * target must still match, so matching NEVER sees redacted values. The
  * first entry is the primary match target; use {@link displayTarget} (never
@@ -386,7 +386,7 @@ export function buildTargets(toolName: string, input: Record<string, unknown>, c
 		if (targetPath === null) return pattern ? [pattern, ""] : [""];
 		return [pattern ? `${targetPath}:${pattern}` : targetPath, targetPath, pattern].filter(Boolean);
 	}
-	if (lower === "safe-fetch") {
+	if (lower === "fetch") {
 		const method = (asString(input.method) ?? "GET").trim().toUpperCase() || "GET";
 		// RAW (unredacted) match path — in memory only, never displayed/logged.
 		const rawUrl = rawFetchUrlForMatch(input.url, input.query);
@@ -413,12 +413,12 @@ export function buildTargets(toolName: string, input: Record<string, unknown>, c
  * DISPLAY vs AUDIT PATH INVARIANT: prompts may show cwd-relative summaries
  * (`describeCall`/`shortPath`), but this value — the one persisted to the
  * audit log — is always absolute for path tools and always secret-redacted
- * for `safe-fetch` (raw secrets never leave memory). See also `shortPath`,
+ * for `fetch` (raw secrets never leave memory). See also `shortPath`,
  * `shortenHome`, `describeCall`, and `preview` (display-only) in this file.
  */
 export function displayTarget(toolName: string, input: Record<string, unknown>, cwd: string): string {
 	const lower = toolName.toLowerCase();
-	if (lower === "safe-fetch") {
+	if (lower === "fetch") {
 		const method = (asString(input.method) ?? "GET").trim().toUpperCase() || "GET";
 		const redactedUrl = redactedFetchUrlForDisplay(input.url, input.query);
 		return redactedUrl ? `${method} ${redactedUrl}` : method;
@@ -533,7 +533,7 @@ export function describeCall(toolName: string, input: Record<string, unknown>, c
 	if (lower === "subagent") {
 		return `${toolName} ${describeSubagent(input)}`;
 	}
-	if (lower === "safe-fetch") {
+	if (lower === "fetch") {
 		const method = (asString(input.method) ?? "GET").trim().toUpperCase() || "GET";
 		// Display-only: always the secret-redacted URL (matching uses raw).
 		const redactedUrl = redactedFetchUrlForDisplay(input.url, input.query);
@@ -737,7 +737,7 @@ function hasDangerousShell(segment: string): boolean {
 
 export function evaluate(toolName: string, input: Record<string, unknown>, cwd: string, override: AgentOverride | null = null): EvalResult {
 	// RAW match candidates (secrets intact, in memory only) vs the
-	// audit/display-safe primary (absolute paths, redacted safe-fetch URLs).
+	// audit/display-safe primary (absolute paths, redacted fetch URLs).
 	// Rules match against `targets`; every `EvalResult.target` (prompts,
 	// deny reasons, audit lines, session-grant keys) uses `display`.
 	const targets = buildTargets(toolName, input, cwd);

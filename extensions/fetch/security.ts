@@ -1,6 +1,6 @@
 /**
  * Security, SSRF prevention, DNS validation, secret redaction, and authorization
- * guards for the `safe-fetch` extension.
+ * guards for the `fetch` extension.
  */
 
 import * as dns from "node:dns/promises";
@@ -36,6 +36,8 @@ export const READ_ONLY_SPECIALIST_AGENTS = new Set([
   "code-reviewer",
 ]);
 
+const MUTATING_METHODS = new Set<string>(["POST", "PUT", "PATCH", "DELETE"]);
+
 const BLOCKED_METADATA_HOSTS = new Set([
   "metadata.google.internal",
   "metadata.azure.internal",
@@ -50,6 +52,13 @@ export interface UrlValidationResult {
   resolvedAddresses?: string[];
   isPrivateTarget?: boolean;
   error?: string;
+}
+
+/**
+ * Check whether an HTTP method is mutating (state-changing).
+ */
+export function isMutatingMethod(method: string): boolean {
+  return MUTATING_METHODS.has(method.trim().toUpperCase());
 }
 
 /**
@@ -510,7 +519,7 @@ export async function validateTargetUrlAndResolve(
 }
 
 /**
- * Strip sensitive authentication and cookie headers when a safe-fetch redirect changes origin
+ * Strip sensitive authentication and cookie headers when a redirect changes origin
  * (`protocol + host + port`) or downgrades from `https:` to `http:`.
  */
 export function sanitizeHeadersForRedirect(
@@ -547,10 +556,9 @@ export function sanitizeHeadersForRedirect(
 
 /**
  * Enforce defense-in-depth authorization for:
- *  - Read-only specialist agents attempting private network access or insecure TLS
- *  - `allowPrivateNetwork: true`, `tls.rejectUnauthorized: false`,
- *    or mid-redirect escalations (redirect to private IP or HTTPS→HTTP downgrade)
- * safe-fetch only supports GET/HEAD/OPTIONS, so no mutating-method confirmation exists.
+ *  - Read-only specialist agents attempting mutating HTTP methods, private network access, or insecure TLS
+ *  - Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`), `allowPrivateNetwork: true`, `tls.rejectUnauthorized: false`,
+ *    or mid-redirect escalations (redirect to private IP, HTTPS→HTTP downgrade, or cross-origin mutating redirect)
  */
 export async function ensureFetchAuthorized(options: {
   params: FetchInputParams;
@@ -558,7 +566,6 @@ export async function ensureFetchAuthorized(options: {
   targetUrl: string;
   isPrivateTarget: boolean;
   isRedirectHop?: boolean;
-  /** @deprecated Unused — retained for backward-compatible callers; redirect auth depends on `isPrivateTarget`/`protocolDowngraded` only. TODO(remove): delete this field once external callers are confirmed migrated. */
   originChanged?: boolean;
   protocolDowngraded?: boolean;
   ctx?: ExtensionContext;
@@ -570,18 +577,25 @@ export async function ensureFetchAuthorized(options: {
     targetUrl,
     isPrivateTarget,
     isRedirectHop = false,
+    originChanged = false,
     protocolDowngraded = false,
     ctx,
     signal,
   } = options;
 
   const activeAgent = (process.env.PI_AGENT_NAME ?? "").trim();
+  const mutating = isMutatingMethod(method);
   const privateNetRequested = params.allowPrivateNetwork === true || isPrivateTarget;
   const insecureTlsRequested = params.tls?.rejectUnauthorized === false;
 
   // 1. Hard read-only specialist agent guard (defense-in-depth alongside agent frontmatter rules)
-  // safe-fetch has no mutating methods; guard only private-network and insecure-TLS access.
   if (activeAgent && READ_ONLY_SPECIALIST_AGENTS.has(activeAgent)) {
+    if (mutating) {
+      return {
+        allowed: false,
+        reason: `Blocked: read-only agent "${activeAgent}" is only permitted to use GET, HEAD, or OPTIONS with fetch (attempted ${method}).`,
+      };
+    }
     if (privateNetRequested) {
       return {
         allowed: false,
@@ -597,12 +611,11 @@ export async function ensureFetchAuthorized(options: {
   }
 
   // 2. Check if interactive confirmation is required
-  // safe-fetch never mutates: only private-network, insecure-TLS, and
-  // redirect-escalation (private target or HTTPS→HTTP downgrade) require confirmation.
   const needsConfirmation =
+    mutating ||
     privateNetRequested ||
     insecureTlsRequested ||
-    (isRedirectHop && (isPrivateTarget || protocolDowngraded));
+    (isRedirectHop && (isPrivateTarget || protocolDowngraded || (originChanged && mutating)));
 
   if (!needsConfirmation) {
     return { allowed: true };
@@ -620,7 +633,7 @@ export async function ensureFetchAuthorized(options: {
   // approved the prompt before `execute()` was entered).
   if (!isRedirectHop && ctx) {
     try {
-      const evalRes = evaluate("safe-fetch", params as unknown as Record<string, unknown>, ctx.cwd);
+      const evalRes = evaluate("fetch", params as unknown as Record<string, unknown>, ctx.cwd);
       if (evalRes.action === "ask") {
         // The `permissions` extension already prompted and the user approved on `tool_call`.
         return { allowed: true };
@@ -633,19 +646,23 @@ export async function ensureFetchAuthorized(options: {
   if (!ctx || !ctx.hasUI) {
     return {
       allowed: false,
-      reason: `Blocked: safe-fetch ${method} ${redactedTarget} requires user confirmation (privateNetwork=${privateNetRequested}, insecureTls=${insecureTlsRequested}), but no interactive UI is available.`,
+      reason: `Blocked: fetch ${method} ${redactedTarget} requires user confirmation (mutating=${mutating}, privateNetwork=${privateNetRequested}, insecureTls=${insecureTlsRequested}), but no interactive UI is available.`,
     };
   }
 
   const flags: string[] = [];
+  if (mutating) flags.push(`mutating method (${method})`);
   if (privateNetRequested) flags.push("private/local network target");
   if (insecureTlsRequested) flags.push("TLS verification disabled (rejectUnauthorized=false)");
+  if (isRedirectHop && originChanged && mutating) {
+    flags.push(`cross-origin redirect preserving mutating method (${method})`);
+  }
   if (isRedirectHop && protocolDowngraded) flags.push("redirect downgraded HTTPS → HTTP");
   if (isRedirectHop && isPrivateTarget) flags.push("redirect target is on private/loopback network");
 
   const title = isRedirectHop
-    ? `Allow safe-fetch redirect to ${method} ${redactedTarget}?`
-    : `Allow safe-fetch ${method} ${redactedTarget}?`;
+    ? `Allow fetch redirect to ${method} ${redactedTarget}?`
+    : `Allow fetch ${method} ${redactedTarget}?`;
   const message = `Flags: ${flags.join(", ")}\nTarget: ${redactedTarget}`;
 
   try {
@@ -653,14 +670,14 @@ export async function ensureFetchAuthorized(options: {
     if (!confirmed) {
       return {
         allowed: false,
-        reason: `Denied by user: safe-fetch ${method} ${redactedTarget}`,
+        reason: `Denied by user: fetch ${method} ${redactedTarget}`,
       };
     }
     return { allowed: true };
   } catch {
     return {
       allowed: false,
-      reason: `Denied (confirmation aborted): safe-fetch ${method} ${redactedTarget}`,
+      reason: `Denied (confirmation aborted): fetch ${method} ${redactedTarget}`,
     };
   }
 }
