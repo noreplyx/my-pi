@@ -4,7 +4,15 @@ description: "Default policy for the main session: fail closed, ask on every too
 permissions:
   defaultAction: ask
   rules:
-    - { tool: bash, match: "re:^git\\s+(status|diff|log|show|branch)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: git-tool, match: 're:"op"\s*:\s*"(status|diff|log|show|branch-list|remote-list|stash-list|tag-list|worktree-list)"', action: allow }
+    - { tool: git-tool, action: deny }
+    - { tool: bash, match: "re:^git\\s+(blame|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|cat-file|for-each-ref|reflog|whatchanged|var)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+remote\\s+(show|get-url)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+stash\\s+show\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+submodule\\s+status\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+config\\s+(--(global|system|local|worktree)\\s+)?(--get(-all|-regexp)?|--list|-l)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(version|help|--version|--help|-v|-h)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\b", action: deny }
     - { tool: bash, match: "re:^dotnet\\s+((build|test|run|clean|restore|format|vstest|list)\\b|--(info|version|help)\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(npm|pnpm)\\s+((test|run(-script)?|exec|ls|list)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^bun\\s+((test|run|build|check|x)\\b|--version\\b)[^;&|$`<>\\n]*$", action: allow }
@@ -36,3 +44,12 @@ session grants (`Allow for this session`) still apply within the session.
 Tighten this file (add `deny` rules, switch the default to `deny` with
 explicit `allow` rules) if the main session should be more autonomous-proof;
 nothing outside this file can loosen it.
+
+<!-- git policy (extension-first, migrated to match subagents): status/diff/log/
+     show/branch via git-tool (read-ops auto-allow, all other git-tool ops
+     deny); bash git is plumbing fallback only (blame/describe/rev-parse/
+     ls-files/cat-file/..., remote show/get-url, stash show, submodule
+     status, config get/list, version/help) with a terminal deny. No `tools:`
+     allowlist here by design (main session keeps all tools available under
+     ask-default, unlike subagents); git-tool is governed by the permission
+     rules above. -->

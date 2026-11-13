@@ -1,7 +1,7 @@
 ---
 name: code-test-implementor
 description: "Implements test code only. SOLID/DRY tests with scenario reports and request/response examples."
-tools: [read, write, edit, bash, grep, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
+tools: [read, write, edit, bash, git-tool, grep, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
 permissions:
   defaultAction: deny
   rules:
@@ -16,21 +16,21 @@ permissions:
     - { tool: fetch, action: allow }
     - { tool: "re:^mcp__ado__(.*_)?(write|create|update|delete|remove|add|patch|set|upsert|upload|run|link|queue|cancel|approve|merge|abandon)(_|$)", action: ask }
     - { tool: "mcp__ado__*", action: allow }
+    - { tool: git-tool, match: 're:"op"\s*:\s*"(status|diff|log|show|branch-list|remote-list|stash-list|tag-list|worktree-list)"', action: allow }
+    - { tool: git-tool, action: ask }
     - { tool: bash, match: "re:^((npx|bunx)\\s+)?(eslint|biome|ruff)\\b[^;&|$`<>\\n]*\\s(--fix(-only)?|--write|--apply(-unsafe)?|--unsafe)\\b[^;&|$`<>\\n]*$", action: ask }
     - { tool: bash, match: "re:^python3?\\s+-m\\s+ruff\\b[^;&|$`<>\\n]*\\s--fix(-only)?\\b[^;&|$`<>\\n]*$", action: ask }
     - { tool: bash, match: "re:^gofmt\\b[^;&|$`<>\\n]*\\s-w\\b[^;&|$`<>\\n]*$", action: ask }
     - { tool: bash, match: "re:^find\\b[^;&|$`<>\\n]*\\s-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)\\b[^;&|$`<>\\n]*$", action: ask }
     - { tool: bash, match: "re:^git\\s+tag\\b[^;&|$`<>\\n]*\\s(-a|-s|-u|-d|-f|--annotate|--sign|--local-user|--delete|--force)\\b[^;&|$`<>\\n]*$", action: ask }
     - { tool: bash, match: "re:^yq\\b[^;&|$`<>\\n]*\\s(-i|--inplace)\\b[^;&|$`<>\\n]*$", action: ask }
-    - { tool: bash, match: "re:^git\\s+(status|diff|log|show|blame|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|cat-file|for-each-ref|reflog|whatchanged|var|version|help)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+branch(\\s+(-a|--all|-r|--remotes|-v|-vv|--verbose|--list|-l|--show-current|--contains\\b|--no-contains\\b|--merged\\b|--no-merged\\b|--points-at\\b|--sort(=|\\s+)\\S+|--format(=|\\s+)\\S+|--color(=\\S+)?|--no-color|--column(=\\S+)?|--no-column|-i|--ignore-case|--abbrev(=\\S+)?|--no-abbrev))*\\s*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+tag(\\s*|\\s+(-l|--list|-v|--verify|-n\\d*|--contains\\b|--no-contains\\b|--merged\\b|--no-merged\\b|--points-at\\b|--sort\\b|--format\\b|--color\\b|--no-color\\b|--column\\b|--no-column\\b|-i|--ignore-case)\\b[^;&|$`<>\\n]*)$", action: allow }
-    - { tool: bash, match: "re:^git\\s+remote(\\s+(-v|--verbose))?\\s*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(blame|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|cat-file|for-each-ref|reflog|whatchanged|var)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^git\\s+remote\\s+(show|get-url)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+stash\\s+(list|show)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+(worktree\\s+list|submodule\\s+status)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+stash\\s+show\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+submodule\\s+status\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^git\\s+config\\s+(--(global|system|local|worktree)\\s+)?(--get(-all|-regexp)?|--list|-l)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+(--version|--help|-v|-h)\\s*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(version|help|--version|--help|-v|-h)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\b", action: deny }
     - { tool: bash, match: "re:^(ls|dir|pwd|whoami|id|uname|hostname|date|which|where|type|file|stat|wc|du|df|tree|realpath|readlink|basename|dirname|cat|head|tail|less|more|nl|od|xxd|hexdump|strings|diff|cmp|comm|sort|uniq|cut|tr|fold|column|seq|expr|true|false)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(rg|ripgrep|grep|egrep|fgrep|ag|ack|fd|fdfind|find|jq|yq)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^dotnet\\s+((build|test|vstest|list|nuget\\s+list|tool\\s+list|workload\\s+list)\\b|format\\b[^;&|$`<>\\n]*\\s--verify-no-changes\\b|--(info|version|help|list-sdks|list-runtimes)\\b)(?:[^;&|$`<>\\n]|console;verbosity=(?:quiet|minimal|normal|detailed|diagnostic))*$", action: allow }
@@ -57,7 +57,6 @@ permissions:
     - { tool: bash, match: "re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI)\\s+)*-(Command|c)\\s+[\"']?\\s*(Get-(Command|ChildItem|Content|Item|ItemProperty|Location|Process|Service|CimInstance|Date|FileHash)|Select-(String|Object)|Test-Path|Resolve-Path|Measure-Object|Where-Object|Invoke-Pester)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: ["re:^(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI|ExecutionPolicy\\s+\\S+|EP\\s+\\S+)\\s+)*-(File|f)\\s+[^;&|$`<>\\n]+$", "re:^(?!.*(\\$\\(|\\$\\{))(pwsh|powershell)(\\.exe)?\\s+(-(NoLogo|NoProfile|NonInteractive|NoP|NonI|ExecutionPolicy\\s+\\S+|EP\\s+\\S+)\\s+)*-(Command|c)\\s+[^`<>\\n]+$"], action: ask }
     - { tool: bash, match: "re:[;&|$`<>\\n]", action: deny }
-    - { tool: bash, match: "re:^git\\s+(add|commit|push|pull|fetch|merge|rebase|cherry-pick|revert|reset|restore|checkout|switch|clean|rm|mv|stash|tag|branch|remote|config|apply|am|init|clone|worktree|submodule|notes|gc|prune)\\b", action: ask }
     - { tool: bash, match: "re:^dotnet\\s+(run|clean|restore|format|publish|pack|nuget\\s+push|new|add|remove|tool\\s+(install|update|uninstall|restore)|workload\\s+(install|update|uninstall|repair)|dev-certs|user-secrets|ef)\\b", action: ask }
     - { tool: bash, match: "re:^(npm|pnpm|bun)\\s+(install|i|add|remove|rm|uninstall|update|up|publish|pack|deploy|link|unlink|init|create|ci|dedupe|prune|rebuild|run(-script)?|exec|x|build|patch|patch-commit)\\b", action: ask }
     - { tool: bash, match: "re:^(npx|bunx)\\b", action: ask }

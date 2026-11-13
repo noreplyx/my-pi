@@ -20,4 +20,5 @@ Tracked in git; secrets and machine-local state are gitignored.
 
 - Edit policy: change the agent's `permissions:` frontmatter in `agents/<name>.md` (or `agents/main.md` for the main session), then `/permissions-reload`.
 - Inspect: `/permissions-status` (layers + diagnostics), `/permissions-check <tool> <args>` (dry-run).
-- Tip: run **one command per `bash` tool call** so safe-allows (`git status`, `ls`, …) hit silently. Chained commands (`;`, `&&`, `||`, pipes) intentionally fall through to `ask` — that's the chaining guard working, not a bug.
+- Tip: run **one command per `bash` tool call** so safe-allows (`ls`, …) hit silently. Chained commands (`;`, `&&`, `||`, pipes) intentionally fall through to `ask` — that's the chaining guard working, not a bug.
+- Tip: prefer `git-tool` (`{op:status}`, `{op:diff}`, `{op:log,limit,range}`, `{op:branch-list}`, `{op:remote-list}`, `{op:stash-list}`) over `bash git` — `bash git` now warns/redirects and is denied by agent policy (narrow `bash` fallback remains only for plumbing with no `git-tool` op: `blame`, `rev-parse`, `ls-files`, `cat-file`, …). `git-tool` writes run as dry-run previews unless called with `dryRun:false + confirm:true` (plus a UI confirm).

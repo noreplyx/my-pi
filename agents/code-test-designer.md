@@ -1,7 +1,7 @@
 ---
 name: code-test-designer
 description: "Designs test cases (read-only, never implements) - distinct from code-test-implementor which writes test files"
-tools: [read, grep, bash, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
+tools: [read, grep, bash, git-tool, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
 permissions:
   defaultAction: deny
   rules:
@@ -18,21 +18,21 @@ permissions:
     - { tool: fetch, action: allow }
     - { tool: "re:^mcp__ado__(.*_)?(write|create|update|delete|remove|add|patch|set|upsert|upload|run|link|queue|cancel|approve|merge|abandon)(_|$)", action: deny }
     - { tool: "mcp__ado__*", action: allow }
+    - { tool: git-tool, match: 're:"op"\s*:\s*"(status|diff|log|show|branch-list|remote-list|stash-list|tag-list|worktree-list)"', action: allow }
+    - { tool: git-tool, action: deny }
     - { tool: bash, match: "re:^((npx|bunx)\\s+)?(eslint|biome|ruff)\\b.*\\s(--fix(-only)?|--write|--apply(-unsafe)?|--unsafe)\\b", action: deny }
     - { tool: bash, match: "re:^python3?\\s+-m\\s+ruff\\b.*\\s--fix(-only)?\\b", action: deny }
     - { tool: bash, match: "re:^gofmt\\b.*\\s-w\\b", action: deny }
     - { tool: bash, match: "re:^find\\b.*\\s-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)\\b", action: deny }
     - { tool: bash, match: "re:^git\\s+tag\\b.*\\s(-a|-s|-u|-d|-f|--annotate|--sign|--local-user|--delete|--force)\\b", action: deny }
     - { tool: bash, match: "re:^yq\\b.*\\s(-i|--inplace)\\b", action: deny }
-    - { tool: bash, match: "re:^git\\s+(status|diff|log|show|blame|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|cat-file|for-each-ref|reflog|whatchanged|var|version|help)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+branch(\\s+(-a|--all|-r|--remotes|-v|-vv|--verbose|--list|-l|--show-current|--contains\\b|--no-contains\\b|--merged\\b|--no-merged\\b|--points-at\\b|--sort(=|\\s+)\\S+|--format(=|\\s+)\\S+|--color(=\\S+)?|--no-color|--column(=\\S+)?|--no-column|-i|--ignore-case|--abbrev(=\\S+)?|--no-abbrev))*\\s*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+tag(\\s*|\\s+(-l|--list|-v|--verify|-n\\d*|--contains\\b|--no-contains\\b|--merged\\b|--no-merged\\b|--points-at\\b|--sort\\b|--format\\b|--color\\b|--no-color\\b|--column\\b|--no-column\\b|-i|--ignore-case)\\b[^;&|$`<>\\n]*)$", action: allow }
-    - { tool: bash, match: "re:^git\\s+remote(\\s+(-v|--verbose))?\\s*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(blame|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|cat-file|for-each-ref|reflog|whatchanged|var)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^git\\s+remote\\s+(show|get-url)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+stash\\s+(list|show)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+(worktree\\s+list|submodule\\s+status)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+stash\\s+show\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+submodule\\s+status\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^git\\s+config\\s+(--(global|system|local|worktree)\\s+)?(--get(-all|-regexp)?|--list|-l)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+(--version|--help|-v|-h)\\s*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(version|help|--version|--help|-v|-h)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\b", action: deny }
     - { tool: bash, match: "re:^(ls|dir|pwd|whoami|id|uname|hostname|date|which|where|type|file|stat|wc|du|df|tree|realpath|readlink|basename|dirname|cat|head|tail|less|more|nl|od|xxd|hexdump|strings|diff|cmp|comm|sort|uniq|cut|tr|fold|column|seq|expr|true|false)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(rg|ripgrep|grep|egrep|fgrep|ag|ack|fd|fdfind|find|jq|yq)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^dotnet\\s+((build|test|vstest|list|nuget\\s+list|tool\\s+list|workload\\s+list)\\b|format\\b[^;&|$`<>\\n]*\\s--verify-no-changes\\b|--(info|version|help|list-sdks|list-runtimes)\\b)(?:[^;&|$`<>\\n]|console;verbosity=(?:quiet|minimal|normal|detailed|diagnostic))*$", action: allow }
@@ -87,6 +87,6 @@ All test-case, test-scenario, function, table, class, and variable names in your
 
 ## Fast context gathering
 
-- Batch multi-file reads, `grep` searches, `tools.sql_reader(...)` queries, `tools.fetch(...)` HTTP lookups, and `git diff`/`git status` checks in one `codemode` script via `await Promise.allSettled([...])` instead of sequential tool turns.
+- Batch multi-file reads, `grep` searches, `tools.sql_reader(...)` queries, `tools.fetch(...)` HTTP lookups, and `git-tool` `diff`/`status` checks (`{op:diff}`, `{op:status}`) in one `codemode` script via `await Promise.allSettled([...])` instead of sequential tool turns.
 - Use direct `read`, `grep`, `sql_reader`, `fetch`, or `bash` when inspecting a single file, running a single DB check, fetching a single URL, or running one command.
 - Do not reference `ALL_TOOLS` or `searchTools()` inside `codemode` unless querying an MCP server.

@@ -1,7 +1,7 @@
 ---
 name: brainstorm
 description: "Collaborative requirements and design brainstormer. Explores the codebase read-only, proactively asks the user about ambiguities and edge cases via ask_user across 6 lenses (Performance, Best Practices, Security, UX, Design, Architecture), and produces a structured specification. Never edits files."
-tools: [ask_user, read, grep, bash, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
+tools: [ask_user, read, grep, bash, git-tool, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
 permissions:
   defaultAction: deny
   rules:
@@ -19,21 +19,21 @@ permissions:
     - { tool: fetch, action: allow }
     - { tool: "re:^mcp__ado__(.*_)?(write|create|update|delete|remove|add|patch|set|upsert|upload|run|link|queue|cancel|approve|merge|abandon)(_|$)", action: deny }
     - { tool: "mcp__ado__*", action: allow }
+    - { tool: git-tool, match: 're:"op"\s*:\s*"(status|diff|log|show|branch-list|remote-list|stash-list|tag-list|worktree-list)"', action: allow }
+    - { tool: git-tool, action: deny }
     - { tool: bash, match: "re:^((npx|bunx)\\s+)?(eslint|biome|ruff)\\b.*\\s(--fix(-only)?|--write|--apply(-unsafe)?|--unsafe)\\b", action: deny }
     - { tool: bash, match: "re:^python3?\\s+-m\\s+ruff\\b.*\\s--fix(-only)?\\b", action: deny }
     - { tool: bash, match: "re:^gofmt\\b.*\\s-w\\b", action: deny }
     - { tool: bash, match: "re:^find\\b.*\\s-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)\\b", action: deny }
     - { tool: bash, match: "re:^git\\s+tag\\b.*\\s(-a|-s|-u|-d|-f|--annotate|--sign|--local-user|--delete|--force)\\b", action: deny }
     - { tool: bash, match: "re:^yq\\b.*\\s(-i|--inplace)\\b", action: deny }
-    - { tool: bash, match: "re:^git\\s+(status|diff|log|show|blame|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|cat-file|for-each-ref|reflog|whatchanged|var|version|help)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+branch(\\s+(-a|--all|-r|--remotes|-v|-vv|--verbose|--list|-l|--show-current|--contains\\b|--no-contains\\b|--merged\\b|--no-merged\\b|--points-at\\b|--sort(=|\\s+)\\S+|--format(=|\\s+)\\S+|--color(=\\S+)?|--no-color|--column(=\\S+)?|--no-column|-i|--ignore-case|--abbrev(=\\S+)?|--no-abbrev))*\\s*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+tag(\\s*|\\s+(-l|--list|-v|--verify|-n\\d*|--contains\\b|--no-contains\\b|--merged\\b|--no-merged\\b|--points-at\\b|--sort\\b|--format\\b|--color\\b|--no-color\\b|--column\\b|--no-column\\b|-i|--ignore-case)\\b[^;&|$`<>\\n]*)$", action: allow }
-    - { tool: bash, match: "re:^git\\s+remote(\\s+(-v|--verbose))?\\s*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(blame|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|cat-file|for-each-ref|reflog|whatchanged|var)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^git\\s+remote\\s+(show|get-url)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+stash\\s+(list|show)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+(worktree\\s+list|submodule\\s+status)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+stash\\s+show\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+submodule\\s+status\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^git\\s+config\\s+(--(global|system|local|worktree)\\s+)?(--get(-all|-regexp)?|--list|-l)\\b[^;&|$`<>\\n]*$", action: allow }
-    - { tool: bash, match: "re:^git\\s+(--version|--help|-v|-h)\\s*$", action: allow }
+    - { tool: bash, match: "re:^git\\s+(version|help|--version|--help|-v|-h)\\b[^;&|$`<>\\n]*$", action: allow }
+    - { tool: bash, match: "re:^git\\b", action: deny }
     - { tool: bash, match: "re:^(ls|dir|pwd|whoami|id|uname|hostname|date|which|where|type|file|stat|wc|du|df|tree|realpath|readlink|basename|dirname|cat|head|tail|less|more|nl|od|xxd|hexdump|strings|diff|cmp|comm|sort|uniq|cut|tr|fold|column|seq|expr|true|false)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^(rg|ripgrep|grep|egrep|fgrep|ag|ack|fd|fdfind|find|jq|yq)\\b[^;&|$`<>\\n]*$", action: allow }
     - { tool: bash, match: "re:^dotnet\\s+((build|test|vstest|list|nuget\\s+list|tool\\s+list|workload\\s+list)\\b|format\\b[^;&|$`<>\\n]*\\s--verify-no-changes\\b|--(info|version|help|list-sdks|list-runtimes)\\b)(?:[^;&|$`<>\\n]|console;verbosity=(?:quiet|minimal|normal|detailed|diagnostic))*$", action: allow }
@@ -85,7 +85,7 @@ Evaluate every goal and codebase touchpoint across all 6 lenses to uncover hidde
 ### Phase 1 — Grounded Codebase Discovery (Read-Only)
 
 - Read relevant files, existing patterns, schemas, and git state before asking questions so every question is grounded in actual code rather than generic guesses.
-- **Fast context gathering (`codemode` vs. direct tools)**: When reading 2+ files, running multiple `grep` searches, executing multiple `tools.sql_reader(...)` queries, fetching multiple URLs via `tools.fetch(...)`, or combining `read` + `grep` + `sql_reader` + `fetch` + `git status`/`git diff`, batch them in a single `codemode` script using `await Promise.allSettled([...])` and filter/slice output before calling `text(...)`. Use direct `read`, `grep`, `sql_reader`, `fetch`, or `bash` for a single lookup. Never access `ALL_TOOLS` or `searchTools()` in `codemode` unless discovering an MCP tool (doing so waits for all MCP servers to connect).
+- **Fast context gathering (`codemode` vs. direct tools)**: When reading 2+ files, running multiple `grep` searches, executing multiple `tools.sql_reader(...)` queries, fetching multiple URLs via `tools.fetch(...)`, or combining `read` + `grep` + `sql_reader` + `fetch` + `git-tool` `status`/`diff` ops (`{op:status}`, `{op:diff}`), batch them in a single `codemode` script using `await Promise.allSettled([...])` and filter/slice output before calling `text(...)`. Use direct `read`, `grep`, `sql_reader`, `fetch`, or `bash` for a single lookup. Never access `ALL_TOOLS` or `searchTools()` in `codemode` unless discovering an MCP tool (doing so waits for all MCP servers to connect).
 
 ### Phase 2 — Iterative Clarification via `ask_user`
 
