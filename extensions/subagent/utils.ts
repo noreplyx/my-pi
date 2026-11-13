@@ -13,9 +13,16 @@ export const DEFAULT_CODEMODE_MAX_WORKERS = "8";
 /** Hierarchical swarm caps (user-confirmed defaults). */
 export const MAX_SWARM_DEPTH = 3;
 export const MAX_SWARM_TOTAL = 8;
-/** Default per-subagent wall-clock budget (30 min); hard ceiling (30 min). */
-export const TIMEOUT_DEFAULT_MS = 30 * 60 * 1000;
-export const TIMEOUT_MAX_MS = 30 * 60 * 1000;
+/**
+ * @deprecated No-timeout policy: subagents wait indefinitely until the
+ * user aborts. Kept only for wire/back-compat; never used as a timer.
+ */
+export const TIMEOUT_DEFAULT_MS: number | undefined = undefined;
+/**
+ * @deprecated No-timeout policy: no ceiling is enforced. Kept only so
+ * legacy imports keep resolving; always Infinity.
+ */
+export const TIMEOUT_MAX_MS: number = Infinity;
 /** Grace between SIGTERM and SIGKILL for child process groups. */
 export const KILL_GRACE_MS = 5000;
 /** Max un-newlined stdout retained before oldest bytes are dropped (giant-line guard). */
@@ -70,14 +77,15 @@ export type SubagentErrorCode =
 /** Budget for packing merger input (done/*.md + outbox fallback). */
 export const MERGER_INPUT_BUDGET = 24 * 1024;
 
-/** Clamp a caller-supplied timeoutMs to [1, TIMEOUT_MAX_MS]; undefined → default. */
-export function clampTimeoutMs(raw: unknown): { timeoutMs: number; clamped: boolean; error?: string } {
-	if (raw === undefined) return { timeoutMs: TIMEOUT_DEFAULT_MS, clamped: false };
-	const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : raw;
-	if (typeof n !== "number" || !Number.isFinite(n)) return { timeoutMs: TIMEOUT_DEFAULT_MS, clamped: false, error: "timeoutMs must be a finite number of milliseconds" };
-	if (n <= 0) return { timeoutMs: TIMEOUT_DEFAULT_MS, clamped: false, error: "timeoutMs must be positive" };
-	if (n > TIMEOUT_MAX_MS) return { timeoutMs: TIMEOUT_MAX_MS, clamped: true };
-	return { timeoutMs: Math.floor(n), clamped: false };
+/**
+ * @deprecated No-timeout policy: legacy timeout params are accepted and
+ * ignored. Always returns `{ timeoutMs: undefined }` with no error and
+ * never clamps, so callers never reject or enforce a wall-clock budget.
+ * "timeout" remains in SubagentErrorCode only as a dead variant for
+ * shape back-compat and is never constructed.
+ */
+export function clampTimeoutMs(_raw: unknown): { timeoutMs: number | undefined; clamped: boolean; error?: string } {
+	return { timeoutMs: undefined, clamped: false };
 }
 
 /** Humanize durationMs for TUI (12.3s, 4m12s, 1h02m). */

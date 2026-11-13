@@ -46,10 +46,8 @@ import {
 	appendBounded,
 	buildChildEnv,
 	buildChildProcessArgs,
-	clampTimeoutMs,
 	emptyUsage,
 	ensureSwarmTools,
-	formatDuration,
 	getFinalOutput,
 	isFailedResult,
 	parseSwarmDepth,
@@ -90,7 +88,7 @@ function safeWriteStdin(proc: { stdin?: { write: (s: string) => unknown; writabl
 		if (!stdin || stdin.writable === false) return;
 		stdin.write(`${JSON.stringify(obj)}\n`);
 	} catch {
-		/* child going away — settled/timeout path owns the outcome */
+		/* child going away — settled/abort path owns the outcome */
 	}
 }
 
@@ -109,10 +107,10 @@ export async function runSingleAgent(
 	opts?: RunSingleAgentOptions,
 ): Promise<SingleResult> {
 	const startTime = Date.now();
-	const timeoutClamp = clampTimeoutMs(opts?.timeoutMs);
-	const effectiveTimeoutMs = timeoutClamp.timeoutMs;
+	// No-timeout policy: legacy opts.timeoutMs / opts.questionTimeoutMs are
+	// accepted and ignored. The child runs until agent_settled, close,
+	// error, or signal.aborted. KILL_GRACE_MS applies only to explicit abort.
 	const allowQuestions = opts?.allowQuestions ?? true;
-	const questionTimeoutMs = opts?.questionTimeoutMs;
 	const questionLock = opts?.questionLock ?? withQuestionLock;
 	const parentUI = opts?.parentUI as ParentUI | undefined;
 	const labelPrefix = opts?.labelPrefix;
@@ -124,14 +122,13 @@ export async function runSingleAgent(
 		cwd: defaultCwd,
 		exitCode: 1,
 		messages: [],
-		stderr: timeoutClamp.error ? `${stderr} (invalid timeoutMs: ${timeoutClamp.error})` : stderr,
+		stderr,
 		usage: emptyUsage(),
 		step,
 		errorCode: "setup-error",
 		timedOut: false,
 		durationMs: Date.now() - startTime,
 	});
-	if (timeoutClamp.error) return setupFailed("Invalid timeoutMs.");
 	if (swarmCtx && swarmCtx.depth > MAX_SWARM_DEPTH) {
 		return {
 			...setupFailed(`Max swarm depth ${MAX_SWARM_DEPTH} exceeded.`),
@@ -251,7 +248,6 @@ export async function runSingleAgent(
 			? `Task: ${task}${swarmProtocolSnippet(swarmCtx.swarmDir, swarmCtx.agentId, swarmCtx.runId, swarmCtx.depth)}`
 			: `Task: ${task}`;
 		let abortRequested = false;
-		let timedOut = false;
 		let spawnFailed = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
@@ -387,13 +383,11 @@ export async function runSingleAgent(
 					const title = `${labelPrefix ? `${labelPrefix} ` : `[${agentName}] `}${String(req.title ?? "Subagent question").slice(0, 300)}`;
 					const ctrl = new AbortController();
 					const onParentAbort = () => ctrl.abort();
-					let qTimer: ReturnType<typeof setTimeout> | null = null;
+					// No per-question timer: the dialog waits indefinitely
+					// until the user responds or signal aborts.
 					if (signal) {
 						if (signal.aborted) ctrl.abort();
 						else signal.addEventListener("abort", onParentAbort, { once: true });
-					}
-					if (typeof questionTimeoutMs === "number" && Number.isFinite(questionTimeoutMs) && questionTimeoutMs > 0) {
-						qTimer = setTimeout(() => ctrl.abort(), Math.floor(questionTimeoutMs));
 					}
 					try {
 						// Preserve the reserved `permissionPrompt` marker verbatim for
@@ -432,7 +426,6 @@ export async function runSingleAgent(
 					} catch {
 						safeWriteStdin(proc, method === "confirm" ? { type: "extension_ui_response", id, confirmed: false } : { type: "extension_ui_response", id, cancelled: true });
 					} finally {
-						if (qTimer) clearTimeout(qTimer);
 						if (signal) signal.removeEventListener("abort", onParentAbort);
 					}
 				});
@@ -514,7 +507,6 @@ export async function runSingleAgent(
 
 			let exited = false;
 			let killTimer: ReturnType<typeof setTimeout> | null = null;
-			let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
 			const killGroup = (sig: NodeJS.Signals) => {
 				try {
 					if (proc.pid !== undefined && process.platform !== "win32") process.kill(-proc.pid, sig);
@@ -534,10 +526,6 @@ export async function runSingleAgent(
 					clearTimeout(killTimer);
 					killTimer = null;
 				}
-				if (timeoutTimer) {
-					clearTimeout(timeoutTimer);
-					timeoutTimer = null;
-				}
 			};
 
 			const escalateKill = () => {
@@ -551,15 +539,6 @@ export async function runSingleAgent(
 				abortRequested = true;
 				safeWriteStdin(proc, { id: `abort-${Date.now()}`, type: "abort" });
 				if (exited) return;
-				killGroup("SIGTERM");
-				escalateKill();
-			};
-
-			const onTimeout = () => {
-				if (exited || settled) return;
-				timedOut = true;
-				abortRequested = true;
-				currentResult.stderr += `\n[timeout after ${formatDuration(effectiveTimeoutMs)} (limit ${effectiveTimeoutMs}ms)]`;
 				killGroup("SIGTERM");
 				escalateKill();
 			};
@@ -594,21 +573,11 @@ export async function runSingleAgent(
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", onAbort, { once: true });
 			}
-			timeoutTimer = setTimeout(onTimeout, effectiveTimeoutMs);
-			timeoutTimer.unref?.();
-
 			safeWriteStdin(proc, { id: `prompt-${Date.now()}`, type: "prompt", message: fullTask });
 		});
 
 		currentResult.exitCode = exitCode;
 		currentResult.durationMs = Date.now() - startTime;
-		currentResult.timedOut = timedOut;
-		if (timedOut) {
-			currentResult.errorCode = "timeout";
-			currentResult.stopReason = currentResult.stopReason ?? "error";
-			currentResult.errorMessage = currentResult.errorMessage ?? `Subagent timed out after ${formatDuration(effectiveTimeoutMs)}.`;
-			return currentResult;
-		}
 		if (abortRequested) {
 			currentResult.errorCode = "aborted";
 			throw new Error("Subagent was aborted");

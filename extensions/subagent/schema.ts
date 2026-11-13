@@ -9,7 +9,7 @@ import { Type } from "typebox";
 import type { AgentScope } from "./agents.ts";
 
 export const TimeoutMsSchema = Type.Optional(
-	Type.Number({ description: "Wall-clock budget in ms (default 1800000, max 1800000)" }),
+	Type.Number({ description: "Deprecated: ignored — subagent waits indefinitely until user abort. Accepted for back-compat, never enforced." }),
 );
 
 export const RetrySchema = Type.Optional(
@@ -22,7 +22,7 @@ export const RetrySchema = Type.Optional(
 export const TotalTimeoutMsSchema = Type.Optional(
 	Type.Number({
 		description:
-			"Total budget for the whole parallel/swarm operation in ms (default unset = unbounded; parallel/swarm: max + 60s)",
+			"Deprecated: ignored — parallel/swarm wait indefinitely until user abort. Accepted for back-compat, never enforced.",
 	}),
 );
 
@@ -37,7 +37,7 @@ export const AllowQuestionsSchema = Type.Optional(
 );
 
 export const QuestionTimeoutMsSchema = Type.Optional(
-	Type.Number({ description: "Per-question dialog budget in ms (default: inherit task timeout). Unanswered questions auto-dismiss." }),
+	Type.Number({ description: "Deprecated: ignored — questions wait indefinitely until user responds or aborts. Accepted for back-compat, never enforced." }),
 );
 
 const TaskItem = Type.Object({

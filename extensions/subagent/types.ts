@@ -26,7 +26,10 @@ export interface SingleResult {
 	step?: number;
 	/** Machine-readable cause. "ok" when the process exited 0 without error/abort. */
 	errorCode: SubagentErrorCode;
-	/** True when the result was produced by the timeout killer (not a user abort). */
+	/**
+	 * Always false under the no-timeout policy. Kept for result-shape
+	 * back-compat; signal abort reports errorCode "aborted" instead.
+	 */
 	timedOut: boolean;
 	/** Wall-clock time for this agent process, ms. */
 	durationMs: number;
@@ -73,11 +76,11 @@ export interface ParentUI {
 }
 
 export interface RunSingleAgentOptions {
-	/** Per-agent wall-clock budget in ms. Undefined → TIMEOUT_DEFAULT_MS (clamped to TIMEOUT_MAX_MS). */
+	/** @deprecated Ignored — accepted for back-compat only. Subagent runs until settled or signal aborts; no wall-clock budget. */
 	timeoutMs?: number;
 	/** When false, child questions are auto-dismissed (no parent dialog). Default true. */
 	allowQuestions?: boolean;
-	/** Per-question dialog budget in ms. Undefined → inherit task timeout (opt-in only, no default). */
+	/** @deprecated Ignored — accepted for back-compat only. Questions wait indefinitely; signal is the ONLY cancellation source. */
 	questionTimeoutMs?: number;
 	/** Per-run FIFO question lock. Defaults to the global lock (single-mode). */
 	questionLock?: <T>(fn: () => Promise<T>) => Promise<T>;

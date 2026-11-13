@@ -69,6 +69,7 @@ function findUnknownAgent(items: Array<{ agent?: unknown }>, agents: Array<{ nam
 	return null;
 }
 
+/** @deprecated No-timeout policy: timeouts are accepted-but-ignored, so this always passes (returns null). Kept for shape back-compat. */
 function checkTimeout(raw: unknown): string | null {
 	const check = clampTimeoutMs(raw as number | undefined);
 	return check.error ?? null;

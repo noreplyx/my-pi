@@ -15,7 +15,7 @@ Delegate tasks to specialized agents with isolated context (`pi --mode rpc` chil
 | `parallel.ts` | `runParallel()` — concurrency 4, per-task retry, total budget |
 | `swarm-orchestrator.ts` | `runSwarm()`, `validateWorkers()`, `resumeMissingWorkers()` |
 | `schema.ts` | TypeBox params (incl. `retry`/`totalTimeoutMs`/`onError`) |
-| `resilience.ts` | `runWithRetry()` (default retry once), `totalDeadline()`, `recommendedTotalTimeout()` |
+| `resilience.ts` | `runWithRetry()` (default retry once); deadline helpers neutered (no total budget) |
 | `render.ts` | Shared TUI primitives: `formatToolCall`, `resultBadges`, `formatTotals`, `truncatePreview` |
 | `agents.ts` | Agent discovery (fail-closed, symlink containment, user-shadows-project) |
 | `swarm.ts` | Blackboard I/O: `manifest.json`, `cancel.json`, validated outbox, fork-resume, GC |
@@ -24,9 +24,9 @@ Delegate tasks to specialized agents with isolated context (`pi --mode rpc` chil
 
 | Mode | Params | Notes |
 |---|---|---|
-| single | `agent`, `task`, `cwd?`, `timeoutMs?`, `allowQuestions?`, `questionTimeoutMs?` | Retried once by default |
-| parallel | `tasks[{agent,task,cwd?,timeoutMs?,allowQuestions?,questionTimeoutMs?}]` | Max 8 tasks, concurrency 4. `onError=abort` drains queue (no new starts, in-flight drained); default `continue`. Budget/abort also drains queue |
-| swarm | `swarm{goal, workers[{id,agent,task,cwd?,timeoutMs?,allowQuestions?,questionTimeoutMs?}], merger?, cleanup?}` | Blackboard `.swarm/<runId>/`, depth ≤3, total ≤8. `onError=abort` drains worker queue (drain-only), default `continue` |
+| single | `agent`, `task`, `cwd?`, `allowQuestions?` (+ deprecated ignored `timeoutMs?`, `questionTimeoutMs?`) | Retried once by default; waits indefinitely until settle/abort |
+| parallel | `tasks[{agent,task,cwd?,allowQuestions?}]` (+ deprecated ignored timeout fields) | Max 8 tasks, concurrency 4. `onError=abort` drains queue (no new starts, in-flight drained); default `continue`. Abort also drains queue |
+| swarm | `swarm{goal, workers[{id,agent,task,cwd?,allowQuestions?}], merger?, cleanup?}` (+ deprecated ignored timeout fields) | Blackboard `.swarm/<runId>/`, depth ≤3, total ≤8. `onError=abort` drains worker queue (drain-only), default `continue` |
 
 ## Questions (Option C)
 
@@ -40,8 +40,7 @@ lock per run — titles are prefixed `[parallel …]`,
 
 * `ask_user` is frontmatter-gated: the child model sees it only when the
   agent's `tools:` lists `ask_user` (via the `--tools` allowlist).
-* `allowQuestions:false` (per-task or top-level) auto-dismisses;
-  opt-in `questionTimeoutMs` bounds each dialog (no default timeout).
+* `allowQuestions:false` (per-task or top-level) auto-dismisses; dialogs otherwise wait indefinitely until the user responds or aborts (no timeout).
 * Permission model (agent-only, no global layer): the parent `subagent`
   invocation is gated by the parent agent's layer; inner child tool calls
   are gated by the target agent's layer. When the target agent's layer
@@ -65,16 +64,12 @@ lock per run — titles are prefixed `[parallel …]`,
 * No-UI parents (`!ctx.hasUI`, e.g. headless) auto-dismiss with a stderr note,
   preserving the old fail-closed behavior.
 
-Common: `retry {attempts (default 2), backoffMs (default 1000)}`, `totalTimeoutMs` (whole-operation
-budget, default unset = unbounded; parallel/swarm recommend max + 60s),
-`timeoutMs` per agent (default 1800000, max 1800000). Timeout kills the
-process group (SIGTERM → SIGKILL after 5s) and returns partial output with
-`errorCode: "timeout"`.
+Common: `retry {attempts (default 2), backoffMs (default 1000)}`. No timeouts: legacy `totalTimeoutMs` / `timeoutMs` / `questionTimeoutMs` params are accepted-but-ignored; subagents and dialogs wait indefinitely until settle/user-abort. Abort kills the process group (SIGTERM → SIGKILL after 5s).
 
 ## Result fields
 
-`SingleResult`: `exitCode`, `stopReason`, `errorCode` (`ok` | `spawn-failed` | `timeout` |
-`aborted` | `non-zero` | `setup-error` | `budget-exceeded`), `timedOut`, `durationMs` (wall clock),
+`SingleResult`: `exitCode`, `stopReason`, `errorCode` (`ok` | `spawn-failed` |
+`aborted` | `non-zero` | `setup-error` — `timeout` / `budget-exceeded` retained only as dead back-compat variants, never emitted), `timedOut` (always `false`), `durationMs` (wall clock),
 `attempts`, `usage`, `messages`. TUI shows `⏱ 4m12s` + `[errorCode]` badges; totals show
 `wall (max)` for parallel/swarm.
 

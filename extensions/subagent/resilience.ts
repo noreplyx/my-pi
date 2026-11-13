@@ -1,11 +1,11 @@
 /**
- * Resilience helpers: retry with backoff + total-budget deadline checks.
+ * Resilience helpers: retry with backoff (no total budget — AbortSignal is the only cancellation source).
  *
  * Pure and unit-testable (no pi runtime imports). The orchestrators
  * (parallel/swarm) use runWithRetry to get the agreed default:
  * retry once on any failure.
  */
-import { TIMEOUT_DEFAULT_MS, type SubagentErrorCode } from "./utils.ts";
+import type { SubagentErrorCode } from "./utils.ts";
 
 export interface RetryOptions {
 	/** Max attempts total (1 = no retry). Default 2 (retry once). */
@@ -88,20 +88,26 @@ export async function runWithRetry<T extends RetryableResult>(
 	return { result: last as T, attempts };
 }
 
-/** True when the total budget deadline has passed. Unset budget = no deadline. */
-export function isBudgetExceeded(deadline: number | undefined, now = Date.now()): boolean {
-	return deadline !== undefined && now >= deadline;
+/**
+ * @deprecated No-timeout policy: total budgets are ignored.
+ * Always returns false; the AbortSignal is the only cancellation source.
+ */
+export function isBudgetExceeded(_deadline: number | undefined, _now = Date.now()): boolean {
+	return false;
 }
 
-/** Compute a deadline timestamp from a total budget, or undefined when unset. */
-export function totalDeadline(totalTimeoutMs: number | undefined, now = Date.now()): number | undefined {
-	if (totalTimeoutMs === undefined) return undefined;
-	if (!Number.isFinite(totalTimeoutMs) || totalTimeoutMs <= 0) return undefined;
-	return now + Math.floor(totalTimeoutMs);
+/**
+ * @deprecated No-timeout policy: total budgets are ignored.
+ * Always returns undefined (no deadline), whatever the input.
+ */
+export function totalDeadline(_totalTimeoutMs: number | undefined, _now = Date.now()): number | undefined {
+	return undefined;
 }
 
-/** Recommended total budget when the caller did not set one (docs only, not applied). */
-export function recommendedTotalTimeout(perTaskMs: number[], mode: "parallel" | "swarm"): number {
-	if (perTaskMs.length === 0) return TIMEOUT_DEFAULT_MS;
-	return Math.max(...perTaskMs) + 60000;
+/**
+ * @deprecated No-timeout policy: no budget is recommended or applied.
+ * Always returns undefined; subagents wait indefinitely until abort.
+ */
+export function recommendedTotalTimeout(_perTaskMs: number[], _mode: "parallel" | "swarm"): number | undefined {
+	return undefined;
 }

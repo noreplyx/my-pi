@@ -49,7 +49,6 @@ import {
 	DEFAULT_CODEMODE_MAX_WORKERS,
 	MAX_PARALLEL_TASKS,
 	RESULT_RUNNING,
-	clampTimeoutMs,
 	formatUsageStats,
 	generateRunId,
 	getFinalOutput,
@@ -101,13 +100,14 @@ export default function (pi: ExtensionAPI) {
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Delegate tasks to specialized subagents with isolated context.",
+			"Delegate tasks to specialized subagents with isolated context. Waits indefinitely until the agent settles or the user aborts; there is no wall-clock timeout.",
 			"Modes: single (agent + task), parallel (tasks array),",
 			"swarm ({goal, workers[{id,agent,task}], merger?} hierarchical blackboard in .swarm/<runId>/).",
-			"Resilience: retry {attempts, backoffMs} (default retry once), totalTimeoutMs (whole-operation budget),",
+			"Resilience: retry {attempts, backoffMs} (default retry once),",
 			"onError abort|continue (default continue for parallel/swarm).",
-			"Questions: child ask_user calls and permission prompts are forwarded to the user (serialized per-run FIFO);",
-			"set allowQuestions:false to auto-dismiss, opt-in questionTimeoutMs to bound each dialog (no default timeout). notify never queued.",
+			"Legacy timeout params (timeoutMs, totalTimeoutMs, questionTimeoutMs) are accepted for back-compat and ignored.",
+			"Questions: child ask_user calls and permission prompts are forwarded to the user (serialized per-run FIFO) and wait indefinitely;",
+			"set allowQuestions:false to auto-dismiss. notify never queued.",
 			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
@@ -228,14 +228,11 @@ export default function (pi: ExtensionAPI) {
 				const swarmInfo: SwarmInfo = { runId, swarmDir: run.swarmDir, depth: workerDepth };
 				try {
 					const out = await runSwarm(runId, run.swarmDir, spec.goal, spec.workers, spec.merger, {
-						fallbackTimeoutMs: params.timeoutMs,
 						retryAttempts,
 						retryBackoffMs,
-						totalTimeoutMs: params.totalTimeoutMs,
 						onError: params.onError ?? "continue",
 						cleanup: spec.cleanup,
 						allowQuestions: params.allowQuestions,
-						questionTimeoutMs: params.questionTimeoutMs,
 					}, {
 						defaultCwd: ctx.cwd,
 						dispatchDefaults,
@@ -269,13 +266,10 @@ export default function (pi: ExtensionAPI) {
 						details: makeDetails("parallel")([]),
 					};
 				const out = await runParallel(params.tasks, {
-					fallbackTimeoutMs: params.timeoutMs,
 					retryAttempts,
 					retryBackoffMs,
-					totalTimeoutMs: params.totalTimeoutMs,
 					onError: params.onError ?? "continue",
 					allowQuestions: params.allowQuestions,
-					questionTimeoutMs: params.questionTimeoutMs,
 				}, {
 					defaultCwd: ctx.cwd,
 					dispatchDefaults,
@@ -290,23 +284,16 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.agent && params.task) {
-				const timeoutCheck = clampTimeoutMs(params.timeoutMs);
-				if (timeoutCheck.error) {
-					return {
-						content: [{ type: "text", text: `Invalid timeoutMs: ${timeoutCheck.error}.` }],
-						details: makeDetails("single")([]),
-						isError: true,
-					};
-				}
+				// No-timeout policy: legacy params.timeoutMs is accepted for
+				// back-compat and ignored — the run waits indefinitely until
+				// it settles or signal aborts. No invalid-timeout early error.
 				const { result, attempts } = await runWithRetry(
 					() =>
 						runSingleAgent(
 							ctx.cwd, dispatchDefaults, agents, params.agent, params.task, params.cwd,
 							undefined, signal, onUpdate as any, makeDetails("single"), undefined,
 							{
-								timeoutMs: params.timeoutMs,
 								allowQuestions: params.allowQuestions,
-								questionTimeoutMs: params.questionTimeoutMs,
 								parentUI,
 								forwardedPermissions,
 								labelPrefix: `[${params.agent}]`,
@@ -607,11 +594,11 @@ export default function (pi: ExtensionAPI) {
 				agent: Type.String(),
 				task: Type.String(),
 				cwd: Type.Optional(Type.String()),
-				timeoutMs: Type.Optional(Type.Number()),
+				timeoutMs: Type.Optional(Type.Number({ description: "Deprecated: ignored — swarm waits indefinitely until user abort. Accepted for back-compat, never enforced." })),
 			})),
 			cleanup: Type.Optional(Type.Boolean()),
-			timeoutMs: Type.Optional(Type.Number()),
-			totalTimeoutMs: Type.Optional(Type.Number()),
+			timeoutMs: Type.Optional(Type.Number({ description: "Deprecated: ignored — swarm waits indefinitely until user abort. Accepted for back-compat, never enforced." })),
+			totalTimeoutMs: Type.Optional(Type.Number({ description: "Deprecated: ignored — swarm waits indefinitely until user abort. Accepted for back-compat, never enforced." })),
 			onError: OnErrorSchema,
 			agentScope: Type.Optional(AgentScopeSchema),
 		}),
@@ -683,10 +670,8 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			const out = await resumeMissingWorkers(ctx.cwd, params.runId, params.merger, {
-				fallbackTimeoutMs: params.timeoutMs,
 				retryAttempts: DEFAULT_RETRY_ATTEMPTS,
 				retryBackoffMs: DEFAULT_RETRY_BACKOFF_MS,
-				totalTimeoutMs: params.totalTimeoutMs,
 				onError: params.onError ?? "continue",
 				cleanup: params.cleanup,
 			}, {

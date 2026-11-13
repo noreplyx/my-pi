@@ -1,9 +1,15 @@
 /**
- * Parallel orchestrator: run N tasks with concurrency limit + retry + total budget.
+ * Parallel orchestrator: run N tasks with concurrency limit + retry.
+ *
+ * No-timeout policy: no total budget is enforced. Legacy timeout params
+ * (task timeoutMs/questionTimeoutMs, opts fallback/total/question) are
+ * accepted for back-compat and ignored. The AbortSignal is the only
+ * cancellation source; onError=abort drains the queue (no new starts,
+ * in-flight tasks run to completion).
  */
 import type { AgentConfig } from "./agents.ts";
 import { createQuestionLock } from "./questions.ts";
-import { runWithRetry, isBudgetExceeded, totalDeadline } from "./resilience.ts";
+import { runWithRetry } from "./resilience.ts";
 import { runSingleAgent } from "./single.ts";
 import type { DispatchDefaults, OnUpdateCallback, ParentUI, SingleResult } from "./types.ts";
 import type { ForwardedPermissionStore } from "./forwarded-permissions.ts";
@@ -22,18 +28,23 @@ export interface ParallelTaskInput {
 	agent: string;
 	task: string;
 	cwd?: string;
+	/** @deprecated Ignored: accepted for back-compat only. No wall-clock budget. */
 	timeoutMs?: number;
 	allowQuestions?: boolean;
+	/** @deprecated Ignored: accepted for back-compat only. Questions wait indefinitely. */
 	questionTimeoutMs?: number;
 }
 
 export interface ParallelOptions {
+	/** @deprecated Ignored: accepted for back-compat only. No wall-clock budget. */
 	fallbackTimeoutMs?: number;
 	retryAttempts?: number;
 	retryBackoffMs?: number;
+	/** @deprecated Ignored: accepted for back-compat only. No total budget. */
 	totalTimeoutMs?: number;
 	onError?: "abort" | "continue";
 	allowQuestions?: boolean;
+	/** @deprecated Ignored: accepted for back-compat only. Questions wait indefinitely. */
 	questionTimeoutMs?: number;
 }
 
@@ -48,7 +59,7 @@ export interface ParallelDeps {
 	forwardedPermissions?: ForwardedPermissionStore;
 }
 
-function skippedResult(t: ParallelTaskInput, defaultCwd: string, reason: string, code: "aborted" | "budget-exceeded"): SingleResult {
+function skippedResult(t: ParallelTaskInput, defaultCwd: string, reason: string): SingleResult {
 	return {
 		agent: t.agent,
 		agentSource: "unknown",
@@ -58,9 +69,9 @@ function skippedResult(t: ParallelTaskInput, defaultCwd: string, reason: string,
 		messages: [],
 		stderr: reason,
 		usage: emptyUsage(),
-		stopReason: code === "aborted" ? "aborted" : "error",
+		stopReason: "aborted",
 		errorMessage: reason,
-		errorCode: code,
+		errorCode: "aborted",
 		timedOut: false,
 		durationMs: 0,
 		attempts: 0,
@@ -73,14 +84,12 @@ export async function runParallel(
 	deps: ParallelDeps,
 ): Promise<{ results: SingleResult[]; successCount: number; text: string; allFailed: boolean }> {
 	const { defaultCwd, dispatchDefaults, agents, signal, onUpdate, makeDetails, parentUI, forwardedPermissions } = deps;
-	const deadline = totalDeadline(opts.totalTimeoutMs);
+	// No-timeout policy: opts.totalTimeoutMs is accepted and ignored (no deadline).
 	const onError = opts.onError ?? "continue";
 	// Drain-only fail-fast: once a task fails with onError=abort, no new
 	// tasks start; in-flight tasks run to completion (never killed).
 	let failedFast = false;
-	// Per-run FIFO question lock: workers in this run serialize dialogs
-	// without blocking other runs or single-mode (global lock). No default
-	// question timeout — opt-in via questionTimeoutMs only.
+	// Per-run FIFO question lock: workers in this run serialize dialogs without blocking other runs or single-mode (global lock). Questions wait indefinitely until user abort.
 	const questionLock = createQuestionLock();
 	const allResults: SingleResult[] = new Array(tasks.length);
 	for (let i = 0; i < tasks.length; i++) {
@@ -118,11 +127,9 @@ export async function runParallel(
 			const taskStartedAt = Date.now();
 			try {
 				if (signal?.aborted) throw new Error("Subagent was aborted");
-				if (isBudgetExceeded(deadline)) {
-					result = skippedResult(t, defaultCwd, "Task skipped: total budget exceeded before start.", "budget-exceeded");
-				} else {
-					const { result: r, attempts } = await runWithRetry(
-						() =>
+				// No total budget: every task runs until settled or signal aborts.
+				const { result: r, attempts } = await runWithRetry(
+					() =>
 							runSingleAgent(
 								defaultCwd,
 								dispatchDefaults,
@@ -141,9 +148,7 @@ export async function runParallel(
 								makeDetails,
 								undefined,
 								{
-									timeoutMs: t.timeoutMs ?? opts.fallbackTimeoutMs,
 									allowQuestions: t.allowQuestions ?? opts.allowQuestions ?? true,
-									questionTimeoutMs: t.questionTimeoutMs ?? opts.questionTimeoutMs,
 									parentUI,
 									forwardedPermissions,
 									questionLock,
@@ -153,7 +158,6 @@ export async function runParallel(
 						{ attempts: opts.retryAttempts, backoffMs: opts.retryBackoffMs, signal },
 					);
 					result = { ...r, attempts };
-				}
 			} catch (e) {
 				if (signal?.aborted || (e as Error)?.message === "Subagent was aborted") throw e;
 				result = {
@@ -175,23 +179,20 @@ export async function runParallel(
 			}
 			allResults[index] = result;
 			emitParallelUpdate();
-			if (onError === "abort" && isFailedResult(result) && result.errorCode !== "aborted" && result.errorCode !== "budget-exceeded")
+			if (onError === "abort" && isFailedResult(result) && result.errorCode !== "aborted")
 				failedFast = true;
 			return result;
 		},
-		() => (signal?.aborted ?? false) || isBudgetExceeded(deadline) || (onError === "abort" && failedFast),
+		() => (signal?.aborted ?? false) || (onError === "abort" && failedFast),
 		(t, index) => {
 			let skipped: SingleResult;
 			if (signal?.aborted) {
-				skipped = skippedResult(t, defaultCwd, "Task skipped: aborted before start.", "aborted");
-			} else if (isBudgetExceeded(deadline)) {
-				skipped = skippedResult(t, defaultCwd, "Task skipped: total budget exceeded.", "budget-exceeded");
+				skipped = skippedResult(t, defaultCwd, "Task skipped: aborted before start.");
 			} else {
 				skipped = skippedResult(
 					t,
 					defaultCwd,
-					"Task skipped: onError=abort stopped queue after earlier failure.",
-					"aborted",
+					"Task skipped: onError=abort stopped queue after earlier failure."
 				);
 			}
 			allResults[index] = skipped;

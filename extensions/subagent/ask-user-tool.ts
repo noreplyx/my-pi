@@ -98,7 +98,7 @@ export const askUserToolDefinition = {
 	name: "ask_user",
 	label: "Ask user",
 	description: [
-		"Ask the user a single specific question and wait for the answer.",
+		"Ask the user a single specific question and wait indefinitely for the answer (no timeout; abort cancels).",
 		'Use options for choices (automatically includes an "Other (type custom answer)..." free-text fallback unless one is already present), or omit options for direct free-text input.',
 		"Ask ONE question per call; batch independent questions with parallel tool calls.",
 		"Only available when the agent frontmatter lists ask_user in tools.",
