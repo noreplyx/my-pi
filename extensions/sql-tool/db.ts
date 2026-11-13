@@ -2,6 +2,7 @@
 
 import { createRequire } from "node:module";
 import { defaultPort, pgSslOption, tediousTlsFragment, type ConnParams } from "./tls.ts";
+import { splitStatements } from "./validate.ts";
 
 const require = createRequire(import.meta.url);
 // CJS interop: pg/tedious ship CJS; require works under both CJS and jiti ESM.
@@ -78,7 +79,7 @@ function tediousConfig(conn: ConnParams): unknown {
       ...tediousTlsFragment(conn),
       rowCollectionOnRequestCompletion: false,
       useUTC: true,
-      appName: "pi-sql-reader",
+      appName: "pi-sql-tool",
     },
     authentication: {
       type: "default",
@@ -345,6 +346,318 @@ export async function getMssqlPlan(
     }
     const planText = extractMssqlPlanText(tabular);
     return { tabular, planText, executed: analyze };
+  } finally {
+    try { connection.close(); } catch { /* ignore */ }
+  }
+}
+
+// ---------- writes (gated by validateWriteSql in index.ts) ----------
+
+export interface RunWriteOptions {
+  /** Fail closed when affected rows exceed this cap (rollback + error). */
+  maxAffectedRows?: number;
+}
+
+export interface WriteResult {
+  tabular: Tabular;
+  affectedRows: number;
+}
+
+export interface WritePreviewStatement {
+  sql: string;
+  kind: string;
+  target: string;
+}
+
+export interface WritePreview {
+  previewText: string;
+  planText: string;
+  statements: string[];
+  statementDetails: WritePreviewStatement[];
+  executed: false;
+}
+
+/**
+ * Best-effort per-statement kind/target for previews (no I/O).
+ * kind = leading keyword (insert/update/delete/merge/ddl/other);
+ * target = best-effort table name or "" when not parseable.
+ */
+export function describeWriteStatement(stmt: string): { kind: string; target: string } {
+  const clean = stmt.trim().replace(/;+\s*$/, "");
+  const m = /^([A-Za-z]+)\b/.exec(clean);
+  const first = (m?.[1] ?? "other").toUpperCase();
+  const kind = first.toLowerCase();
+  let target = "";
+  const patterns: RegExp[] = [
+    /^\s*INSERT\s+INTO\s+([\w".\[\]]+)/i,
+    /^\s*UPDATE\s+([\w".\[\]]+)/i,
+    /^\s*DELETE\s+FROM\s+([\w".\[\]]+)/i,
+    /^\s*MERGE\s+(?:INTO\s+)?([\w".\[\]]+)/i,
+    /^\s*(?:CREATE|ALTER|DROP|TRUNCATE)\s+(?:TABLE\s+)?(?:IF\s+(?:NOT\s+)?EXISTS\s+)?([\w".\[\]]+)/i,
+  ];
+  for (const re of patterns) {
+    const hit = re.exec(clean);
+    if (hit?.[1]) { target = hit[1].replace(/^["\[]|["\]]$/g, ""); break; }
+  }
+  return { kind, target };
+}
+
+export interface BuildWritePreviewOptions {
+  /** Deprecated in v1 single-only: ignored. Kept for compat. */
+  allowMulti?: boolean;
+}
+
+function pgConnect(conn: ConnParams, signal?: AbortSignal): Promise<{ client: { connect(): Promise<void>; query(text: string, values?: unknown[]): Promise<{ fields: { name: string }[]; rows: unknown[]; rowCount: number | null }>; end(): Promise<void> }; onAbort: () => void }> {
+  const { connectMs, queryMs } = timeouts(conn);
+  const client = new PgClient({
+    host: conn.host,
+    port: conn.port ?? defaultPort("postgres"),
+    database: conn.database,
+    user: conn.user,
+    password: conn.password,
+    ssl: pgSslOption(conn),
+    connectionTimeoutMillis: connectMs,
+    query_timeout: queryMs,
+    statement_timeout: queryMs,
+  });
+  const abort = (reason: unknown): never => {
+    client.end().catch(() => {});
+    throw reason instanceof Error ? reason : new Error("Aborted");
+  };
+  if (signal?.aborted) abort(signal.reason);
+  const onAbort = () => abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  return client.connect().then(() => ({ client, onAbort }));
+}
+
+async function pgWrite(
+  conn: ConnParams,
+  sqlText: string,
+  opts: RunWriteOptions,
+  signal?: AbortSignal,
+): Promise<WriteResult> {
+  const max = Math.max(1, Math.floor(opts.maxAffectedRows ?? 100));
+  const { client, onAbort } = await pgConnect(conn, signal);
+  try {
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+    await client.query("BEGIN");
+    // v1 single-only: exactly one statement reaches here (multi blocked by
+    // validateWriteSql + runWrite assert; multi deferred). Per-statement loop
+    // kept so maxAffectedRows/rollback logic stays correct for the single stmt.
+    const statements = splitStatements(sqlText).map((s) => s.trim()).filter(Boolean);
+    let affected = 0;
+    let lastTabular: Tabular = { columns: [], rows: [] };
+    try {
+      for (const stmt of statements) {
+        const res = await client.query(stmt);
+        const rows = (res.rows ?? []) as Record<string, unknown>[];
+        const columns = (res.fields ?? []).map((f) => f.name);
+        const count = typeof res.rowCount === "number" ? res.rowCount : rows.length;
+        affected += count;
+        lastTabular = { columns, rows };
+        if (affected > max) {
+          throw new Error(`Blocked: affected rows ${affected} exceeds maxAffectedRows ${max} (rolled back).`);
+        }
+      }
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw e;
+    }
+    return { tabular: lastTabular, affectedRows: affected };
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    await client.end().catch(() => {});
+  }
+}
+
+function tediousExecWithCount(
+  connection: InstanceType<typeof Connection>,
+  sqlText: string,
+  signal?: AbortSignal,
+): Promise<{ tabular: Tabular; rowCount: number }> {
+  return new Promise((resolve, reject) => {
+    const columns: string[] = [];
+    const rows: Record<string, unknown>[] = [];
+    let settled = false;
+    const done = (err: Error | null, count?: number) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      if (err) reject(err);
+      else resolve({ tabular: { columns, rows }, rowCount: count ?? rows.length });
+    };
+    const onAbort = () => done(signal?.reason instanceof Error ? signal.reason : new Error("Aborted"));
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const request = new Request(sqlText, (reqErr: Error | null, rowCount?: number) => {
+      if (reqErr) done(reqErr);
+      else done(null, typeof rowCount === "number" ? rowCount : rows.length);
+    });
+    request.on("row", (cols: { metadata: { colName: string }; value: unknown }[]) => {
+      if (columns.length === 0) {
+        for (const c of cols) columns.push(c.metadata.colName);
+      }
+      const row: Record<string, unknown> = {};
+      for (const c of cols) row[c.metadata.colName] = c.value;
+      rows.push(row);
+    });
+    try {
+      connection.execSql(request);
+    } catch (e) {
+      done(e instanceof Error ? e : new Error(String(e)));
+    }
+  });
+}
+
+async function mssqlOpenConnection(conn: ConnParams, signal?: AbortSignal): Promise<InstanceType<typeof Connection>> {
+  const config = tediousConfig(conn) as ConstructorParameters<typeof Connection>[0];
+  const connection = new Connection(config);
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(signal?.reason instanceof Error ? signal.reason : new Error("Aborted"));
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    connection.on("connect", (err: Error | undefined) => {
+      signal?.removeEventListener("abort", onAbort);
+      if (err) reject(err);
+      else resolve();
+    });
+    connection.on("error", (err: Error) => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(err);
+    });
+    connection.connect();
+  }).catch((e) => {
+    try { connection.close(); } catch { /* ignore */ }
+    throw e;
+  });
+  return connection;
+}
+
+async function mssqlWrite(
+  conn: ConnParams,
+  sqlText: string,
+  opts: RunWriteOptions,
+  signal?: AbortSignal,
+): Promise<WriteResult> {
+  const max = Math.max(1, Math.floor(opts.maxAffectedRows ?? 100));
+  const connection = await mssqlOpenConnection(conn, signal);
+  try {
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+    // Ensure estimator session state is off before mutating.
+    await tediousExecOnConnection(connection, "SET SHOWPLAN_XML OFF", signal).catch(() => {});
+    await tediousExecOnConnection(connection, "SET NOEXEC OFF", signal).catch(() => {});
+    await tediousExecOnConnection(connection, "BEGIN TRANSACTION", signal);
+    // v1 single-only: exactly one statement reaches here (multi blocked by
+    // validateWriteSql + runWrite assert; multi deferred). Per-statement loop
+    // kept so rowCount summing / maxAffectedRows rollback stays correct.
+    const statements = splitStatements(sqlText).map((s) => s.trim()).filter(Boolean);
+    try {
+      let affected = 0;
+      let lastTabular: Tabular = { columns: [], rows: [] };
+      for (const stmt of statements) {
+        const { tabular, rowCount } = await tediousExecWithCount(connection, stmt, signal);
+        affected += rowCount;
+        lastTabular = tabular;
+        if (affected > max) {
+          throw new Error(`Blocked: affected rows ${affected} exceeds maxAffectedRows ${max} (rolled back).`);
+        }
+      }
+      await tediousExecOnConnection(connection, "COMMIT TRANSACTION", signal);
+      return { tabular: lastTabular, affectedRows: affected };
+    } catch (e) {
+      await tediousExecOnConnection(connection, "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION", signal).catch(() => {});
+      throw e;
+    } finally {
+      await tediousExecOnConnection(connection, "SET NOEXEC OFF", signal).catch(() => {});
+      await tediousExecOnConnection(connection, "SET SHOWPLAN_XML OFF", signal).catch(() => {});
+    }
+  } finally {
+    try { connection.close(); } catch { /* ignore */ }
+  }
+}
+
+export function runWrite(conn: ConnParams, sqlText: string, opts: RunWriteOptions = {}, signal?: AbortSignal): Promise<WriteResult> {
+  // v1 single-only assert (fail closed; multi deferred). validateWriteSql
+  // already blocks multi, this is defense-in-depth for direct callers.
+  if (splitStatements(sqlText).filter((s) => s.trim()).length > 1) {
+    return Promise.reject(new Error("Blocked: multi-statement not supported in v1, send single statements."));
+  }
+  if (conn.dialect === "postgres") return pgWrite(conn, sqlText, opts, signal);
+  return mssqlWrite(conn, sqlText, opts, signal);
+}
+
+export async function buildWritePreview(
+  conn: ConnParams,
+  sqlText: string,
+  optsOrSignal?: BuildWritePreviewOptions | AbortSignal,
+  maybeSignal?: AbortSignal,
+): Promise<WritePreview> {
+  // v1 single-only: overload-compatible signal handling kept, but multi is
+  // always blocked (allowMulti deprecated/ignored; multi deferred).
+  let signal: AbortSignal | undefined;
+  if (optsOrSignal instanceof AbortSignal || (optsOrSignal !== null && typeof optsOrSignal === "object" && "aborted" in (optsOrSignal as object) && typeof (optsOrSignal as AbortSignal).addEventListener === "function" && !("allowMulti" in (optsOrSignal as object)))) {
+    signal = optsOrSignal as AbortSignal;
+  } else if (optsOrSignal !== null && typeof optsOrSignal === "object") {
+    signal = maybeSignal;
+  } else {
+    signal = maybeSignal;
+  }
+  const statements = splitStatements(sqlText).map((s) => s.trim().replace(/;+\s*$/, "")).filter(Boolean);
+  if (statements.length > 1) {
+    throw new Error(`Blocked: multi-statement not supported in v1, send single statements (found ${statements.length}). allowMulti is deprecated and ignored.`);
+  }
+  const statementDetails: WritePreviewStatement[] = statements.map((sql) => ({ sql, ...describeWriteStatement(sql) }));
+  const first = statements[0] ?? sqlText.trim().replace(/;+\s*$/, "");
+  const header = (i: number, sql: string): string => `-- stmt ${i + 1}/${statements.length} [${statementDetails[i]?.kind ?? "other"}${statementDetails[i]?.target ? ` ${statementDetails[i].target}` : ""}]: ${sql}`;
+  if (conn.dialect === "postgres") {
+    // EXPLAIN never mutates; preview EVERY statement (not just the first)
+    // so the preview matches what runWrite would execute. If the engine
+    // rejects EXPLAIN for a statement (e.g. some DDL), record a textual
+    // fallback for that statement and continue with the rest.
+    const parts: string[] = [];
+    for (let i = 0; i < statements.length; i++) {
+      const stmt = statements[i];
+      try {
+        const t = await pgRun(conn, `EXPLAIN ${stmt}`, [], signal);
+        const { planText } = pgPlanText(t, "text");
+        parts.push(`${header(i, stmt)}\n${planText}`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        parts.push(`${header(i, stmt)}\n(EXPLAIN unavailable: ${msg})`);
+      }
+    }
+    return {
+      previewText: `DRY RUN (no mutation) postgres (${statements.length} statement(s)): ${first}${statements.length > 1 ? " …" : ""}`,
+      planText: parts.join("\n\n"),
+      statements,
+      statementDetails,
+      executed: false,
+    };
+  }
+  // sqlserver: estimated plan for EVERY statement on a dedicated connection,
+  // never executes. SET SHOWPLAN_XML ON + SET NOEXEC ON guarantees no
+  // mutation; both reset in finally.
+  const connection = await mssqlOpenConnection(conn, signal);
+  try {
+    await tediousExecOnConnection(connection, "SET SHOWPLAN_XML ON", signal);
+    await tediousExecOnConnection(connection, "SET NOEXEC ON", signal);
+    const parts: string[] = [];
+    try {
+      for (const stmt of statements) {
+        const tabular = await tediousExecOnConnection(connection, stmt, signal);
+        parts.push(`-- statement: ${stmt}\n${extractMssqlPlanText(tabular)}`);
+      }
+    } finally {
+      await tediousExecOnConnection(connection, "SET NOEXEC OFF", signal).catch(() => {});
+      await tediousExecOnConnection(connection, "SET SHOWPLAN_XML OFF", signal).catch(() => {});
+    }
+    return {
+      previewText: `DRY RUN (no mutation) sqlserver (${statements.length} statement(s)): ${first}${statements.length > 1 ? " …" : ""}`,
+      planText: parts.join("\n\n"),
+      statements,
+      executed: false,
+    };
   } finally {
     try { connection.close(); } catch { /* ignore */ }
   }

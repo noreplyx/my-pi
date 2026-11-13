@@ -354,6 +354,83 @@ export function findTopLevelOrderBy(sql: string): number {
   return last;
 }
 
+export type WriteKind = "insert" | "update" | "delete" | "merge" | "ddl" | "multi";
+
+export interface ValidateWriteOptions {
+  allowDdl?: boolean;
+  /** Deprecated in v1 single-only: ignored. Kept for compat. */
+  allowMulti?: boolean;
+}
+
+const WRITE_DML = ["INSERT", "UPDATE", "DELETE", "MERGE"];
+const WRITE_DDL = ["CREATE", "ALTER", "DROP", "TRUNCATE"];
+
+// Always blocked in write mode, even with allowDdl/allowMulti. Checked on
+// stripped SQL (literals/comments removed) to avoid false positives.
+const WRITE_ALWAYS_BLOCKED: RegExp[] = [
+  /\bGRANT\b/i,
+  /\bREVOKE\b/i,
+  /\bSHUTDOWN\b/i,
+  /\bKILL\b/i,
+  /\bBACKUP\b/i,
+  /\bRESTORE\b/i,
+  /\bCOPY\b/i, // covers COPY TO/FROM STDIN/STDOUT and file variants
+  /\bxp_/i,
+  /\bsp_add\w*/i,
+  /\bEXEC(UTE)?\s+(sp_|xp_)/i,
+];
+
+export function validateWriteSql(
+  sql: string,
+  opts: ValidateWriteOptions = {},
+): { ok: true; kind: WriteKind; statements: string[] } | { ok: false; error: string; kind?: WriteKind } {
+  if (!sql || !sql.trim()) return { ok: false, error: "sql must be a non-empty write statement." };
+  if (Buffer.byteLength(sql, "utf8") > MAX_SQL_BYTES) {
+    return { ok: false, error: `sql exceeds ${MAX_SQL_BYTES} bytes.` };
+  }
+  const stmts = splitStatements(sql);
+  if (stmts.length === 0) return { ok: false, error: "sql must be a non-empty write statement." };
+  // v1 single-statement-only: multi-statement is always blocked. allowMulti is
+  // deprecated and ignored (kept for compat); send single statements instead.
+  if (stmts.length > 1) {
+    return { ok: false, error: `Blocked: multi-statement not supported in v1, send single statements (found ${stmts.length}). allowMulti is deprecated and ignored.`, kind: "multi" };
+  }
+  let sawDdl = false;
+  for (const stmt of stmts) {
+    const stripped = stripLiteralsAndComments(stmt).trim();
+    const firstWord = stripped.split(/[\s(]+/, 1)[0]?.toUpperCase() ?? "";
+    for (const re of WRITE_ALWAYS_BLOCKED) {
+      if (re.test(stripped)) {
+        return { ok: false, error: `Blocked: write contains forbidden keyword matching ${re.source}.` };
+      }
+    }
+    if (WRITE_DML.includes(firstWord)) {
+      // Best-effort guard: UPDATE/DELETE must include a literal WHERE.
+      // A literal WHERE does not guarantee selectivity (e.g. WHERE 1=1 still
+      // scans everything), so callers must also keep maxAffectedRows small.
+      if ((firstWord === "UPDATE" || firstWord === "DELETE") && !/\bWHERE\b/i.test(stripped)) {
+        return { ok: false, error: `Blocked: ${firstWord} requires a literal WHERE clause (best-effort guard only; does not guarantee selectivity, so keep maxAffectedRows small).`, kind: firstWord.toLowerCase() as WriteKind };
+      }
+      continue;
+    }
+    if (WRITE_DDL.includes(firstWord)) {
+      sawDdl = true;
+      if (!opts.allowDdl) {
+        return { ok: false, error: `Blocked: DDL ${firstWord} requires allowDdl:true.`, kind: "ddl" };
+      }
+      continue;
+    }
+    return {
+      ok: false,
+      error: `Only write statements are allowed (INSERT/UPDATE/DELETE/MERGE${opts.allowDdl ? "/DDL" : ""}, got "${firstWord || "?"}"). Use mode:read for SELECT.`,
+    };
+  }
+  // v1 single-only: stmts.length is always 1 here (multi blocked above).
+  if (sawDdl) return { ok: true, kind: "ddl", statements: stmts };
+  const singleFirst = stripLiteralsAndComments(stmts[0]).trim().split(/[\s(]+/, 1)[0]?.toLowerCase() ?? "other";
+  return { ok: true, kind: singleFirst as WriteKind, statements: stmts };
+}
+
 export function truncateCell(value: unknown): { text: string; wasTruncated: boolean } {
   if (value === null || value === undefined) return { text: "NULL", wasTruncated: false };
   let s: string;

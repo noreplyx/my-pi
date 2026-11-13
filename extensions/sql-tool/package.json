@@ -1,0 +1,10 @@
+{
+  "name": "pi-sql-tool",
+  "version": "1.1.0",
+  "description": "SQL Server + Postgres reader/writer extension for Pi (TLS / non-TLS, dry-run gated writes)",
+  "type": "module",
+  "dependencies": {
+    "pg": "^8.13.1",
+    "tedious": "^18.6.1"
+  }
+}
