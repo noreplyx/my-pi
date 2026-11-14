@@ -19,7 +19,7 @@ Postgres + SQL Server reader/writer for Pi. Canonical tool `sql-tool` (label "SQ
 | `schema` | conn + `schema?` | tables + columns + indexes bundled (capped at 200 tables, truncated flag; `indexCount`) |
 | `datatypes` | conn | distinct types + column/table counts |
 | `write` | conn + `sql` + write gate | executes INSERT/UPDATE/DELETE/MERGE (DDL with `allowDdl`). Returns `affectedRows`, optional rows, `dryRun`, `executed` |
-| `preview` | conn + `sql` | no-mutation write plan for the single statement (pg `EXPLAIN`, mssql `SHOWPLAN_XML+NOEXEC`). Returns `previewText`/`planText` (+ `details.statements`), `dryRun:true`, `executed:false` |
+| `preview` | conn + `sql` | no-mutation write plan for the single statement (pg `EXPLAIN`, mssql `SHOWPLAN_XML+NOEXEC`). Returns `previewText`/`planText` (+ `details.statements`, `details.statementDetails[{sql,kind,target}]`), `dryRun:true`, `executed:false` |
 
 ## Connection (per call, never persisted)
 
@@ -43,15 +43,20 @@ Row cap (`limit`, default 100, max 1000) is pushed to the server (`LIMIT`/`TOP` 
 `EXPLAIN`/`VALUES`/`TABLE` leaders skip wrapping (invalid syntax) and rely on client slicing.
 Cells truncated at 2000 chars. Long queries are cancellable via abort signal.
 
-## Write gate
+## Write gate (2-layer, mirrors git-tool)
 
 `mode` defaults to `read`. `write`/`preview` require `mode:"write"` (fail-closed otherwise).
+Write ops (dryRun preview by default; execute with dryRun:false + confirm:true + UI confirm).
 
-| `dryRun` | `confirm` | result |
-|---|---|---|
-| `true` (default) | any | preview only via `buildWritePreview` — plans the single statement, no mutation |
-| `false` | `false`/unset (default) | fail-closed error (must opt in) |
-| `false` | `true` | execute via `runWrite` (transaction, `maxAffectedRows` rollback) |
+| `dryRun` | `confirm` | UI | result |
+|---|---|---|---|
+| `true` (default) | any | not required | preview only via `buildWritePreview` — plans the single statement, no mutation, no prompt |
+| `false` | `false`/unset (default) | not prompted | fail-closed error (must opt in) |
+| `false` | `true` | headless (`hasUI:false`) | fail-closed `USER_CANCELLED` (needs interactive confirmation) |
+| `false` | `true` | denied | `USER_CANCELLED` (cancelled by user), audited as denied |
+| `false` | `true` | allowed | execute via serialized `runWrite` (transaction, `maxAffectedRows` rollback) |
+
+`preview` action never requires UI. `sql_reader` alias stays read-only fail-closed (no `ui.confirm` even if `confirm:true`).
 
 Defaults: `dryRun:true`, `confirm:false`, `allowDdl:false`, `allowMulti:false (deprecated/ignored in v1 single-only; multi-statement blocked)`, `maxAffectedRows:100`, `returnRows:true`.
 

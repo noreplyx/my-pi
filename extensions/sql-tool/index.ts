@@ -16,7 +16,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { buildWritePreview, formatIndexRow, getMssqlPlan, getPgPlan, listColumns, listDataTypes, listIndexes, listTables, ping, runQuery, runWrite, type Tabular } from "./db.ts";
-import { connLabel, tlsSummary, type ConnParams } from "./tls.ts";
+import { connLabel, defaultPort, tlsSummary, type ConnParams } from "./tls.ts";
 import { appendLimit, clampRows, truncateCell, validateReadOnlySql, validateWriteSql } from "./validate.ts";
 
 const Dialect = Type.Union([Type.Literal("postgres"), Type.Literal("sqlserver")], {
@@ -77,9 +77,9 @@ const SqlToolParams = Type.Object({
   settings: Type.Optional(Type.Boolean({ description: "Plan only, postgres EXPLAIN SETTINGS." })),
   wal: Type.Optional(Type.Boolean({ description: "Plan only, postgres EXPLAIN WAL." })),
   planFormat: Type.Optional(Type.Union([Type.Literal("xml"), Type.Literal("all"), Type.Literal("text")], { description: "Plan only, sqlserver estimated shape (default xml SHOWPLAN_XML; all=SHOWPLAN_ALL table; text=SHOWPLAN_TEXT). Ignored for postgres and for actual (analyze=true) plans." })),
-  mode: Type.Optional(Type.Union([Type.Literal("read"), Type.Literal("write")], { description: "read (default) = read-only actions; write = allow write/preview actions with dryRun/confirm gate.", default: "read" })),
-  confirm: Type.Optional(Type.Boolean({ description: "Write gate: must be true with dryRun:false to execute. Default false.", default: false })),
-  dryRun: Type.Optional(Type.Boolean({ description: "Write gate: true (default) = preview only, no mutation. Set false + confirm:true to execute.", default: true })),
+  mode: Type.Optional(Type.Union([Type.Literal("read"), Type.Literal("write")], { description: "read (default) = read-only actions; write = allow write/preview actions with dryRun/confirm + UI confirm gate.", default: "read" })),
+  confirm: Type.Optional(Type.Boolean({ description: "Write gate: must be true with dryRun:false + UI confirm to execute. Default false.", default: false })),
+  dryRun: Type.Optional(Type.Boolean({ description: "Write gate: true (default) = preview only, no mutation. Set false + confirm:true + UI confirm to execute.", default: true })),
   allowDdl: Type.Optional(Type.Boolean({ description: "Write: allow CREATE/ALTER/DROP/TRUNCATE. Default false.", default: false })),
   allowMulti: Type.Optional(Type.Boolean({ description: "Write: deprecated in v1 single-only, ignored. Multi-statement is blocked; send single statements. Default false.", default: false })),
   maxAffectedRows: Type.Optional(Type.Integer({ description: "Write: rollback + error when affected rows exceed this cap. Default 100.", minimum: 1, default: 100 })),
@@ -179,6 +179,62 @@ function dynamicAnnotations(mode: string): { readOnlyHint: boolean; destructiveH
   return { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
 }
 
+type ToolUi = {
+  confirm: (title: string, body: string) => Promise<boolean>;
+  notify: (message: string, level?: string) => void;
+  setStatus: (key: string, text: string) => void;
+};
+
+type SqlToolCtx = {
+  hasUI: boolean;
+  ui: ToolUi;
+  signal?: AbortSignal;
+};
+
+const noopUi: ToolUi = {
+  confirm: async () => false,
+  notify: () => undefined,
+  setStatus: () => undefined,
+};
+
+function normalizeCtx(ctx: unknown, signal?: AbortSignal): SqlToolCtx {
+  const c = (ctx ?? {}) as Partial<{ hasUI: boolean; ui: Partial<ToolUi> }>;
+  return {
+    hasUI: c.hasUI ?? false,
+    ui: {
+      confirm: c.ui?.confirm?.bind(c.ui) ?? noopUi.confirm,
+      notify: (c.ui?.notify as ToolUi["notify"] | undefined)?.bind(c.ui) ?? noopUi.notify,
+      setStatus: (c.ui?.setStatus as ToolUi["setStatus"] | undefined)?.bind(c.ui) ?? noopUi.setStatus,
+    },
+    signal,
+  };
+}
+
+/** Serialize mutating writes per target so concurrent runWrite calls don't interleave (mirrors git-tool). */
+const writeChains = new Map<string, Promise<void>>();
+
+function serializeWrite<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = writeChains.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const chained = prev.then(() => gate);
+  writeChains.set(key, chained.catch(() => undefined));
+  return prev.then(fn).finally(release);
+}
+
+/** Per-target serialization key (never secrets): dialect/host/port/database lowercased. */
+function writeTargetKey(conn: ConnParams): string {
+  const port = conn.port ?? defaultPort(conn.dialect);
+  return `${conn.dialect}://${conn.host}:${port}/${conn.database}`.toLowerCase();
+}
+
+function singleLineSql(sql: string, cap = 500): string {
+  const oneLine = sql.replace(/\s+/g, " ").trim();
+  return oneLine.length > cap ? `${oneLine.slice(0, cap)}\u2026` : oneLine;
+}
+
 function mdTable(t: Tabular, cap = 20): string {
   if (t.rows.length === 0) return "(no rows)";
   const cols = t.columns.length > 0 ? t.columns : Object.keys(t.rows[0]);
@@ -193,9 +249,11 @@ function mdTable(t: Tabular, cap = 20): string {
 
 async function executeSqlTool(
   params: Params,
-  signal: AbortSignal | undefined,
+  toolCtx: SqlToolCtx = { hasUI: false, ui: noopUi },
   opts: { deprecatedAlias?: boolean } = {},
+  auditEntry: (data: Record<string, unknown>) => void = () => undefined,
 ) {
+  const signal = toolCtx.signal;
   const t0 = Date.now();
   const mode = params.mode ?? "read";
   const annotations = dynamicAnnotations(mode);
@@ -210,16 +268,17 @@ async function executeSqlTool(
     annotations,
     ...(opts.deprecatedAlias ? { deprecatedAlias: true } : {}),
   };
-  const fail = (text: string) => ({
+  const fail = (text: string, code?: string) => ({
     content: [{ type: "text" as const, text }],
-    details: { ...audit, dialect: params.dialect, target: connLabel(toConn(params)), tls: tlsSummary(toConn(params)), error: text },
-    isError: true,
+    details: { ...audit, dialect: params.dialect, target: connLabel(toConn(params)), tls: tlsSummary(toConn(params)), error: text, ...(code ? { code } : {}) },
+    isError: true as const,
   });
-  // Deprecated alias is gated to read-only: its static annotations advertise
-  // readOnlyHint:true, so write/preview through it must fail closed rather
+  // Deprecated alias is gated to read-only at runtime: static registration
+  // stays write-capable (readOnlyHint:false, destructiveHint:true) for
+  // fail-closed parity, so write/preview through it must fail closed rather
   // than delegate to the write-capable execute path.
   if (opts.deprecatedAlias && (mode === "write" || params.action === "write" || params.action === "preview")) {
-    return fail("Blocked: deprecated alias sql_reader is read-only. Use sql-tool with mode:\"write\" for write/preview actions.");
+    return fail("Blocked: deprecated alias sql_reader is read-only. Use sql-tool with mode:\"write\" for write/preview actions.", "USER_CANCELLED");
   }
   try {
     const conn = toConn(params);
@@ -417,28 +476,58 @@ async function executeSqlTool(
       const maxAffectedRows = params.maxAffectedRows ?? 100;
 
       if (params.action === "preview" || dryRun) {
-        const preview = await buildWritePreview(conn, params.sql, signal);
-        const text = `Write preview OK ${label} (no mutation, kind=${kind}, ${elapsed()}ms):\n${preview.previewText}\n${preview.planText.slice(0, PLAN_DISPLAY_CHARS) || "(no plan text)"}`;
-        return {
-          content: [{ type: "text" as const, text }],
-          details: { ...audit, target: label, tls, kind, preview: true, previewText: preview.previewText, planText: preview.planText, statements: preview.statements, dryRun: true, executed: false, elapsedMs: elapsed() },
-          structuredContent: { preview: true, previewText: preview.previewText, planText: preview.planText, statements: preview.statements, dryRun: true, executed: false, affectedRows: 0 },
-        };
+        toolCtx.ui.setStatus("sql-tool", "sql-tool preview\u2026");
+        try {
+          const preview = await buildWritePreview(conn, params.sql, signal);
+          const text = `Write preview OK ${label} (no mutation, kind=${kind}, ${elapsed()}ms):\n${preview.previewText}\n${preview.planText.slice(0, PLAN_DISPLAY_CHARS) || "(no plan text)"}`;
+          auditEntry({ at: new Date().toISOString(), action: params.action, kind, target: label, dryRun: true, confirm, executed: false, elapsedMs: elapsed(), annotations });
+          return {
+            content: [{ type: "text" as const, text }],
+            details: { ...audit, target: label, tls, kind, preview: true, previewText: preview.previewText, planText: preview.planText, statements: preview.statements, statementDetails: preview.statementDetails, dryRun: true, executed: false, elapsedMs: elapsed() },
+            structuredContent: { preview: true, previewText: preview.previewText, planText: preview.planText, statements: preview.statements, statementDetails: preview.statementDetails, dryRun: true, executed: false, affectedRows: 0 },
+          };
+        } finally {
+          toolCtx.ui.setStatus("sql-tool", "");
+        }
       }
 
-      // dryRun:false path — requires explicit confirm:true, else fail closed.
+      // dryRun:false path — Layer 1: requires explicit confirm:true, else fail closed (no UI prompt).
       if (!confirm) {
-        return fail("Refused: write with dryRun:false requires confirm:true. Re-run with dryRun:false + confirm:true to execute, or leave dryRun:true for a preview.");
+        return fail("Refused: write with dryRun:false requires confirm:true. Re-run with dryRun:false + confirm:true to execute, or leave dryRun:true for a preview.", "USER_CANCELLED");
       }
-      const result = await runWrite(conn, params.sql, { maxAffectedRows }, signal);
-      const wantRows = params.returnRows ?? true;
-      const rows = wantRows ? result.tabular.rows.slice(0, clampRows(params.limit, params.maxRows).rows) : [];
-      const text = `Write OK ${label} (affected=${result.affectedRows}, kind=${kind}, ${elapsed()}ms)${wantRows && result.tabular.rows.length > 0 ? `:\n${mdTable({ columns: result.tabular.columns, rows })}` : ""}`;
-      return {
-        content: [{ type: "text" as const, text }],
-        details: { ...audit, target: label, tls, kind, columns: result.tabular.columns, affectedRows: result.affectedRows, rowCount: result.affectedRows, preview: false, dryRun: false, executed: true, elapsedMs: elapsed() },
-        structuredContent: { columns: result.tabular.columns, rows, affectedRows: result.affectedRows, rowCount: result.affectedRows, preview: false, dryRun: false, executed: true },
-      };
+      // Layer 2: interactive UI confirm (mirrors git-tool core order).
+      if (!toolCtx.hasUI) {
+        auditEntry({ at: new Date().toISOString(), action: params.action, kind, target: label, dryRun: false, confirm, executed: false, denied: true, reason: "no-ui", elapsedMs: elapsed(), annotations });
+        return fail("Refused: write needs interactive confirmation (no UI in this mode).", "USER_CANCELLED");
+      }
+      const confirmBody = `Target: ${label}\nKind: ${kind}\nMax affected rows: ${maxAffectedRows}\nSQL: ${singleLineSql(params.sql)}`;
+      const ok = await toolCtx.ui.confirm("sql-tool: confirm write", confirmBody);
+      if (!ok) {
+        auditEntry({ at: new Date().toISOString(), action: params.action, kind, target: label, dryRun: false, confirm, executed: false, denied: true, elapsedMs: elapsed(), annotations });
+        return fail("Cancelled by user: write not executed.", "USER_CANCELLED");
+      }
+      // Only action:write + dryRun:false + confirm:true + ui-confirm:true reaches runWrite (serialized per target).
+      return serializeWrite(writeTargetKey(conn), async () => {
+        toolCtx.ui.setStatus("sql-tool", "sql-tool write\u2026");
+        try {
+          const result = await runWrite(conn, params.sql as string, { maxAffectedRows }, signal);
+          const wantRows = params.returnRows ?? true;
+          const rows = wantRows ? result.tabular.rows.slice(0, clampRows(params.limit, params.maxRows).rows) : [];
+          const text = `Write OK ${label} (affected=${result.affectedRows}, kind=${kind}, ${elapsed()}ms)${wantRows && result.tabular.rows.length > 0 ? `:\n${mdTable({ columns: result.tabular.columns, rows })}` : ""}`;
+          auditEntry({ at: new Date().toISOString(), action: params.action, kind, target: label, dryRun: false, confirm, executed: true, affectedRows: result.affectedRows, elapsedMs: elapsed(), annotations });
+          return {
+            content: [{ type: "text" as const, text }],
+            details: { ...audit, target: label, tls, kind, columns: result.tabular.columns, affectedRows: result.affectedRows, rowCount: result.affectedRows, preview: false, dryRun: false, executed: true, elapsedMs: elapsed() },
+            structuredContent: { columns: result.tabular.columns, rows, affectedRows: result.affectedRows, rowCount: result.affectedRows, preview: false, dryRun: false, executed: true },
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          auditEntry({ at: new Date().toISOString(), action: params.action, kind, target: label, dryRun: false, confirm, executed: true, isError: true, error: msg, elapsedMs: elapsed(), annotations });
+          throw e;
+        } finally {
+          toolCtx.ui.setStatus("sql-tool", "");
+        }
+      });
     }
 
     return fail(`Unknown action "${(params as { action: string }).action}".`);
@@ -455,7 +544,7 @@ export default function (pi: ExtensionAPI) {
       "Postgres + SQL Server reader/writer (TLS or plaintext).",
       "Read actions: query (single SELECT/WITH, EXPLAIN… allowed), plan (estimated by default, actual when analyze=true), tables, columns, indexes, schema, datatypes, ping.",
       "Write actions (mode:write only, v1 single-statement only): write (single INSERT/UPDATE/DELETE/MERGE; DDL with allowDdl:true; WHERE required for UPDATE/DELETE; allowMulti deprecated/ignored) and preview (no-mutation plan via EXPLAIN / SHOWPLAN_XML+NOEXEC).",
-      "Gate: dryRun:true (default) = preview only; dryRun:false + confirm:true = execute with maxAffectedRows rollback; otherwise fail-closed.",
+      "Write ops (dryRun preview by default; execute with dryRun:false + confirm:true + UI confirm). Gate: dryRun:true (default)=preview only; dryRun:false+confirm:true+UI confirm=execute with maxAffectedRows rollback; otherwise fail-closed (USER_CANCELLED headless/denied). Preview never requires UI.",
       "Credentials are per-call and never stored. Set tls.mode=tls for encrypted connections.",
     ].join(" "),
     parameters: SqlToolParams,
@@ -464,8 +553,11 @@ export default function (pi: ExtensionAPI) {
     // readOnly. Per-call dynamic hints are returned in details.audit.annotations
     // as readOnlyHint=(mode==read), destructiveHint=(mode==write), idempotentHint=false on write.
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    async execute(_toolCallId: string, rawParams: unknown, signal: AbortSignal, _onUpdate: unknown, _ctx: unknown) {
-      return executeSqlTool(rawParams as Params, signal, {});
+    async execute(_toolCallId: string, rawParams: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) {
+      const toolCtx = normalizeCtx(ctx, signal);
+      return executeSqlTool(rawParams as Params, toolCtx, {}, (data) => {
+        pi.appendEntry("sql-tool-audit", { at: new Date().toISOString(), ...data });
+      });
     },
     renderCall(args: unknown, theme: any, _context: unknown) {
       const a = args as Partial<Params>;
@@ -495,7 +587,15 @@ export default function (pi: ExtensionAPI) {
       return new Text(text, 0, 0);
     },
   };
-  pi.registerTool({ name: "sql-tool", ...toolDef });
+  pi.registerTool({
+    name: "sql-tool",
+    ...toolDef,
+    // Mirror git-tool: the precise internal result union does not satisfy the
+    // generic ToolDefinition inference; cast the boundary (behavior unchanged).
+    execute: toolDef.execute as never,
+    renderCall: toolDef.renderCall as never,
+    renderResult: toolDef.renderResult as never,
+  });
 
   // Deprecated alias: read-only gate (fail-closed) + safe annotations.
   pi.registerTool({
@@ -505,14 +605,17 @@ export default function (pi: ExtensionAPI) {
     parameters: SqlToolParams,
     outputSchema: SqlToolOutputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    async execute(_toolCallId: string, rawParams: unknown, signal: AbortSignal, _onUpdate: unknown, _ctx: unknown) {
+    execute: (async (_toolCallId: string, rawParams: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: unknown) => {
       const p = rawParams as { mode?: string; action?: string } | undefined;
       if (p?.mode === "write" || p?.action === "write" || p?.action === "preview") {
         const text = "Blocked: deprecated alias sql_reader is read-only. Use canonical sql-tool with mode:\"write\" for write/preview actions.";
-        return { content: [{ type: "text" as const, text }], details: { deprecatedAlias: true, error: text }, isError: true };
+        return { content: [{ type: "text" as const, text }], details: { deprecatedAlias: true, code: "USER_CANCELLED", error: text }, isError: true };
       }
-      return executeSqlTool(rawParams as Params, signal, { deprecatedAlias: true });
-    },
+      const toolCtx = normalizeCtx(ctx, signal);
+      return executeSqlTool(rawParams as Params, toolCtx, { deprecatedAlias: true }, (data) => {
+        pi.appendEntry("sql-tool-audit", { at: new Date().toISOString(), ...data });
+      });
+    }) as never,
     renderCall: toolDef.renderCall as never,
     renderResult: toolDef.renderResult as never,
   });

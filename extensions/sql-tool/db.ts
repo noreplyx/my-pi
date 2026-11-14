@@ -113,7 +113,7 @@ function tediousRun(
     signal?.addEventListener("abort", onAbort, { once: true });
     connection.on("connect", (err: Error | undefined) => {
       if (err) { done(err); return; }
-      const request = new Request(sqlText, (reqErr: Error | null) => {
+      const request = new Request(sqlText, (reqErr: Error | null | undefined) => {
         if (reqErr) done(reqErr);
         else done(null, { columns, rows });
       });
@@ -249,7 +249,7 @@ function tediousExecOnConnection(
     const onAbort = () => done(signal?.reason instanceof Error ? signal.reason : new Error("Aborted"));
     if (signal?.aborted) { onAbort(); return; }
     signal?.addEventListener("abort", onAbort, { once: true });
-    const request = new Request(sqlText, (reqErr: Error | null) => {
+    const request = new Request(sqlText, (reqErr: Error | null | undefined) => {
       if (reqErr) done(reqErr);
       else done(null, { columns, rows });
     });
@@ -407,7 +407,7 @@ export interface BuildWritePreviewOptions {
   allowMulti?: boolean;
 }
 
-function pgConnect(conn: ConnParams, signal?: AbortSignal): Promise<{ client: { connect(): Promise<void>; query(text: string, values?: unknown[]): Promise<{ fields: { name: string }[]; rows: unknown[]; rowCount: number | null }>; end(): Promise<void> }; onAbort: () => void }> {
+function pgConnect(conn: ConnParams, signal?: AbortSignal): Promise<{ client: InstanceType<typeof PgClient>; onAbort: () => void }> {
   const { connectMs, queryMs } = timeouts(conn);
   const client = new PgClient({
     host: conn.host,
@@ -490,7 +490,7 @@ function tediousExecWithCount(
     const onAbort = () => done(signal?.reason instanceof Error ? signal.reason : new Error("Aborted"));
     if (signal?.aborted) { onAbort(); return; }
     signal?.addEventListener("abort", onAbort, { once: true });
-    const request = new Request(sqlText, (reqErr: Error | null, rowCount?: number) => {
+    const request = new Request(sqlText, (reqErr: Error | null | undefined, rowCount?: number) => {
       if (reqErr) done(reqErr);
       else done(null, typeof rowCount === "number" ? rowCount : rows.length);
     });
@@ -656,6 +656,7 @@ export async function buildWritePreview(
       previewText: `DRY RUN (no mutation) sqlserver (${statements.length} statement(s)): ${first}${statements.length > 1 ? " …" : ""}`,
       planText: parts.join("\n\n"),
       statements,
+      statementDetails,
       executed: false,
     };
   } finally {
