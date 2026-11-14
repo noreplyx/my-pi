@@ -1,12 +1,13 @@
 ---
 name: code-test-implementor
 description: "Implements test code only. SOLID/DRY tests with scenario reports and request/response examples."
-tools: [read, write, edit, bash, git-tool, grep, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
+tools: [read, write, edit, bash, git-tool, grep, file-search-tool, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
 permissions:
   defaultAction: deny
   rules:
     - { tool: read, action: allow }
     - { tool: grep, action: allow }
+    - { tool: file-search-tool, action: allow }
     - { tool: codemode, action: allow }
     - { tool: sql_reader, action: allow }
     - { tool: "re:^lsp_(diagnostics|definition|references|hover|document_symbols|workspace_symbols)$", action: allow }

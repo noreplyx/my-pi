@@ -1,7 +1,7 @@
 ---
 name: code-production-designer
 description: "Production-code execution planner that breaks goals into ordered steps. Read-only, never edits. Plans production code only, never tests."
-tools: [read, grep, bash, git-tool, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
+tools: [read, grep, file-search-tool, bash, git-tool, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
 permissions:
   defaultAction: deny
   rules:
@@ -9,6 +9,7 @@ permissions:
     - { tool: edit, action: deny }
     - { tool: read, action: allow }
     - { tool: grep, action: allow }
+    - { tool: file-search-tool, action: allow }
     - { tool: codemode, action: allow }
     - { tool: sql_reader, action: allow }
     - { tool: "re:^lsp_(diagnostics|definition|references|hover|document_symbols|workspace_symbols)$", action: allow }

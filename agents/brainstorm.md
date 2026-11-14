@@ -1,7 +1,7 @@
 ---
 name: brainstorm
 description: "Collaborative requirements and design brainstormer. Explores the codebase read-only, proactively asks the user about ambiguities and edge cases via ask_user across 6 lenses (Performance, Best Practices, Security, UX, Design, Architecture), and produces a structured specification. Never edits files."
-tools: [ask_user, read, grep, bash, git-tool, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
+tools: [ask_user, read, grep, file-search-tool, bash, git-tool, codemode, sql_reader, fetch, lsp_diagnostics, lsp_definition, lsp_references, lsp_hover, lsp_document_symbols, lsp_workspace_symbols]
 permissions:
   defaultAction: deny
   rules:
@@ -10,6 +10,7 @@ permissions:
     - { tool: ask_user, action: allow }
     - { tool: read, action: allow }
     - { tool: grep, action: allow }
+    - { tool: file-search-tool, action: allow }
     - { tool: codemode, action: allow }
     - { tool: sql_reader, action: allow }
     - { tool: "re:^lsp_(diagnostics|definition|references|hover|document_symbols|workspace_symbols)$", action: allow }

@@ -1,11 +1,12 @@
 ---
 name: orchestrator
 description: "Delegates all work via subagents; analyzes parallel/swarm efficiency. Never implements or edits directly. Never writes tests unless user explicitly requested test implementation."
-tools: [subagent, read, write, edit, bash, git-tool, codemode, sql_reader, fetch, render_widget]
+tools: [subagent, read, file-search-tool, write, edit, bash, git-tool, codemode, sql_reader, fetch, render_widget]
 permissions:
   defaultAction: deny
   rules:
     - { tool: read, action: allow }
+    - { tool: file-search-tool, action: allow }
     - { tool: codemode, action: allow }
     - { tool: sql_reader, action: allow }
     - { tool: fetch, match: 're:^(POST|PUT|PATCH|DELETE)\b', action: ask }
