@@ -12,7 +12,8 @@
  *   (module scope holds frozen constants only), so all entry points are
  *   reentrant and safe under parallel tool execution.
  * - Pure JSON output: `execute` never throws; failures become error
- *   envelopes. Caps are enforced *before* `JSON.stringify`.
+ *   envelopes. No caps: full unbounded results; redaction is display-only
+ *   before `JSON.stringify`.
  * - Redaction is display-only: file contents are never modified, only the
  *   text returned to the model is masked.
  * - Never execs/spawns anything; no timers, sockets, or file watchers.
@@ -24,14 +25,10 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type Static, Type } from "typebox";
 
 /* ------------------------------------------------------------------ */
-/* Hard caps (single canonical home for every limit).                  */
+/* Uncapped: no hard result/size/depth caps. Single canonical home.    */
 /* ------------------------------------------------------------------ */
 
-const MAX_RESULTS_HARD = 500;
-const MAX_FILE_BYTES_HARD = 64 * 1024;
-const MAX_DEPTH_HARD = 25;
 const CONCURRENCY = 32;
-const MAX_LINE_CHARS = 2000;
 
 /* ------------------------------------------------------------------ */
 /* Unified mode-discriminated TypeBox schema.                          */
@@ -43,7 +40,7 @@ const GlobParams = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Base directory. Absolute or relative to session cwd. Defaults to session cwd." })),
 	includeHidden: Type.Optional(Type.Boolean({ default: true, description: "Include dotfiles/dot-directories. Default true (show everything)." })),
 	respectGitignore: Type.Optional(Type.Boolean({ default: false, description: "Filter via .gitignore. Default false (show everything)." })),
-	maxResults: Type.Optional(Type.Integer({ default: 500, description: "Max files returned. Defaults 500, clamped to 1..500; pass -1 for uncapped (Infinity)." })),
+	maxResults: Type.Optional(Type.Integer({ minimum: 0, description: "Max files returned. Unbounded; omit for all. Must be >= 0 (-1 is invalid)." })),
 });
 
 const LsParams = Type.Object({
@@ -51,8 +48,8 @@ const LsParams = Type.Object({
 	path: Type.Optional(Type.String({ description: "Directory to list. Absolute or relative to session cwd. Defaults to session cwd." })),
 	long: Type.Optional(Type.Boolean({ default: false, description: "Include size + mtime via stat. Default false (Dirent only, fast)." })),
 	recursive: Type.Optional(Type.Boolean({ default: false, description: "Walk subdirectories. Default false." })),
-	maxDepth: Type.Optional(Type.Integer({ description: "Max depth below path (1 = top level only). Defaults to 1, or 25 when recursive." })),
-	maxResults: Type.Optional(Type.Integer({ default: 500, description: "Max entries returned. Defaults 500, clamped to 1..500; pass -1 for uncapped (Infinity)." })),
+	maxDepth: Type.Optional(Type.Integer({ minimum: 0, description: "Max depth below path (1 = top level only). Unbounded; omit for full depth when recursive (defaults to 1 when not recursive). Must be >= 0 (-1 is invalid)." })),
+	maxResults: Type.Optional(Type.Integer({ minimum: 0, description: "Max entries returned. Unbounded; omit for all. Must be >= 0 (-1 is invalid)." })),
 });
 
 const FindParams = Type.Object({
@@ -65,12 +62,12 @@ const FindParams = Type.Object({
 		}),
 	),
 	namePattern: Type.Optional(Type.String({ description: "Glob matched against the basename (e.g. '*.test.ts')." })),
-	maxDepth: Type.Optional(Type.Integer({ default: 25, description: "Max depth below root. Clamped to 1..25." })),
+	maxDepth: Type.Optional(Type.Integer({ minimum: 0, description: "Max depth below root. Unbounded; omit for full depth. Must be >= 0 (-1 is invalid)." })),
 	minSize: Type.Optional(Type.Integer({ description: "Minimum file size in bytes. Applies to files only." })),
 	maxSize: Type.Optional(Type.Integer({ description: "Maximum file size in bytes. Applies to files only." })),
 	modifiedAfter: Type.Optional(Type.String({ description: "ISO date string; keep entries modified after it." })),
 	modifiedBefore: Type.Optional(Type.String({ description: "ISO date string; keep entries modified before it." })),
-	maxResults: Type.Optional(Type.Integer({ default: 500, description: "Max entries returned. Defaults 500, clamped to 1..500; pass -1 for uncapped (Infinity)." })),
+	maxResults: Type.Optional(Type.Integer({ minimum: 0, description: "Max entries returned. Unbounded; omit for all. Must be >= 0 (-1 is invalid)." })),
 });
 
 const GrepParams = Type.Object({
@@ -80,10 +77,10 @@ const GrepParams = Type.Object({
 	caseSensitive: Type.Optional(Type.Boolean({ default: true, description: "Case-sensitive matching. Default true." })),
 	root: Type.Optional(Type.String({ description: "Root directory. Absolute or relative to session cwd. Defaults to session cwd." })),
 	include: Type.Optional(Type.String({ description: "Glob filtering which files are searched (e.g. '*.ts')." })),
-	beforeContext: Type.Optional(Type.Integer({ default: 0, description: "Context lines before each match." })),
-	afterContext: Type.Optional(Type.Integer({ default: 0, description: "Context lines after each match." })),
-	maxMatches: Type.Optional(Type.Integer({ default: 500, description: "Max matches returned. Defaults 500, clamped to 1..500; pass -1 for uncapped (Infinity)." })),
-	maxFileSize: Type.Optional(Type.Integer({ default: 65536, description: "Skip files larger than this many bytes. Defaults 65536, clamped to 1..65536; pass -1 for uncapped (search all sizes, binary gate still applies)." })),
+	beforeContext: Type.Optional(Type.Integer({ minimum: 0, description: "Context lines before each match. Unbounded non-negative integer; omit or 0 for none. Must be >= 0 (-1 is invalid)." })),
+	afterContext: Type.Optional(Type.Integer({ minimum: 0, description: "Context lines after each match. Unbounded non-negative integer; omit or 0 for none. Must be >= 0 (-1 is invalid)." })),
+	maxMatches: Type.Optional(Type.Integer({ minimum: 0, description: "Max matches returned. Unbounded; omit for all. Must be >= 0 (-1 is invalid)." })),
+	maxFileSize: Type.Optional(Type.Integer({ minimum: 0, description: "Max file size in bytes. Unbounded; omit to search all sizes (binary gate still applies). Must be >= 0 (-1 is invalid)." })),
 });
 
 const FileToolParameters = Type.Union([GlobParams, LsParams, FindParams, GrepParams]);
@@ -118,21 +115,35 @@ function resolveBase(raw: string | undefined, sessionCwd: string, fallback: stri
 	return isAbsolute(value) ? resolve(value) : resolve(sessionCwd, value);
 }
 
-function clampCount(raw: unknown, fallback: number): number {
-	if (raw === -1) return Number.POSITIVE_INFINITY;
-	const num = typeof raw === "number" && Number.isFinite(raw) ? Math.floor(raw) : fallback;
-	return Math.max(1, Math.min(MAX_RESULTS_HARD, num));
+/** Unbounded limit: omit (undefined) means omitValue; finite values are honored as-is.
+ * Rejects negative values (including the legacy -1 sentinel) with a validation error. */
+function unboundedLimit(raw: unknown, name: string, omitValue: number): number {
+	if (raw === undefined) return omitValue;
+	if (typeof raw !== "number" || !Number.isFinite(raw)) {
+		throw new Error(`Invalid ${name}: must be a non-negative integer (omit for unbounded, -1 is invalid)`);
+	}
+	if (raw < 0) throw new Error(`Invalid ${name}: must be >= 0 (got ${raw}); -1 is invalid, omit for unbounded`);
+	return Math.floor(raw);
 }
 
-function clampDepth(raw: unknown, fallback: number): number {
-	const num = typeof raw === "number" && Number.isFinite(raw) ? Math.floor(raw) : fallback;
-	return Math.max(1, Math.min(MAX_DEPTH_HARD, num));
+/** Unbounded count: omit (undefined) means all; finite values are honored as-is. */
+function uncappedCount(raw: unknown, name: string): number {
+	return unboundedLimit(raw, name, Number.POSITIVE_INFINITY);
 }
 
-function clampFileBytes(raw: unknown, fallback: number): number {
-	if (raw === -1) return Number.POSITIVE_INFINITY;
-	const num = typeof raw === "number" && Number.isFinite(raw) ? Math.floor(raw) : fallback;
-	return Math.max(1, Math.min(MAX_FILE_BYTES_HARD, num));
+/** Unbounded depth: omit (undefined) means full depth; honors finite values as-is. */
+function uncappedDepth(raw: unknown, name: string): number {
+	return unboundedLimit(raw, name, Number.POSITIVE_INFINITY);
+}
+
+/** Unbounded context: omit (undefined) means 0; honors any finite non-negative value. */
+function uncappedContext(raw: unknown, name: string): number {
+	if (raw === undefined) return 0;
+	if (typeof raw !== "number" || !Number.isFinite(raw)) {
+		throw new Error(`Invalid ${name}: must be a non-negative integer (omit or 0 for none, -1 is invalid)`);
+	}
+	if (raw < 0) throw new Error(`Invalid ${name}: must be >= 0 (got ${raw}); -1 is invalid`);
+	return Math.floor(raw);
 }
 
 /** Concurrency limiter (~32 wide): chunked Promise.allSettled, skips rejects. */
@@ -328,7 +339,7 @@ const KEY_FILE_MASKED = "***PRIVATE-KEY-REDACTED***";
 
 function redactMatchLine(rawLine: string, isKeyFile: boolean): string {
 	if (isKeyFile) return KEY_FILE_MASKED;
-	return redactSecrets(clipLine(rawLine));
+	return redactSecrets(rawLine);
 }
 
 function redactSecrets(text: string): string {
@@ -345,11 +356,6 @@ function redactSecrets(text: string): string {
 		})
 		.join("\n");
 	return out;
-}
-
-function clipLine(text: string): string {
-	if (text.length <= MAX_LINE_CHARS) return text;
-	return `${text.slice(0, MAX_LINE_CHARS)}…[truncated]`;
 }
 
 /* ------------------------- ignore support ------------------------- */
@@ -433,8 +439,9 @@ interface CollectOptions {
 
 async function collectTree(rootAbs: string, opts: CollectOptions): Promise<TreeNode[]> {
 	// visited tracks only the root realpath + symlink-dir targets (not every
-	// descended directory); loop safety additionally relies on the depth-25
-	// cap (childDepth > maxDepth prunes deep/hardlink cycles). No change needed.
+	// descended directory). Depth is unbounded (maxDepth defaults to Infinity,
+	// childDepth > maxDepth prunes only when the caller passes a finite limit);
+	// loop safety relies on the visited symlink guard.
 	const visited = new Set<string>();
 	const nodes: TreeNode[] = [];
 	try {
@@ -525,15 +532,20 @@ async function ensureDirectory(dirAbs: string): Promise<void> {
 interface ToolEnvelope {
 	content: Array<{ type: "text"; text: string }>;
 	details: Record<string, unknown>;
-	structuredContent: Record<string, unknown>;
+	structuredContent: JsonValue;
 	isError: boolean;
 }
+
+/** Local JSON-value alias (mirrors the host SDK's JsonValue structurally).
+ * Keeps this file dependency-free while satisfying the host's
+ * `structuredContent?: JsonValue` tool-result typing. */
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
 function successEnvelope(result: Record<string, unknown>): ToolEnvelope {
 	return {
 		content: [{ type: "text", text: JSON.stringify(result) }],
 		details: result,
-		structuredContent: result,
+		structuredContent: result as JsonValue,
 		isError: false,
 	};
 }
@@ -543,7 +555,7 @@ function errorEnvelope(mode: string, message: string): ToolEnvelope {
 	return {
 		content: [{ type: "text", text: JSON.stringify(result) }],
 		details: result,
-		structuredContent: result,
+		structuredContent: result as JsonValue,
 		isError: true,
 	};
 }
@@ -558,7 +570,7 @@ async function doGlob(
 	signal: AbortSignal | undefined,
 ): Promise<Record<string, unknown>> {
 	const cwd = resolveBase(params.cwd, sessionCwd, ".");
-	const maxResults = clampCount(params.maxResults, 500);
+	const limit = uncappedCount(params.maxResults, "maxResults");
 	const includeHidden = params.includeHidden ?? true;
 	const respectGitignore = params.respectGitignore ?? false;
 	await ensureDirectory(cwd);
@@ -567,7 +579,7 @@ async function doGlob(
 	const ignoreRules = await loadIgnoreRules(cwd, respectGitignore);
 	const nodes = await collectTree(cwd, {
 		includeHidden,
-		maxDepth: MAX_DEPTH_HARD,
+		maxDepth: Number.POSITIVE_INFINITY,
 		ignoreRules,
 		skipGitDir: respectGitignore,
 		includeDirs: true,
@@ -587,17 +599,13 @@ async function doGlob(
 			}
 		}
 	}
-	const matched = [...seen].sort();
-	const totalCount = matched.length;
-	const files = maxResults === Number.POSITIVE_INFINITY ? matched : matched.slice(0, maxResults);
+	const matched = [...seen].sort().slice(0, limit);
 	return {
 		ok: true,
 		mode: "glob",
 		pattern: params.pattern,
 		cwd,
-		files,
-		truncated: totalCount > files.length,
-		totalCount,
+		files: matched,
 		aborted: checkAborted(signal),
 	};
 }
@@ -618,12 +626,17 @@ async function doLs(
 	const dirAbs = resolveBase(params.path, sessionCwd, ".");
 	const long = params.long ?? false;
 	const recursive = params.recursive ?? false;
-	const maxDepth = clampDepth(params.maxDepth, recursive ? MAX_DEPTH_HARD : 1);
+	const limit = uncappedCount(params.maxResults, "maxResults");
+	const depthLimit = params.maxDepth === undefined ? undefined : uncappedDepth(params.maxDepth, "maxDepth");
+	const effectiveDepth = depthLimit ?? (recursive ? Number.POSITIVE_INFINITY : 1);
+	const useFastPath = effectiveDepth === 1;
 	await ensureDirectory(dirAbs);
 	if (checkAborted(signal)) return { ok: false, mode: "ls", error: "Aborted", aborted: true };
 
 	let nodes: TreeNode[];
-	if (!recursive && maxDepth <= 1) {
+	if (effectiveDepth < 1) {
+		nodes = [];
+	} else if (useFastPath) {
 		let dirents;
 		try {
 			dirents = await readdir(dirAbs, { withFileTypes: true });
@@ -641,7 +654,7 @@ async function doLs(
 	} else {
 		nodes = await collectTree(dirAbs, {
 			includeHidden: true,
-			maxDepth,
+			maxDepth: effectiveDepth,
 			ignoreRules: [],
 			skipGitDir: false,
 			includeDirs: true,
@@ -650,15 +663,12 @@ async function doLs(
 		});
 		nodes.sort((a, b) => a.relPath.localeCompare(b.relPath));
 	}
-
-	const maxResults = clampCount(params.maxResults, MAX_RESULTS_HARD);
-	const totalCount = nodes.length;
-	const page = maxResults === Number.POSITIVE_INFINITY ? nodes : nodes.slice(0, maxResults);
+	nodes = nodes.slice(0, limit);
 
 	let entries: LsEntry[];
 	if (!long) {
 		// Dirent only — no stat calls.
-		entries = page.map((node) => ({
+		entries = nodes.map((node) => ({
 			name: basename(node.absPath),
 			path: node.absPath,
 			type: node.isBrokenLink ? ("symlink" as const) : node.isDirectory ? ("dir" as const) : ("file" as const),
@@ -666,7 +676,7 @@ async function doLs(
 			mtime: null,
 		}));
 	} else {
-		const stats = await mapSettled(page, CONCURRENCY, async (node) => {
+		const stats = await mapSettled(nodes, CONCURRENCY, async (node) => {
 			try {
 				return await stat(node.absPath);
 			} catch (error) {
@@ -674,7 +684,7 @@ async function doLs(
 				throw error;
 			}
 		});
-		entries = page.map((node, i) => {
+		entries = nodes.map((node, i) => {
 			const s = stats[i];
 			return {
 				name: basename(node.absPath),
@@ -697,8 +707,6 @@ async function doLs(
 		mode: "ls",
 		path: dirAbs,
 		entries,
-		truncated: totalCount > entries.length,
-		totalCount,
 		aborted: checkAborted(signal),
 	};
 }
@@ -717,7 +725,9 @@ async function doFind(
 ): Promise<Record<string, unknown>> {
 	const root = resolveBase(params.root, sessionCwd, ".");
 	const kind = params.type ?? "both";
-	const maxDepth = clampDepth(params.maxDepth, MAX_DEPTH_HARD);
+	const depthLimit = params.maxDepth === undefined ? undefined : uncappedDepth(params.maxDepth, "maxDepth");
+	const limit = uncappedCount(params.maxResults, "maxResults");
+	const effectiveDepth = depthLimit ?? Number.POSITIVE_INFINITY;
 	await ensureDirectory(root);
 	if (checkAborted(signal)) return { ok: false, mode: "find", error: "Aborted", aborted: true };
 
@@ -738,7 +748,7 @@ async function doFind(
 	const nodes = (
 		await collectTree(root, {
 			includeHidden: true,
-			maxDepth,
+			maxDepth: effectiveDepth,
 			ignoreRules: [],
 			skipGitDir: false,
 			includeDirs: wantsDirs,
@@ -787,16 +797,12 @@ async function doFind(
 		});
 	}
 	entries.sort((a, b) => a.path.localeCompare(b.path));
-	const totalCount = entries.length;
-	const maxResults = clampCount(params.maxResults, MAX_RESULTS_HARD);
-	const page = maxResults === Number.POSITIVE_INFINITY ? entries : entries.slice(0, maxResults);
+	const limited = entries.slice(0, limit);
 	return {
 		ok: true,
 		mode: "find",
 		root,
-		entries: page,
-		truncated: totalCount > page.length,
-		totalCount,
+		entries: limited,
 		aborted: checkAborted(signal),
 	};
 }
@@ -818,10 +824,10 @@ async function doGrep(
 	const root = resolveBase(params.root, sessionCwd, ".");
 	const useRegex = params.regex ?? false;
 	const caseSensitive = params.caseSensitive ?? true;
-	const maxMatches = clampCount(params.maxMatches, 500);
-	const maxFileSize = clampFileBytes(params.maxFileSize, MAX_FILE_BYTES_HARD);
-	const beforeLines = Math.max(0, Math.min(50, params.beforeContext ?? 0));
-	const afterLines = Math.max(0, Math.min(50, params.afterContext ?? 0));
+	const matchLimit = uncappedCount(params.maxMatches, "maxMatches");
+	const fileSizeLimit = uncappedCount(params.maxFileSize, "maxFileSize");
+	const beforeLines = uncappedContext(params.beforeContext, "beforeContext");
+	const afterLines = uncappedContext(params.afterContext, "afterContext");
 	await ensureDirectory(root);
 	if (checkAborted(signal)) return { ok: false, mode: "grep", error: "Aborted", aborted: true };
 
@@ -839,7 +845,7 @@ async function doGrep(
 	const includeMatcher = params.include !== undefined ? globToRegExp(params.include) : undefined;
 	const nodes = await collectTree(root, {
 		includeHidden: true,
-		maxDepth: MAX_DEPTH_HARD,
+		maxDepth: Number.POSITIVE_INFINITY,
 		ignoreRules: [],
 		skipGitDir: true, // .git objects are compressed binaries; never useful hits
 		includeDirs: false,
@@ -855,14 +861,11 @@ async function doGrep(
 
 	const matches: GrepMatch[] = [];
 	let filesSearched = 0;
-	let candidatesScanned = 0;
-	let skippedTooLarge = 0;
 	let skippedBinary = 0;
 	let skippedUnreadable = 0;
-	let truncated = false;
 
-	for (let i = 0; i < candidates.length; i += CONCURRENCY) {
-		if (checkAborted(signal) || matches.length >= maxMatches) break;
+	for (let i = 0; i < candidates.length && matches.length < matchLimit; i += CONCURRENCY) {
+		if (checkAborted(signal)) break;
 		const chunk = candidates.slice(i, i + CONCURRENCY);
 		const settled = await Promise.allSettled(
 			chunk.map(async (node) => {
@@ -874,8 +877,7 @@ async function doGrep(
 					throw error;
 				}
 				if (!s.isFile()) return { status: "unreadable" as const };
-				const uncappedBytes = maxFileSize === Number.POSITIVE_INFINITY;
-				if (!uncappedBytes && s.size > maxFileSize) return { status: "tooLarge" as const };
+				if (s.size > fileSizeLimit) return { status: "skipped" as const };
 				let buf: Buffer;
 				try {
 					buf = await readFile(node.absPath);
@@ -884,26 +886,15 @@ async function doGrep(
 					throw error;
 				}
 				if (isBinaryBuffer(buf)) return { status: "binary" as const };
-				if (!uncappedBytes && buf.length > maxFileSize) return { status: "tooLarge" as const };
-				
 				return { status: "ok" as const, text: buf.toString("utf8"), file: node.absPath };
 			}),
 		);
 		for (const result of settled) {
-			if (matches.length >= maxMatches) {
-				truncated = true;
-			break;
-			}
-			candidatesScanned += 1;
 			if (result.status !== "fulfilled") {
 				skippedUnreadable += 1;
 				continue;
 			}
 			const value = result.value;
-			if (value.status === "tooLarge") {
-				skippedTooLarge += 1;
-				continue;
-			}
 			if (value.status === "binary") {
 				skippedBinary += 1;
 				continue;
@@ -912,13 +903,12 @@ async function doGrep(
 				skippedUnreadable += 1;
 				continue;
 			}
+			if (value.status === "skipped") {
+				continue;
+			}
 			filesSearched += 1;
 			const lines = value.text.split("\n");
-			for (let lineIdx = 0; lineIdx < lines.length; lineIdx += 1) {
-				if (matches.length >= maxMatches) {
-					truncated = true;
-					break;
-				}
+			for (let lineIdx = 0; lineIdx < lines.length && matches.length < matchLimit; lineIdx += 1) {
 				const line = lines[lineIdx].replace(/\r$/, "");
 				let column = -1;
 				if (lineRegex !== undefined) {
@@ -948,21 +938,14 @@ async function doGrep(
 		}
 	}
 
-	const totalMatches = matches.length;
-	const stoppedEarly = candidatesScanned < candidates.length || checkAborted(signal) === true;
-	if (!truncated && stoppedEarly && (totalMatches >= maxMatches || checkAborted(signal) === true)) {
-		truncated = true;
-	}
 	return {
 		ok: true,
 		mode: "grep",
 		pattern: params.pattern,
 		root,
-		matches,
-		truncated,
-		totalMatches,
+		matches: matches.slice(0, matchLimit),
 		filesSearched,
-		skipped: { tooLarge: skippedTooLarge, binary: skippedBinary, unreadable: skippedUnreadable },
+		skipped: { binary: skippedBinary, unreadable: skippedUnreadable },
 		aborted: checkAborted(signal),
 	};
 }
@@ -1008,7 +991,7 @@ function steeringForBash(command: string): string | undefined {
 		return 'Use file-search-tool(mode="find", root="<dir>", namePattern="<glob>") instead of `find` (single walk, inline filters).';
 	}
 	if (prog === "grep" || prog === "rg" || prog === "ag") {
-		return 'Use file-search-tool(mode="grep", pattern="<text>", root="<dir>") instead of `grep`/`rg`/`ag` (defaults capped at 500 matches/64KB, pass -1 for uncapped, redacted, structured; uncapped may return very large output / use large memory, prefer capped defaults).';
+		return 'Use file-search-tool(mode="grep", pattern="<text>", root="<dir>") instead of `grep`/`rg`/`ag` (full unbounded structured results, redacted; output may be very large).';
 	}
 	if (prog === "glob") {
 		return 'Use file-search-tool(mode="glob", pattern="<glob>", cwd="<dir>") instead of shell globbing.';
@@ -1033,7 +1016,7 @@ export default function (pi: ExtensionAPI): void {
 			"Use mode='glob' to match path patterns, mode='ls' to list a directory (recursive=true to walk), " +
 			"mode='find' to filter entries by name/size/mtime, mode='grep' to search file contents. " +
 			"Prefer this over bash ls/find/grep/rg/ag for exploration. " +
-			"Defaults capped at 500 entries (grep: 500 matches, 64KB max file); pass -1 for uncapped maxResults/maxMatches/maxFileSize. Uncapped may return very large output / use large memory; prefer capped defaults. Secrets are masked in output.",
+			"Returns full unbounded results; output may be very large. Limits such as maxResults/maxMatches/maxFileSize are unbounded (omit for all); negative values including -1 are invalid. Secrets are masked in output.",
 		parameters: FileToolParameters,
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			void toolCallId;
